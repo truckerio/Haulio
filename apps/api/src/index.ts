@@ -17,6 +17,7 @@ import {
   DocType,
   DriverDocType,
   LoadStatus,
+  LoadConfirmationStatus,
   StopType,
   LegType,
   LegStatus,
@@ -39,7 +40,15 @@ import {
 import { createSession, setSessionCookie, clearSessionCookie, requireAuth, destroySession } from "./lib/auth";
 import { createCsrfToken, setCsrfCookie, requireCsrf } from "./lib/csrf";
 import { requireRole } from "./lib/rbac";
-import { upload, saveDocumentFile, ensureUploadDirs, getUploadDir, resolveUploadPath, toRelativeUploadPath } from "./lib/uploads";
+import {
+  upload,
+  saveDocumentFile,
+  saveLoadConfirmationFile,
+  ensureUploadDirs,
+  getUploadDir,
+  resolveUploadPath,
+  toRelativeUploadPath,
+} from "./lib/uploads";
 import { logAudit } from "./lib/audit";
 import { createEvent } from "./lib/events";
 import { completeTask, calculateStorageCharge, ensureTask } from "./lib/tasks";
@@ -62,6 +71,89 @@ const RESET_TOKEN_TTL_MINUTES = 60;
 
 function hashToken(token: string) {
   return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function normalizeReference(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return null;
+  if (trimmed.length > 64) {
+    throw new Error("Reference number must be 64 characters or less");
+  }
+  return trimmed;
+}
+
+function parseOptionalNonNegativeInt(value: unknown, label: string) {
+  if (value === undefined || value === null || value === "") return null;
+  const num = typeof value === "string" ? Number(value) : value;
+  if (!Number.isFinite(num) || !Number.isInteger(num) || num < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return num as number;
+}
+
+type DraftStop = {
+  type: "PICKUP" | "DELIVERY";
+  name: string;
+  address1: string;
+  city: string;
+  state: string;
+  zip: string;
+  apptStart?: string | null;
+  apptEnd?: string | null;
+  notes?: string | null;
+};
+
+type DraftLoad = {
+  loadNumber: string | null;
+  shipperReferenceNumber: string | null;
+  consigneeReferenceNumber: string | null;
+  palletCount: number | null;
+  weightLbs: number | null;
+  stops: DraftStop[];
+};
+
+function normalizeDraftText(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.trim();
+}
+
+function normalizeDraftStop(stop: any): DraftStop {
+  return {
+    type: stop?.type === "DELIVERY" ? "DELIVERY" : "PICKUP",
+    name: normalizeDraftText(stop?.name),
+    address1: normalizeDraftText(stop?.address1),
+    city: normalizeDraftText(stop?.city),
+    state: normalizeDraftText(stop?.state),
+    zip: normalizeDraftText(stop?.zip),
+    apptStart: normalizeDraftText(stop?.apptStart) || null,
+    apptEnd: normalizeDraftText(stop?.apptEnd) || null,
+    notes: normalizeDraftText(stop?.notes) || null,
+  };
+}
+
+function normalizeLoadDraft(raw: any): DraftLoad {
+  const stops = Array.isArray(raw?.stops) ? raw.stops.map(normalizeDraftStop) : [];
+  return {
+    loadNumber: normalizeDraftText(raw?.loadNumber) || null,
+    shipperReferenceNumber: normalizeReference(raw?.shipperReferenceNumber ?? null),
+    consigneeReferenceNumber: normalizeReference(raw?.consigneeReferenceNumber ?? null),
+    palletCount: parseOptionalNonNegativeInt(raw?.palletCount, "Pallet count"),
+    weightLbs: parseOptionalNonNegativeInt(raw?.weightLbs, "Weight (lbs)"),
+    stops,
+  };
+}
+
+function isDraftReady(draft: DraftLoad) {
+  if (!draft.loadNumber || draft.loadNumber.length < 2) return false;
+  if (!draft.stops || draft.stops.length < 2) return false;
+  return draft.stops.every(
+    (stop) =>
+      stop.name.length > 0 &&
+      stop.address1.length > 0 &&
+      stop.city.length > 0 &&
+      stop.state.length > 0 &&
+      stop.zip.length > 0
+  );
 }
 
 app.use(helmet());
@@ -674,6 +766,301 @@ app.get("/loads/:id/timeline", requireAuth, async (req, res) => {
   res.json({ load, timeline: items });
 });
 
+app.post(
+  ["/load-confirmations/upload", "/api/load-confirmations/upload"],
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER"),
+  upload.array("files", 12),
+  async (req, res) => {
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length === 0) {
+      res.status(400).json({ error: "No files uploaded" });
+      return;
+    }
+    const docs = [];
+    for (const file of files) {
+      const sha256 = crypto.createHash("sha256").update(file.buffer).digest("hex");
+      const existing = await prisma.loadConfirmationDocument.findFirst({
+        where: {
+          orgId: req.user!.orgId,
+          sha256,
+          status: { in: [LoadConfirmationStatus.CREATED, LoadConfirmationStatus.READY_TO_CREATE] },
+        },
+      });
+      if (existing) {
+        docs.push(existing);
+        continue;
+      }
+
+      const pending = await prisma.loadConfirmationDocument.create({
+        data: {
+          orgId: req.user!.orgId,
+          uploadedByUserId: req.user!.id,
+          filename: file.originalname || "load-confirmation",
+          contentType: file.mimetype,
+          sizeBytes: file.size,
+          storageKey: "pending",
+          sha256,
+          status: LoadConfirmationStatus.UPLOADED,
+        },
+      });
+      const saved = await saveLoadConfirmationFile(file, req.user!.orgId, pending.id);
+      const doc = await prisma.loadConfirmationDocument.update({
+        where: { id: pending.id },
+        data: { filename: saved.filename, storageKey: saved.storageKey },
+      });
+      await prisma.loadConfirmationExtractEvent.create({
+        data: {
+          orgId: req.user!.orgId,
+          docId: doc.id,
+          type: "UPLOADED",
+          message: "Load confirmation uploaded",
+        },
+      });
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "LOAD_CONFIRMATION_UPLOADED",
+        entity: "LoadConfirmationDocument",
+        entityId: doc.id,
+        summary: `Uploaded load confirmation ${doc.filename}`,
+        meta: { sha256 },
+      });
+      docs.push(doc);
+    }
+    res.json({ docs });
+  }
+);
+
+app.get(
+  ["/load-confirmations", "/api/load-confirmations"],
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const statusParam = typeof req.query.status === "string" ? req.query.status.trim() : "";
+    const status = Object.values(LoadConfirmationStatus).includes(statusParam as LoadConfirmationStatus)
+      ? (statusParam as LoadConfirmationStatus)
+      : undefined;
+    const docs = await prisma.loadConfirmationDocument.findMany({
+      where: { orgId: req.user!.orgId, status },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ docs });
+  }
+);
+
+app.get(
+  ["/load-confirmations/:id", "/api/load-confirmations/:id"],
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const doc = await prisma.loadConfirmationDocument.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { createdLoad: true, uploadedBy: true },
+    });
+    if (!doc) {
+      res.status(404).json({ error: "Load confirmation not found" });
+      return;
+    }
+    res.json({ doc });
+  }
+);
+
+app.get(
+  ["/load-confirmations/:id/file", "/api/load-confirmations/:id/file"],
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const doc = await prisma.loadConfirmationDocument.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+    });
+    if (!doc) {
+      res.status(404).json({ error: "Load confirmation not found" });
+      return;
+    }
+    let filePath: string;
+    try {
+      filePath = resolveUploadPath(doc.storageKey);
+    } catch {
+      res.status(400).json({ error: "Invalid file path" });
+      return;
+    }
+    if (doc.contentType) {
+      res.setHeader("Content-Type", doc.contentType);
+    }
+    res.sendFile(filePath);
+  }
+);
+
+app.patch(
+  ["/load-confirmations/:id/draft", "/api/load-confirmations/:id/draft"],
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER"),
+  async (req, res) => {
+    const rawDraft = req.body?.draft ?? req.body;
+    const existing = await prisma.loadConfirmationDocument.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Load confirmation not found" });
+      return;
+    }
+    let normalizedDraft: DraftLoad;
+    try {
+      normalizedDraft = normalizeLoadDraft(rawDraft);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+    const ready = isDraftReady(normalizedDraft);
+    const doc = await prisma.loadConfirmationDocument.update({
+      where: { id: existing.id },
+      data: {
+        normalizedDraft,
+        status: ready ? LoadConfirmationStatus.READY_TO_CREATE : LoadConfirmationStatus.NEEDS_REVIEW,
+        errorMessage: ready ? null : "Review required",
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "LOAD_CONFIRMATION_DRAFT_EDITED",
+      entity: "LoadConfirmationDocument",
+      entityId: doc.id,
+      summary: `Draft updated for ${doc.filename}`,
+      meta: { ready },
+    });
+    res.json({ doc, ready });
+  }
+);
+
+app.post(
+  ["/load-confirmations/:id/create-load", "/api/load-confirmations/:id/create-load"],
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER"),
+  requirePermission(Permission.LOAD_CREATE),
+  async (req, res) => {
+    const doc = await prisma.loadConfirmationDocument.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+    });
+    if (!doc) {
+      res.status(404).json({ error: "Load confirmation not found" });
+      return;
+    }
+    if (doc.status === LoadConfirmationStatus.CREATED && doc.createdLoadId) {
+      res.json({ loadId: doc.createdLoadId });
+      return;
+    }
+    if (!doc.normalizedDraft) {
+      res.status(400).json({ error: "Draft missing" });
+      return;
+    }
+    let draft: DraftLoad;
+    try {
+      draft = normalizeLoadDraft(doc.normalizedDraft);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+    if (!isDraftReady(draft)) {
+      res.status(400).json({ error: "Draft is incomplete" });
+      return;
+    }
+
+    const existing = await prisma.load.findFirst({
+      where: { orgId: req.user!.orgId, loadNumber: draft.loadNumber ?? "" },
+      select: { id: true },
+    });
+    if (existing) {
+      res.status(409).json({ error: "Load number already exists" });
+      return;
+    }
+
+    const shipperName = draft.stops.find((stop) => stop.type === "PICKUP")?.name || "Unknown";
+    const [customerRecord] = await prisma.customer.findMany({
+      where: { orgId: req.user!.orgId, name: shipperName },
+      take: 1,
+    });
+    const customerId = customerRecord
+      ? customerRecord.id
+      : (
+          await prisma.customer.create({
+            data: { orgId: req.user!.orgId, name: shipperName },
+          })
+        ).id;
+
+    const toDate = (value?: string | null) => {
+      if (!value) return null;
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? null : date;
+    };
+
+    const load = await prisma.$transaction(async (tx) => {
+      const created = await tx.load.create({
+        data: {
+          orgId: req.user!.orgId,
+          loadNumber: draft.loadNumber!,
+          customerId,
+          customerName: shipperName,
+          shipperReferenceNumber: draft.shipperReferenceNumber,
+          consigneeReferenceNumber: draft.consigneeReferenceNumber,
+          palletCount: draft.palletCount,
+          weightLbs: draft.weightLbs,
+          createdById: req.user!.id,
+          stops: {
+            create: draft.stops.map((stop, index) => ({
+              orgId: req.user!.orgId,
+              type: stop.type,
+              name: stop.name,
+              address: stop.address1,
+              city: stop.city,
+              state: stop.state,
+              zip: stop.zip,
+              notes: stop.notes ?? null,
+              appointmentStart: toDate(stop.apptStart),
+              appointmentEnd: toDate(stop.apptEnd),
+              sequence: index + 1,
+            })),
+          },
+        },
+      });
+      await tx.loadConfirmationDocument.update({
+        where: { id: doc.id },
+        data: {
+          status: LoadConfirmationStatus.CREATED,
+          createdLoadId: created.id,
+          errorMessage: null,
+        },
+      });
+      return created;
+    });
+
+    await createEvent({
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      userId: req.user!.id,
+      type: EventType.LOAD_CREATED,
+      message: `Load ${load.loadNumber} created from confirmation`,
+      meta: { loadConfirmationId: doc.id },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "LOAD_CONFIRMATION_CREATED",
+      entity: "LoadConfirmationDocument",
+      entityId: doc.id,
+      summary: `Created load ${load.loadNumber} from confirmation`,
+      meta: { loadId: load.id },
+    });
+
+    res.json({ loadId: load.id });
+  }
+);
+
 app.post("/loads/:id/legs", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
   const schema = z.object({
     type: z.enum(["PICKUP", "LINEHAUL", "DELIVERY"]),
@@ -1079,6 +1466,10 @@ app.post("/loads", requireAuth, requireCsrf, requirePermission(Permission.LOAD_C
     customerName: z.string().optional(),
     customerRef: z.string().optional(),
     bolNumber: z.string().optional(),
+    shipperReferenceNumber: z.string().max(64).optional(),
+    consigneeReferenceNumber: z.string().max(64).optional(),
+    palletCount: z.union([z.number(), z.string()]).optional(),
+    weightLbs: z.union([z.number(), z.string()]).optional(),
     rate: z.union([z.number(), z.string()]).optional(),
     miles: z.number().optional(),
     stops: z
@@ -1133,6 +1524,20 @@ app.post("/loads", requireAuth, requireCsrf, requirePermission(Permission.LOAD_C
     customerId = created.id;
   }
 
+  let shipperReferenceNumber: string | null = null;
+  let consigneeReferenceNumber: string | null = null;
+  let palletCount: number | null = null;
+  let weightLbs: number | null = null;
+  try {
+    shipperReferenceNumber = normalizeReference(parsed.data.shipperReferenceNumber ?? null);
+    consigneeReferenceNumber = normalizeReference(parsed.data.consigneeReferenceNumber ?? null);
+    palletCount = parseOptionalNonNegativeInt(parsed.data.palletCount, "Pallet count");
+    weightLbs = parseOptionalNonNegativeInt(parsed.data.weightLbs, "Weight (lbs)");
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+    return;
+  }
+
   const load = await prisma.load.create({
     data: {
       orgId: req.user!.orgId,
@@ -1141,6 +1546,10 @@ app.post("/loads", requireAuth, requireCsrf, requirePermission(Permission.LOAD_C
       customerName,
       customerRef: parsed.data.customerRef ?? null,
       bolNumber: parsed.data.bolNumber ?? null,
+      shipperReferenceNumber,
+      consigneeReferenceNumber,
+      palletCount,
+      weightLbs,
       rate: toDecimal(parsed.data.rate),
       miles: parsed.data.miles,
       createdById: req.user!.id,
@@ -1187,6 +1596,10 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     customerName: z.string().min(2).optional(),
     customerRef: z.string().optional(),
     bolNumber: z.string().optional(),
+    shipperReferenceNumber: z.string().max(64).optional(),
+    consigneeReferenceNumber: z.string().max(64).optional(),
+    palletCount: z.union([z.number(), z.string()]).optional(),
+    weightLbs: z.union([z.number(), z.string()]).optional(),
     rate: z.union([z.number(), z.string()]).optional(),
     miles: z.number().optional(),
     status: z.enum(["PLANNED", "ASSIGNED", "IN_TRANSIT", "DELIVERED", "READY_TO_INVOICE", "INVOICED"]).optional(),
@@ -1214,6 +1627,10 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
   if (parsed.data.customerId !== undefined || parsed.data.customerName !== undefined) lockedFieldsChanged.push("customer");
   if (parsed.data.customerRef !== undefined) lockedFieldsChanged.push("customerRef");
   if (parsed.data.bolNumber !== undefined) lockedFieldsChanged.push("bolNumber");
+  if (parsed.data.shipperReferenceNumber !== undefined) lockedFieldsChanged.push("shipperReferenceNumber");
+  if (parsed.data.consigneeReferenceNumber !== undefined) lockedFieldsChanged.push("consigneeReferenceNumber");
+  if (parsed.data.palletCount !== undefined) lockedFieldsChanged.push("palletCount");
+  if (parsed.data.weightLbs !== undefined) lockedFieldsChanged.push("weightLbs");
   if (parsed.data.miles !== undefined) lockedFieldsChanged.push("miles");
   const attemptingLockedEdit = existing.lockedAt && lockedFieldsChanged.length > 0;
   if (attemptingLockedEdit && req.user!.role !== "ADMIN") {
@@ -1252,6 +1669,29 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     customerId = existing.customerId ?? null;
     customerName = existing.customerName ?? null;
   }
+
+  let shipperReferenceNumber: string | null | undefined = undefined;
+  let consigneeReferenceNumber: string | null | undefined = undefined;
+  let palletCount: number | null | undefined = undefined;
+  let weightLbs: number | null | undefined = undefined;
+  try {
+    if (parsed.data.shipperReferenceNumber !== undefined) {
+      shipperReferenceNumber = normalizeReference(parsed.data.shipperReferenceNumber ?? null);
+    }
+    if (parsed.data.consigneeReferenceNumber !== undefined) {
+      consigneeReferenceNumber = normalizeReference(parsed.data.consigneeReferenceNumber ?? null);
+    }
+    if (parsed.data.palletCount !== undefined) {
+      palletCount = parseOptionalNonNegativeInt(parsed.data.palletCount, "Pallet count");
+    }
+    if (parsed.data.weightLbs !== undefined) {
+      weightLbs = parseOptionalNonNegativeInt(parsed.data.weightLbs, "Weight (lbs)");
+    }
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+    return;
+  }
+
   const load = await prisma.load.update({
     where: { id: existing.id },
     data: {
@@ -1259,6 +1699,12 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       customerName,
       customerRef: parsed.data.customerRef ?? existing.customerRef ?? null,
       bolNumber: parsed.data.bolNumber ?? existing.bolNumber ?? null,
+      shipperReferenceNumber:
+        shipperReferenceNumber !== undefined ? shipperReferenceNumber : existing.shipperReferenceNumber ?? null,
+      consigneeReferenceNumber:
+        consigneeReferenceNumber !== undefined ? consigneeReferenceNumber : existing.consigneeReferenceNumber ?? null,
+      palletCount: palletCount !== undefined ? palletCount : existing.palletCount ?? null,
+      weightLbs: weightLbs !== undefined ? weightLbs : existing.weightLbs ?? null,
       rate: parsed.data.rate !== undefined ? toDecimal(parsed.data.rate) : undefined,
       miles: parsed.data.miles,
       status: parsed.data.status,
@@ -2087,7 +2533,7 @@ app.post("/docs/:id/verify", requireAuth, requireCsrf, requirePermission(Permiss
     return;
   }
   if (settings.podRequireDeliveryDate && !parsed.data.requireDeliveryDate) {
-    res.status(400).json({ error: "Delivery date required" });
+    res.status(400).json({ error: "Consignee date required" });
     return;
   }
   if (parsed.data.pages < settings.podMinPages) {
@@ -3592,6 +4038,19 @@ app.post(
       const assignedDriverId = driverEmail ? driverMap.get(driverEmail) : undefined;
       const status = row.status?.trim() || (assignedDriverId ? "ASSIGNED" : "PLANNED");
       const rateValue = toNumber(row.rate ?? "") ?? undefined;
+      let shipperReferenceNumber: string | null = null;
+      let consigneeReferenceNumber: string | null = null;
+      let palletCount: number | null = null;
+      let weightLbs: number | null = null;
+      try {
+        shipperReferenceNumber = normalizeReference(row.shipperReferenceNumber ?? "");
+        consigneeReferenceNumber = normalizeReference(row.consigneeReferenceNumber ?? "");
+        palletCount = parseOptionalNonNegativeInt(row.palletCount ?? "", "Pallet count");
+        weightLbs = parseOptionalNonNegativeInt(row.weightLbs ?? "", "Weight (lbs)");
+      } catch (error) {
+        res.status(400).json({ error: (error as Error).message, loadNumber });
+        return;
+      }
 
       const load = await prisma.load.create({
         data: {
@@ -3599,6 +4058,10 @@ app.post(
           loadNumber,
           customerId,
           customerName,
+          shipperReferenceNumber,
+          consigneeReferenceNumber,
+          palletCount,
+          weightLbs,
           miles: toNumber(row.miles ?? "") ?? undefined,
           rate: rateValue !== undefined ? new Prisma.Decimal(rateValue) : undefined,
           assignedDriverId: assignedDriverId ?? null,

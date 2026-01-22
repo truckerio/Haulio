@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { prisma, TaskPriority, TaskType, InvoiceStatus, StopType } from "@truckerio/db";
+import { processLoadConfirmations } from "./load-confirmations";
 
 const parseTermsDays = (value?: string | null) => {
   if (!value) return null;
@@ -159,6 +160,7 @@ async function runLoop() {
     await ensureMissingPodTasks();
     await ensureInvoiceAgingTasks();
     await ensureComplianceTasks();
+    await processLoadConfirmations();
   } catch (error) {
     console.error("Worker error", error);
   }

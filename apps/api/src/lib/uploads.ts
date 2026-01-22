@@ -50,6 +50,7 @@ export async function ensureUploadDirs() {
   await fs.mkdir(path.join(base, "docs"), { recursive: true });
   await fs.mkdir(path.join(base, "invoices"), { recursive: true });
   await fs.mkdir(path.join(base, "packets"), { recursive: true });
+  await fs.mkdir(path.join(base, "org"), { recursive: true });
 }
 
 export function toRelativeUploadPath(absOrRelPath: string) {
@@ -107,4 +108,15 @@ export async function saveDocumentFile(file: Express.Multer.File, loadId: string
   const target = resolveUploadPath(path.posix.join("docs", filename));
   await fs.writeFile(target, file.buffer);
   return { filename, target };
+}
+
+export async function saveLoadConfirmationFile(file: Express.Multer.File, orgId: string, docId: string) {
+  await ensureUploadDirs();
+  const original = file.originalname || "load-confirmation";
+  const safeName = path.basename(original).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const storageKey = path.posix.join("org", orgId, "load-confirmations", docId, safeName);
+  const target = resolveUploadPath(storageKey);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, file.buffer);
+  return { filename: safeName, storageKey };
 }
