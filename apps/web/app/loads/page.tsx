@@ -28,6 +28,10 @@ export default function LoadsPage() {
     customerName: "",
     customerRef: "",
     bolNumber: "",
+    shipperReferenceNumber: "",
+    consigneeReferenceNumber: "",
+    palletCount: "",
+    weightLbs: "",
     rate: "",
     miles: "",
     pickupName: "",
@@ -136,6 +140,10 @@ export default function LoadsPage() {
         customerName: form.customerName,
         customerRef: form.customerRef,
         bolNumber: form.bolNumber,
+        shipperReferenceNumber: form.shipperReferenceNumber,
+        consigneeReferenceNumber: form.consigneeReferenceNumber,
+        palletCount: form.palletCount ? Number(form.palletCount) : undefined,
+        weightLbs: form.weightLbs ? Number(form.weightLbs) : undefined,
         rate: form.rate ? Number(form.rate) : undefined,
         miles: form.miles ? Number(form.miles) : undefined,
         stops,
@@ -146,6 +154,10 @@ export default function LoadsPage() {
       customerName: "",
       customerRef: "",
       bolNumber: "",
+      shipperReferenceNumber: "",
+      consigneeReferenceNumber: "",
+      palletCount: "",
+      weightLbs: "",
       rate: "",
       miles: "",
       pickupName: "",
@@ -181,6 +193,9 @@ export default function LoadsPage() {
           </Button>
           <span className="text-xs text-black/50">Upload loads.csv + stops.csv</span>
         </div>
+        <Button variant="secondary" onClick={() => (window.location.href = "/loads/confirmations")}>
+          Import load confirmations
+        </Button>
       </div>
       {showImport ? <BulkLoadImport onImported={loadData} /> : null}
       <Card className="space-y-4">
@@ -193,17 +208,39 @@ export default function LoadsPage() {
           <Input placeholder="Miles" value={form.miles} onChange={(e) => setForm({ ...form, miles: e.target.value })} />
           <Input placeholder="BOL number" value={form.bolNumber} onChange={(e) => setForm({ ...form, bolNumber: e.target.value })} />
         </div>
+        <div className="grid gap-3 lg:grid-cols-4">
+          <Input
+            placeholder="Shipper reference #"
+            value={form.shipperReferenceNumber}
+            onChange={(e) => setForm({ ...form, shipperReferenceNumber: e.target.value })}
+          />
+          <Input
+            placeholder="Consignee reference #"
+            value={form.consigneeReferenceNumber}
+            onChange={(e) => setForm({ ...form, consigneeReferenceNumber: e.target.value })}
+          />
+          <Input
+            placeholder="Pallet count"
+            value={form.palletCount}
+            onChange={(e) => setForm({ ...form, palletCount: e.target.value })}
+          />
+          <Input
+            placeholder="Weight (lbs)"
+            value={form.weightLbs}
+            onChange={(e) => setForm({ ...form, weightLbs: e.target.value })}
+          />
+        </div>
         <div className="grid gap-3 lg:grid-cols-2">
-          <Input placeholder="Pickup name" value={form.pickupName} onChange={(e) => setForm({ ...form, pickupName: e.target.value })} />
-          <Input placeholder="Delivery name" value={form.deliveryName} onChange={(e) => setForm({ ...form, deliveryName: e.target.value })} />
-          <Input placeholder="Pickup address" value={form.pickupAddress} onChange={(e) => setForm({ ...form, pickupAddress: e.target.value })} />
-          <Input placeholder="Delivery address" value={form.deliveryAddress} onChange={(e) => setForm({ ...form, deliveryAddress: e.target.value })} />
-          <Input placeholder="Pickup city" value={form.pickupCity} onChange={(e) => setForm({ ...form, pickupCity: e.target.value })} />
-          <Input placeholder="Delivery city" value={form.deliveryCity} onChange={(e) => setForm({ ...form, deliveryCity: e.target.value })} />
-          <Input placeholder="Pickup state" value={form.pickupState} onChange={(e) => setForm({ ...form, pickupState: e.target.value })} />
-          <Input placeholder="Delivery state" value={form.deliveryState} onChange={(e) => setForm({ ...form, deliveryState: e.target.value })} />
-          <Input placeholder="Pickup zip" value={form.pickupZip} onChange={(e) => setForm({ ...form, pickupZip: e.target.value })} />
-          <Input placeholder="Delivery zip" value={form.deliveryZip} onChange={(e) => setForm({ ...form, deliveryZip: e.target.value })} />
+          <Input placeholder="Shipper name" value={form.pickupName} onChange={(e) => setForm({ ...form, pickupName: e.target.value })} />
+          <Input placeholder="Consignee name" value={form.deliveryName} onChange={(e) => setForm({ ...form, deliveryName: e.target.value })} />
+          <Input placeholder="Shipper address" value={form.pickupAddress} onChange={(e) => setForm({ ...form, pickupAddress: e.target.value })} />
+          <Input placeholder="Consignee address" value={form.deliveryAddress} onChange={(e) => setForm({ ...form, deliveryAddress: e.target.value })} />
+          <Input placeholder="Shipper city" value={form.pickupCity} onChange={(e) => setForm({ ...form, pickupCity: e.target.value })} />
+          <Input placeholder="Consignee city" value={form.deliveryCity} onChange={(e) => setForm({ ...form, deliveryCity: e.target.value })} />
+          <Input placeholder="Shipper state" value={form.pickupState} onChange={(e) => setForm({ ...form, pickupState: e.target.value })} />
+          <Input placeholder="Consignee state" value={form.deliveryState} onChange={(e) => setForm({ ...form, deliveryState: e.target.value })} />
+          <Input placeholder="Shipper zip" value={form.pickupZip} onChange={(e) => setForm({ ...form, pickupZip: e.target.value })} />
+          <Input placeholder="Consignee zip" value={form.deliveryZip} onChange={(e) => setForm({ ...form, deliveryZip: e.target.value })} />
         </div>
         <div className="grid gap-3 lg:grid-cols-2">
           <Input placeholder="Origin yard name (optional)" value={form.originYardName} onChange={(e) => setForm({ ...form, originYardName: e.target.value })} />
@@ -319,6 +356,19 @@ export default function LoadsPage() {
                 <div className="text-sm uppercase tracking-widest text-black/50">{load.status}</div>
                 <div className="text-xl font-semibold">{load.loadNumber}</div>
                 <div className="text-sm text-black/60">{load.customer?.name ?? load.customerName}</div>
+                {load.shipperReferenceNumber || load.consigneeReferenceNumber || load.palletCount || load.weightLbs ? (
+                  <div className="text-xs text-black/50">
+                    {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : null}
+                    {load.shipperReferenceNumber && load.consigneeReferenceNumber ? " · " : null}
+                    {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : null}
+                    {(load.shipperReferenceNumber || load.consigneeReferenceNumber) && (load.palletCount || load.weightLbs)
+                      ? " · "
+                      : null}
+                    {load.palletCount !== null && load.palletCount !== undefined ? `Pallets ${load.palletCount}` : null}
+                    {load.palletCount !== null && load.palletCount !== undefined && load.weightLbs ? " · " : null}
+                    {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : null}
+                  </div>
+                ) : null}
               </div>
               <div className="text-sm text-black/60">
                 Driver: {load.driver?.name ?? "Unassigned"} · Miles: {load.miles ?? "-"} · Rate: {load.rate ?? "-"}

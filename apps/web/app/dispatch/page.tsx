@@ -261,7 +261,22 @@ export default function DispatchPage() {
             {loads.map((load) => (
               <div key={load.id} className="grid grid-cols-1 gap-2 rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm lg:grid-cols-7">
                 <div className="text-xs uppercase tracking-widest text-black/50">{load.status}</div>
-                <div className="font-semibold">{load.loadNumber}</div>
+                <div className="space-y-1">
+                  <div className="font-semibold">{load.loadNumber}</div>
+                  {load.shipperReferenceNumber || load.consigneeReferenceNumber || load.palletCount || load.weightLbs ? (
+                    <div className="text-xs text-black/50">
+                      {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : null}
+                      {load.shipperReferenceNumber && load.consigneeReferenceNumber ? " · " : null}
+                      {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : null}
+                      {(load.shipperReferenceNumber || load.consigneeReferenceNumber) && (load.palletCount || load.weightLbs)
+                        ? " · "
+                        : null}
+                      {load.palletCount !== null && load.palletCount !== undefined ? `Pallets ${load.palletCount}` : null}
+                      {load.palletCount !== null && load.palletCount !== undefined && load.weightLbs ? " · " : null}
+                      {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : null}
+                    </div>
+                  ) : null}
+                </div>
                 <div>{load.customer?.name ?? load.customerName}</div>
                 <div>{load.driver?.name ?? "Unassigned"}</div>
                 <div>{load.trailer?.unit ?? "-"}</div>
@@ -300,6 +315,19 @@ export default function DispatchPage() {
                         <div className="text-sm uppercase tracking-widest text-black/50">{load.status}</div>
                         <div className="text-xl font-semibold">{load.loadNumber}</div>
                         <div className="text-sm text-black/60">{load.customer?.name ?? load.customerName}</div>
+                        {load.shipperReferenceNumber || load.consigneeReferenceNumber || load.palletCount || load.weightLbs ? (
+                          <div className="text-xs text-black/50">
+                            {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : null}
+                            {load.shipperReferenceNumber && load.consigneeReferenceNumber ? " · " : null}
+                            {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : null}
+                            {(load.shipperReferenceNumber || load.consigneeReferenceNumber) && (load.palletCount || load.weightLbs)
+                              ? " · "
+                              : null}
+                            {load.palletCount !== null && load.palletCount !== undefined ? `Pallets ${load.palletCount}` : null}
+                            {load.palletCount !== null && load.palletCount !== undefined && load.weightLbs ? " · " : null}
+                            {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : null}
+                          </div>
+                        ) : null}
                       </div>
                       <div className="text-sm text-black/60">
                         Last update: {load.events?.[0]?.createdAt ? new Date(load.events[0].createdAt).toLocaleString() : "-"}

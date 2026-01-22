@@ -275,7 +275,7 @@ export default function AdminPage() {
               checked={Boolean(settingsDraft?.podRequireDeliveryDate)}
               onChange={(e) => setSettingsDraft({ ...settingsDraft, podRequireDeliveryDate: e.target.checked })}
             />
-            Require delivery date
+            Require consignee date
           </label>
           <Input
             placeholder="Minimum POD pages"
@@ -366,12 +366,12 @@ export default function AdminPage() {
         </div>
         <div className="grid gap-3 lg:grid-cols-2">
           <Input
-            placeholder="Pickup free detention (minutes)"
+            placeholder="Shipper free detention (minutes)"
             value={settingsDraft?.pickupFreeDetentionMinutes ?? 120}
             onChange={(e) => setSettingsDraft({ ...settingsDraft, pickupFreeDetentionMinutes: e.target.value })}
           />
           <Input
-            placeholder="Delivery free detention (minutes)"
+            placeholder="Consignee free detention (minutes)"
             value={settingsDraft?.deliveryFreeDetentionMinutes ?? 120}
             onChange={(e) => setSettingsDraft({ ...settingsDraft, deliveryFreeDetentionMinutes: e.target.value })}
           />
@@ -453,7 +453,7 @@ export default function AdminPage() {
       <Card className="space-y-4">
         <div className="text-sm uppercase tracking-widest text-black/50">Bulk load import</div>
         <div className="text-sm text-black/60">
-          Upload the CSV templates from <code>data/import</code>. Loads can include miles. Stops should follow the yard → yard → delivery pattern.
+          Upload the CSV templates from <code>data/import</code>. Loads can include miles. Stops should follow the yard → yard → consignee pattern.
         </div>
         <div className="grid gap-3 lg:grid-cols-2">
           <label className="text-sm">

@@ -1,3 +1,3 @@
-loadNumber,customerName,status,rate,miles,assignedDriverEmail,truckUnit,trailerUnit
-LD-3001,Delta Foods,PLANNED,1450,520,driver@demo.com,T-101,TR-201
-LD-3002,Northern Grain,ASSIGNED,1800,610,driver@demo.com,T-102,TR-202
+loadNumber,customerName,status,rate,miles,shipperReferenceNumber,consigneeReferenceNumber,palletCount,weightLbs,assignedDriverEmail,truckUnit,trailerUnit
+LD-3001,Delta Foods,PLANNED,1450,520,SHIP-REF-3001,CONS-REF-3001,26,42000,driver@demo.com,T-101,TR-201
+LD-3002,Northern Grain,ASSIGNED,1800,610,SHIP-REF-3002,CONS-REF-3002,22,38000,driver@demo.com,T-102,TR-202

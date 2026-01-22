@@ -88,6 +88,19 @@ export default function BillingPage() {
               <div key={load.id} className="rounded-2xl border border-black/10 bg-white/60 p-4">
                 <div className="font-semibold">{load.loadNumber}</div>
                 <div className="text-sm text-black/60">{load.customer?.name ?? load.customerName}</div>
+                {load.shipperReferenceNumber || load.consigneeReferenceNumber || load.palletCount || load.weightLbs ? (
+                  <div className="text-xs text-black/50">
+                    {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : null}
+                    {load.shipperReferenceNumber && load.consigneeReferenceNumber ? " · " : null}
+                    {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : null}
+                    {(load.shipperReferenceNumber || load.consigneeReferenceNumber) && (load.palletCount || load.weightLbs)
+                      ? " · "
+                      : null}
+                    {load.palletCount !== null && load.palletCount !== undefined ? `Pallets ${load.palletCount}` : null}
+                    {load.palletCount !== null && load.palletCount !== undefined && load.weightLbs ? " · " : null}
+                    {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : null}
+                  </div>
+                ) : null}
                 <div className="mt-3 flex flex-wrap gap-2">
                   {load.docs.map((doc: any) => (
                     <div key={doc.id} className="w-full rounded-2xl border border-black/10 bg-white/80 p-3">
@@ -133,7 +146,7 @@ export default function BillingPage() {
                               setChecklist({ ...checklist, [doc.id]: { ...checklist[doc.id], date: e.target.checked } })
                             }
                           />
-                          Delivery date present
+                          Consignee date present
                         </label>
                         <label className="flex items-center gap-2">
                           Pages
@@ -175,6 +188,19 @@ export default function BillingPage() {
               <div key={load.id} className="rounded-2xl border border-black/10 bg-white/60 p-4">
                 <div className="font-semibold">{load.loadNumber}</div>
                 <div className="text-sm text-black/60">{load.customer?.name ?? load.customerName}</div>
+                {load.shipperReferenceNumber || load.consigneeReferenceNumber || load.palletCount || load.weightLbs ? (
+                  <div className="text-xs text-black/50">
+                    {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : null}
+                    {load.shipperReferenceNumber && load.consigneeReferenceNumber ? " · " : null}
+                    {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : null}
+                    {(load.shipperReferenceNumber || load.consigneeReferenceNumber) && (load.palletCount || load.weightLbs)
+                      ? " · "
+                      : null}
+                    {load.palletCount !== null && load.palletCount !== undefined ? `Pallets ${load.palletCount}` : null}
+                    {load.palletCount !== null && load.palletCount !== undefined && load.weightLbs ? " · " : null}
+                    {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : null}
+                  </div>
+                ) : null}
                 <Button className="mt-3" onClick={() => generateInvoice(load.id)}>
                   Generate invoice
                 </Button>
@@ -190,6 +216,19 @@ export default function BillingPage() {
               <div key={load.id} className="rounded-2xl border border-black/10 bg-white/60 p-4">
                 <div className="font-semibold">{load.loadNumber}</div>
                 <div className="text-sm text-black/60">{load.customer?.name ?? load.customerName}</div>
+                {load.shipperReferenceNumber || load.consigneeReferenceNumber || load.palletCount || load.weightLbs ? (
+                  <div className="text-xs text-black/50">
+                    {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : null}
+                    {load.shipperReferenceNumber && load.consigneeReferenceNumber ? " · " : null}
+                    {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : null}
+                    {(load.shipperReferenceNumber || load.consigneeReferenceNumber) && (load.palletCount || load.weightLbs)
+                      ? " · "
+                      : null}
+                    {load.palletCount !== null && load.palletCount !== undefined ? `Pallets ${load.palletCount}` : null}
+                    {load.palletCount !== null && load.palletCount !== undefined && load.weightLbs ? " · " : null}
+                    {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : null}
+                  </div>
+                ) : null}
                 {load.invoices?.map((invoice: any) => (
                   <div key={invoice.id} className="mt-2 flex flex-wrap gap-2">
                     <div className="w-full text-xs uppercase tracking-widest text-black/50">{invoice.status}</div>

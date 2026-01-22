@@ -73,6 +73,19 @@ export default function TodayPage() {
                 <div className="text-xs uppercase tracking-widest text-black/50">{load.status}</div>
                 <div className="text-lg font-semibold">{load.loadNumber}</div>
                 <div className="text-sm text-black/60">{load.customer?.name ?? load.customerName ?? "Customer"}</div>
+                {load.shipperReferenceNumber || load.consigneeReferenceNumber || load.palletCount || load.weightLbs ? (
+                  <div className="text-xs text-black/50">
+                    {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : null}
+                    {load.shipperReferenceNumber && load.consigneeReferenceNumber ? " · " : null}
+                    {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : null}
+                    {(load.shipperReferenceNumber || load.consigneeReferenceNumber) && (load.palletCount || load.weightLbs)
+                      ? " · "
+                      : null}
+                    {load.palletCount !== null && load.palletCount !== undefined ? `Pallets ${load.palletCount}` : null}
+                    {load.palletCount !== null && load.palletCount !== undefined && load.weightLbs ? " · " : null}
+                    {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : null}
+                  </div>
+                ) : null}
               </div>
               <div className="text-sm text-black/60">
                 Driver: {load.driver?.name ?? "Unassigned"}

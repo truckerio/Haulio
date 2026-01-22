@@ -18,6 +18,10 @@ export function renderInvoiceHtml(params: {
   const delivery = params.stops.find((stop) => stop.type === "DELIVERY");
   const customerName = params.load.customer?.name ?? params.load.customerName ?? "Customer";
   const total = params.totalAmount ? formatUSD(params.totalAmount) : "0.00";
+  const shipperRef = params.load.shipperReferenceNumber;
+  const consigneeRef = params.load.consigneeReferenceNumber;
+  const palletCount = params.load.palletCount;
+  const weightLbs = params.load.weightLbs;
 
   return `
   <html>
@@ -45,18 +49,22 @@ export function renderInvoiceHtml(params: {
           <div><strong>Invoice Details</strong></div>
           <div>Load: ${params.load.loadNumber}</div>
           <div>Customer: ${customerName}</div>
+          ${shipperRef ? `<div>Shipper ref: ${shipperRef}</div>` : ""}
+          ${consigneeRef ? `<div>Consignee ref: ${consigneeRef}</div>` : ""}
+          ${palletCount !== null && palletCount !== undefined ? `<div>Pallets: ${palletCount}</div>` : ""}
+          ${weightLbs !== null && weightLbs !== undefined ? `<div>Weight: ${weightLbs} lbs</div>` : ""}
           <div>Issued: ${format(new Date(), "PPP")}</div>
           <div>Terms: ${params.settings.invoiceTerms}</div>
         </div>
       </div>
       <div class="row">
         <div class="box" style="width: 48%;">
-          <div><strong>Pickup</strong></div>
+          <div><strong>Shipper</strong></div>
           <div>${pickup?.name ?? ""}</div>
           <div class="muted">${pickup?.address ?? ""}, ${pickup?.city ?? ""} ${pickup?.state ?? ""}</div>
         </div>
         <div class="box" style="width: 48%;">
-          <div><strong>Delivery</strong></div>
+          <div><strong>Consignee</strong></div>
           <div>${delivery?.name ?? ""}</div>
           <div class="muted">${delivery?.address ?? ""}, ${delivery?.city ?? ""} ${delivery?.state ?? ""}</div>
         </div>

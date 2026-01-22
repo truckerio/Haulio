@@ -37,6 +37,17 @@ export default function LoadTimelinePage() {
         <div className="text-xs uppercase tracking-widest text-black/50">Load</div>
         <div className="text-2xl font-semibold">{load?.loadNumber ?? loadId}</div>
         <div className="text-sm text-black/60">{load?.customer?.name ?? load?.customerName ?? "Customer"}</div>
+        {load ? (
+          <div className="text-sm text-black/60">
+            {load.shipperReferenceNumber ? `Shipper ref ${load.shipperReferenceNumber}` : "Shipper ref -"}
+            {" · "}
+            {load.consigneeReferenceNumber ? `Consignee ref ${load.consigneeReferenceNumber}` : "Consignee ref -"}
+            {" · "}
+            {load.palletCount !== null && load.palletCount !== undefined ? `${load.palletCount} pallets` : "Pallets -"}
+            {" · "}
+            {load.weightLbs !== null && load.weightLbs !== undefined ? `${load.weightLbs} lbs` : "Weight -"}
+          </div>
+        ) : null}
         <Button variant="ghost" onClick={loadData}>Refresh</Button>
       </Card>
       <Card className="space-y-3">

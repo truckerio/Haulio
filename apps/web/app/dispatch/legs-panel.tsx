@@ -94,9 +94,9 @@ export function LegsPanel({
           value={form.type}
           onChange={(event) => setForm({ ...form, type: event.target.value })}
         >
-          <option value="PICKUP">Pickup leg</option>
+          <option value="PICKUP">Shipper leg</option>
           <option value="LINEHAUL">Linehaul leg</option>
-          <option value="DELIVERY">Delivery leg</option>
+          <option value="DELIVERY">Consignee leg</option>
         </select>
         <Input
           placeholder="Start stop #"

@@ -62,6 +62,19 @@ function toNumber(value: string) {
   return Number.isNaN(num) ? null : num;
 }
 
+function toInt(value: string) {
+  const num = toNumber(value);
+  if (num === null) return null;
+  if (!Number.isInteger(num) || num < 0) return null;
+  return num;
+}
+
+function normalizeReference(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length > 64 ? trimmed.slice(0, 64) : trimmed;
+}
+
 function toDate(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -148,6 +161,10 @@ async function main() {
           orgId: org.id,
           loadNumber,
           customerName: row.customerName || "Unknown",
+          shipperReferenceNumber: normalizeReference(row.shipperReferenceNumber ?? "") ?? undefined,
+          consigneeReferenceNumber: normalizeReference(row.consigneeReferenceNumber ?? "") ?? undefined,
+          palletCount: toInt(row.palletCount ?? "") ?? undefined,
+          weightLbs: toInt(row.weightLbs ?? "") ?? undefined,
           miles: toNumber(row.miles ?? "") ?? undefined,
           rate: toNumber(row.rate ?? "") ?? undefined,
           assignedDriverId: assignedDriverId ?? null,

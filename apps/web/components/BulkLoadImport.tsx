@@ -46,7 +46,7 @@ export function BulkLoadImport({ onImported }: { onImported: () => void }) {
     <Card className="space-y-4">
       <div className="text-sm uppercase tracking-widest text-black/50">Bulk load import</div>
       <div className="text-sm text-black/60">
-        Upload the CSV templates. Loads can include miles. Stops should follow yard → yard → delivery pattern.
+        Upload the CSV templates. Loads can include miles. Stops should follow yard → yard → consignee pattern.
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
         <label className="text-sm">
