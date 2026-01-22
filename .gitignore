@@ -1,0 +1,8 @@
+node_modules/
+uploads/
+.pnpm-store/
+.env
+.env.*
+.DS_Store
+!.env.example
+!.env.docker.example
