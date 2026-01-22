@@ -2,6 +2,9 @@
   "name": "@truckerio/shared",
   "private": true,
   "version": "0.1.0",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
   "dependencies": {}
 }

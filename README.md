@@ -33,6 +33,28 @@ pnpm dev:worker # Task automation worker
    docker compose -f docker-compose.demo.yml exec api pnpm db:seed
    ```
 
+## Render (Docker)
+
+Use repo root as the build context for all services.
+
+Web (Next.js):
+- Build context: `.`
+- Dockerfile: `Dockerfile.web`
+- Docker command: `next start -p $PORT`
+- Env: `NEXT_PUBLIC_API_BASE=https://<your-api-service>`
+
+API (Node/Express):
+- Build context: `.`
+- Dockerfile: `Dockerfile.api`
+- Docker command: `node apps/api/dist/index.js`
+- Env: `API_PORT=$PORT`, `WEB_ORIGIN=https://<your-web-service>`, `DATABASE_URL=...`
+
+Worker (Node):
+- Build context: `.`
+- Dockerfile: `Dockerfile.worker`
+- Docker command: `node apps/worker/dist/index.js`
+- Env: `DATABASE_URL=...`
+
 ## Custom local hostname (optional)
 
 Example: `truckerio.local`

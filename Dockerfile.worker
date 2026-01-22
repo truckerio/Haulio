@@ -1,0 +1,44 @@
+FROM node:20-bookworm-slim AS base
+
+WORKDIR /app
+
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+
+RUN corepack enable
+
+FROM base AS deps
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/shared/package.json packages/shared/package.json
+
+RUN pnpm install --frozen-lockfile
+
+FROM deps AS build
+
+COPY . .
+
+RUN pnpm --filter @truckerio/db exec prisma generate
+RUN pnpm --filter @truckerio/shared exec tsc -p packages/shared/tsconfig.json
+RUN pnpm --filter @truckerio/db exec tsc -p packages/db/tsconfig.json
+RUN pnpm --filter @truckerio/worker exec tsc -p apps/worker/tsconfig.json --module CommonJS
+
+FROM node:20-bookworm-slim AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=deps /app/node_modules /app/node_modules
+COPY --from=build /app/apps/worker/dist /app/apps/worker/dist
+COPY --from=build /app/packages/db/dist /app/packages/db/dist
+COPY --from=build /app/packages/shared/dist /app/packages/shared/dist
+COPY apps/worker/package.json apps/worker/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/shared/package.json packages/shared/package.json
+
+CMD ["node", "apps/worker/dist/index.js"]

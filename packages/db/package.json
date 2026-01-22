@@ -2,8 +2,9 @@
   "name": "@truckerio/db",
   "private": true,
   "version": "0.1.0",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "scripts": {
+    "build": "tsc -p tsconfig.json",
     "migrate": "prisma migrate dev",
     "seed": "tsx prisma/seed.ts",
     "studio": "prisma studio"
