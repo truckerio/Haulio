@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-display: "Space Grotesk", sans-serif;
+  --font-body: "Instrument Sans", sans-serif;
+  --ink: #0f172a;
+  --muted: #586072;
+  --canvas: #f5f2ec;
+  --card: #ffffff;
+  --accent: #0f3d2e;
+  --accent-2: #f97316;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--ink);
+  background-color: var(--canvas);
+  background-image:
+    radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.9), transparent 45%),
+    radial-gradient(circle at 88% 12%, rgba(216, 191, 168, 0.4), transparent 50%),
+    radial-gradient(circle at 80% 88%, rgba(15, 61, 46, 0.08), transparent 45%),
+    linear-gradient(160deg, rgba(248, 245, 241, 0.6), rgba(250, 248, 244, 0.95));
+  background-attachment: fixed;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+}
+
+::selection {
+  background: var(--accent-2);
+  color: #ffffff;
+}
+
+.page-fade {
+  animation: pageFade 0.45s ease both;
+}
+
+@keyframes pageFade {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

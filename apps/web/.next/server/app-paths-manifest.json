@@ -1,0 +1,10 @@
+{
+  "/today/page": "app/today/page.js",
+  "/dispatch/page": "app/dispatch/page.js",
+  "/admin/page": "app/admin/page.js",
+  "/billing/page": "app/billing/page.js",
+  "/settlements/page": "app/settlements/page.js",
+  "/driver/page": "app/driver/page.js",
+  "/loads/page": "app/loads/page.js",
+  "/dashboard/page": "app/dashboard/page.js"
+}

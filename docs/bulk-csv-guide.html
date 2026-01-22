@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TruckerIO Bulk CSV Import Guide</title>
+  <style>
+    body { font-family: Arial, sans-serif; color: #0f172a; padding: 40px; line-height: 1.5; }
+    h1 { margin-bottom: 4px; }
+    h2 { margin-top: 28px; }
+    code { background: #f1f5f9; padding: 2px 4px; border-radius: 4px; }
+    .note { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { text-align: left; border-bottom: 1px solid #e2e8f0; padding: 6px 4px; font-size: 13px; }
+    .mono { font-family: "Courier New", monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>TruckerIO Bulk CSV Import Guide</h1>
+  <div class="note">Use this guide to import 300-500 loads quickly from a spreadsheet.</div>
+
+  <h2>Overview</h2>
+  <p>Export two CSV files from your spreadsheet and upload them in the UI (Admin or Dispatch). The importer creates loads, stops, and links them by <code>loadNumber</code>.</p>
+
+  <h2>Required Files</h2>
+  <ul>
+    <li><strong>loads.csv</strong> - one row per load</li>
+    <li><strong>stops.csv</strong> - one row per stop, linked by <code>loadNumber</code></li>
+  </ul>
+
+  <h2>loads.csv Columns</h2>
+  <table>
+    <thead>
+      <tr><th>Column</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>loadNumber</td><td>Unique load ID (required)</td></tr>
+      <tr><td>customerName</td><td>Customer name</td></tr>
+      <tr><td>status</td><td>PLANNED, ASSIGNED, IN_TRANSIT, DELIVERED, READY_TO_INVOICE, INVOICED</td></tr>
+      <tr><td>rate</td><td>Numeric linehaul rate</td></tr>
+      <tr><td>assignedDriverEmail</td><td>Driver email (must exist in system)</td></tr>
+      <tr><td>truckUnit</td><td>Truck unit (auto-created if missing)</td></tr>
+      <tr><td>trailerUnit</td><td>Trailer unit (auto-created if missing)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>stops.csv Columns</h2>
+  <table>
+    <thead>
+      <tr><th>Column</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>loadNumber</td><td>Matches loads.csv</td></tr>
+      <tr><td>sequence</td><td>Order of stops (1, 2, 3...)</td></tr>
+      <tr><td>type</td><td>PICKUP or DELIVERY</td></tr>
+      <tr><td>name</td><td>Stop name (yard or customer)</td></tr>
+      <tr><td>address</td><td>Street address</td></tr>
+      <tr><td>city</td><td>City</td></tr>
+      <tr><td>state</td><td>State</td></tr>
+      <tr><td>zip</td><td>ZIP</td></tr>
+      <tr><td>appointmentStart</td><td>ISO date time (optional)</td></tr>
+      <tr><td>appointmentEnd</td><td>ISO date time (optional)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Yard -> Yard -> Delivery Pattern</h2>
+  <p>For LTL and cross-dock flows, use three stops:</p>
+  <ol>
+    <li>Origin Yard (PICKUP)</li>
+    <li>Destination Yard (PICKUP)</li>
+    <li>Final Delivery (DELIVERY)</li>
+  </ol>
+
+  <h2>UI Import Steps</h2>
+  <ol>
+    <li>Go to <code>/admin</code> or <code>/dispatch</code></li>
+    <li>Open the <strong>Bulk load import</strong> panel</li>
+    <li>Upload <code>loads.csv</code> and <code>stops.csv</code></li>
+    <li>Optional: check <strong>Wipe existing loads</strong></li>
+    <li>Click <strong>Import CSV</strong></li>
+  </ol>
+
+  <h2>Example</h2>
+  <div class="mono">
+    loads.csv<br />
+    loadNumber,customerName,status,rate,assignedDriverEmail,truckUnit,trailerUnit<br />
+    LD-3001,Delta Foods,PLANNED,1450,driver@demo.com,T-101,TR-201<br /><br />
+
+    stops.csv<br />
+    loadNumber,sequence,type,name,address,city,state,zip,appointmentStart,appointmentEnd<br />
+    LD-3001,1,PICKUP,Origin Yard,100 Yard Way,Memphis,TN,38103,2026-02-01T14:00:00Z,2026-02-01T16:00:00Z<br />
+    LD-3001,2,PICKUP,Destination Yard,400 Yard Ave,Nashville,TN,37209,2026-02-01T20:00:00Z,2026-02-01T22:00:00Z<br />
+    LD-3001,3,DELIVERY,Final Delivery,88 Market St,Nashville,TN,37209,2026-02-02T02:00:00Z,2026-02-02T04:00:00Z<br />
+  </div>
+
+  <h2>Notes</h2>
+  <ul>
+    <li><strong>loadNumber</strong> must match between files.</li>
+    <li><strong>sequence</strong> must be unique per load.</li>
+    <li>Date fields should be ISO-8601 (UTC) for best results.</li>
+  </ul>
+</body>
+</html>

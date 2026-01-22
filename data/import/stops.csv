@@ -1,0 +1,7 @@
+loadNumber,sequence,type,name,address,city,state,zip,appointmentStart,appointmentEnd
+LD-3001,1,PICKUP,Origin Yard,100 Yard Way,Memphis,TN,38103,2026-02-01T14:00:00Z,2026-02-01T16:00:00Z
+LD-3001,2,PICKUP,Destination Yard,400 Yard Ave,Nashville,TN,37209,2026-02-01T20:00:00Z,2026-02-01T22:00:00Z
+LD-3001,3,DELIVERY,Final Delivery,88 Market St,Nashville,TN,37209,2026-02-02T02:00:00Z,2026-02-02T04:00:00Z
+LD-3002,1,PICKUP,Origin Yard,200 Yard Rd,Chicago,IL,60601,2026-02-03T14:00:00Z,2026-02-03T16:00:00Z
+LD-3002,2,PICKUP,Destination Yard,700 Yard Blvd,Indianapolis,IN,46204,2026-02-03T20:00:00Z,2026-02-03T22:00:00Z
+LD-3002,3,DELIVERY,Final Delivery,10 Terminal Dr,Indianapolis,IN,46204,2026-02-04T02:00:00Z,2026-02-04T04:00:00Z

@@ -1,0 +1,28 @@
+{
+  "name": "demo-truckerio",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.11.30"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:all": "docker-compose up -d && pnpm dev",
+    "dev:web": "pnpm --filter @truckerio/web dev",
+    "dev:api": "pnpm --filter @truckerio/api dev",
+    "dev:worker": "pnpm --filter @truckerio/worker dev",
+    "db:migrate": "pnpm --filter @truckerio/db migrate",
+    "db:seed": "pnpm --filter @truckerio/db seed",
+    "db:studio": "pnpm --filter @truckerio/db studio",
+    "demo:up": "bash scripts/demo-up.sh",
+    "demo:down": "bash scripts/demo-down.sh",
+    "demo:seed": "pnpm --filter @truckerio/api exec tsx scripts/demo-seed.ts",
+    "demo:reset": "pnpm --filter @truckerio/api exec tsx scripts/demo-reset.ts",
+    "demo:smoke": "pnpm --filter @truckerio/api exec tsx scripts/smoke-happy-path.ts && pnpm --filter @truckerio/api exec tsx scripts/smoke-failure-paths.ts && pnpm --filter @truckerio/api exec tsx scripts/tenant-isolation.ts"
+  }
+}

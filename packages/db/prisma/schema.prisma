@@ -1,0 +1,760 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  DISPATCHER
+  BILLING
+  DRIVER
+}
+
+enum LoadStatus {
+  PLANNED
+  ASSIGNED
+  IN_TRANSIT
+  DELIVERED
+  READY_TO_INVOICE
+  INVOICED
+}
+
+enum StopType {
+  PICKUP
+  YARD
+  DELIVERY
+}
+
+enum LegType {
+  PICKUP
+  LINEHAUL
+  DELIVERY
+}
+
+enum LegStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETE
+}
+
+enum ManifestStatus {
+  PLANNED
+  LOADED
+  IN_TRANSIT
+  ARRIVED
+  UNLOADED
+  COMPLETE
+}
+
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MED
+  HIGH
+}
+
+enum TaskType {
+  COLLECT_POD
+  VERIFY_POD
+  MISSING_DOC
+  STOP_DELAY_FOLLOWUP
+  INVOICE_DISPUTE
+  PAYMENT_FOLLOWUP
+  DRIVER_COMPLIANCE_EXPIRING
+  CUSTOMER_CALLBACK
+}
+
+enum DocType {
+  POD
+  RATECON
+  BOL
+  LUMPER
+  SCALE
+  DETENTION
+  OTHER
+}
+
+enum DocStatus {
+  UPLOADED
+  VERIFIED
+  REJECTED
+}
+
+enum DocSource {
+  DRIVER_UPLOAD
+  OPS_UPLOAD
+  EMAIL_IMPORT
+  API
+}
+
+enum EventType {
+  LOAD_CREATED
+  LOAD_ASSIGNED
+  STOP_ARRIVED
+  STOP_DEPARTED
+  DOC_UPLOADED
+  DOC_VERIFIED
+  DOC_REJECTED
+  DRIVER_NOTE
+  INVOICE_GENERATED
+  PACKET_GENERATED
+  TASK_CREATED
+  TASK_DONE
+  SETTLEMENT_GENERATED
+  SETTLEMENT_FINALIZED
+  SETTLEMENT_PAID
+  IMPORT_COMPLETED
+}
+
+enum InvoiceStatus {
+  GENERATED
+  SENT
+  ACCEPTED
+  DISPUTED
+  PAID
+  SHORT_PAID
+  VOID
+}
+
+enum Permission {
+  LOAD_CREATE
+  LOAD_EDIT
+  LOAD_ASSIGN
+  STOP_EDIT
+  RATE_EDIT
+  INVOICE_GENERATE
+  INVOICE_SEND
+  INVOICE_VOID
+  DOC_VERIFY
+  TASK_ASSIGN
+  ADMIN_SETTINGS
+  SETTLEMENT_GENERATE
+  SETTLEMENT_FINALIZE
+}
+
+enum DriverDocType {
+  CDL
+  MED_CARD
+  MVR
+  W9
+  INSURANCE
+  OTHER
+}
+
+enum StopStatus {
+  PLANNED
+  ARRIVED
+  DEPARTED
+  SKIPPED
+}
+
+enum DelayReason {
+  SHIPPER_DELAY
+  RECEIVER_DELAY
+  TRAFFIC
+  WEATHER
+  BREAKDOWN
+  OTHER
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+}
+
+enum NotificationEvent {
+  TASK_ASSIGNED
+  TASK_DUE_SOON
+  LOAD_ASSIGNED
+  STOP_DELAYED
+  POD_MISSING
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  users       User[]
+  drivers     Driver[]
+  trucks      Truck[]
+  trailers    Trailer[]
+  customers   Customer[]
+  loads       Load[]
+  stops       Stop[]
+  documents   Document[]
+  events      Event[]
+  tasks       Task[]
+  settings    OrgSettings?
+  audits      AuditLog[]
+  invoices    Invoice[]
+  settlements Settlement[]
+  storage     StorageRecord[]
+  legs        LoadLeg[]
+  manifests   TrailerManifest[]
+  invites     UserInvite[]
+  passwordResets PasswordReset[]
+}
+
+model User {
+  id           String       @id @default(cuid())
+  orgId        String
+  email        String       @db.Citext
+  passwordHash String
+  role         Role
+  name         String?
+  permissions  Permission[] @default([])
+  isActive     Boolean      @default(true)
+  timezone     String?
+  lastLoginAt  DateTime?
+  createdAt    DateTime     @default(now())
+
+  org               Organization           @relation(fields: [orgId], references: [id])
+  sessions          Session[]
+  driver            Driver?
+  createdLoads      Load[]                 @relation("CreatedLoads")
+  events            Event[]
+  documents         Document[]             @relation("UploadedDocs")
+  verifiedDocs      Document[]             @relation("VerifiedDocs")
+  rejectedDocs      Document[]             @relation("RejectedDocs")
+  audits            AuditLog[]
+  assignedTasks     Task[]                 @relation("AssignedTasks")
+  createdTasks      Task[]                 @relation("CreatedTasks")
+  completedTasks    Task[]                 @relation("CompletedTasks")
+  notificationPrefs UserNotificationPref[]
+  invites           UserInvite[]
+  passwordResets    PasswordReset[]
+
+  @@unique([orgId, email])
+}
+
+model UserInvite {
+  id        String   @id @default(cuid())
+  orgId     String
+  userId    String
+  tokenHash String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([orgId, userId])
+  @@unique([tokenHash])
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  orgId     String
+  userId    String
+  tokenHash String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([orgId, userId])
+  @@unique([tokenHash])
+}
+
+model Session {
+  id           String    @id @default(cuid())
+  userId       String
+  tokenHash    String
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime
+  lastUsedAt   DateTime?
+  revokedAt    DateTime?
+  revokeReason String?
+  ipAddress    String?
+  userAgent    String?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([tokenHash])
+  @@index([userId, expiresAt])
+}
+
+model Driver {
+  id               String    @id @default(cuid())
+  orgId            String
+  userId           String?   @unique
+  name             String
+  phone            String?
+  license          String?
+  licenseState     String?
+  licenseExpiresAt DateTime?
+  medCardExpiresAt DateTime?
+  payRatePerMile   Decimal?  @db.Decimal(12, 2)
+  createdAt        DateTime  @default(now())
+
+  org        Organization      @relation(fields: [orgId], references: [id])
+  user       User?             @relation(fields: [userId], references: [id])
+  loads      Load[]            @relation("DriverLoads")
+  legs       LoadLeg[]
+  manifests  TrailerManifest[]
+  Task       Task[]
+  Settlement Settlement[]
+}
+
+model Truck {
+  id        String   @id @default(cuid())
+  orgId     String
+  unit      String
+  plate     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  org       Organization      @relation(fields: [orgId], references: [id])
+  loads     Load[]
+  legs      LoadLeg[]
+  manifests TrailerManifest[]
+}
+
+model Trailer {
+  id        String   @id @default(cuid())
+  orgId     String
+  unit      String
+  plate     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  org       Organization      @relation(fields: [orgId], references: [id])
+  loads     Load[]
+  legs      LoadLeg[]
+  manifests TrailerManifest[]
+}
+
+model Load {
+  id               String     @id @default(cuid())
+  orgId            String
+  loadNumber       String
+  status           LoadStatus @default(PLANNED)
+  customerId       String?
+  customerName     String?
+  customerRef      String?
+  bolNumber        String?
+  miles            Float?
+  rate             Decimal?   @db.Decimal(12, 2)
+  assignedDriverId String?
+  truckId          String?
+  trailerId        String?
+  plannedAt        DateTime?
+  deliveredAt      DateTime?
+  podVerifiedAt    DateTime?
+  lockedAt         DateTime?
+  createdById      String?
+  createdAt        DateTime   @default(now())
+
+  org            Organization          @relation(fields: [orgId], references: [id])
+  customer       Customer?             @relation(fields: [customerId], references: [id])
+  driver         Driver?               @relation("DriverLoads", fields: [assignedDriverId], references: [id])
+  truck          Truck?                @relation(fields: [truckId], references: [id])
+  trailer        Trailer?              @relation(fields: [trailerId], references: [id])
+  createdBy      User?                 @relation("CreatedLoads", fields: [createdById], references: [id])
+  stops          Stop[]
+  docs           Document[]
+  events         Event[]
+  tasks          Task[]
+  invoices       Invoice[]
+  storage        StorageRecord[]
+  legs           LoadLeg[]
+  manifestItems  TrailerManifestItem[]
+  SettlementItem SettlementItem[]
+
+  @@unique([orgId, loadNumber])
+  @@index([orgId, status])
+}
+
+model LoadLeg {
+  id                String    @id @default(cuid())
+  orgId             String
+  loadId            String
+  sequence          Int
+  type              LegType
+  status            LegStatus @default(PLANNED)
+  startStopSequence Int?
+  endStopSequence   Int?
+  driverId          String?
+  truckId           String?
+  trailerId         String?
+  departedAt        DateTime?
+  arrivedAt         DateTime?
+  createdAt         DateTime  @default(now())
+
+  org     Organization @relation(fields: [orgId], references: [id])
+  load    Load         @relation(fields: [loadId], references: [id])
+  driver  Driver?      @relation(fields: [driverId], references: [id])
+  truck   Truck?       @relation(fields: [truckId], references: [id])
+  trailer Trailer?     @relation(fields: [trailerId], references: [id])
+  Event   Event[]
+
+  @@index([loadId, sequence])
+}
+
+model Stop {
+  id               String       @id @default(cuid())
+  orgId            String
+  loadId           String
+  type             StopType
+  status           StopStatus   @default(PLANNED)
+  name             String
+  address          String
+  city             String
+  state            String
+  zip              String
+  phone            String?
+  notes            String?
+  lat              Float?
+  lng              Float?
+  appointmentStart DateTime?
+  appointmentEnd   DateTime?
+  arrivedAt        DateTime?
+  departedAt       DateTime?
+  delayReason      DelayReason?
+  delayNotes       String?
+  detentionMinutes Int?
+  checkInMethod    String?
+  sequence         Int
+
+  load     Load         @relation(fields: [loadId], references: [id])
+  org      Organization @relation(fields: [orgId], references: [id])
+  Document Document[]
+  Event    Event[]
+  Task     Task[]
+
+  @@index([loadId, sequence])
+}
+
+model TrailerManifest {
+  id                 String         @id @default(cuid())
+  orgId              String
+  trailerId          String
+  truckId            String?
+  driverId           String?
+  status             ManifestStatus @default(PLANNED)
+  origin             String?
+  destination        String?
+  plannedDepartureAt DateTime?
+  plannedArrivalAt   DateTime?
+  departedAt         DateTime?
+  arrivedAt          DateTime?
+  createdAt          DateTime       @default(now())
+
+  org     Organization          @relation(fields: [orgId], references: [id])
+  trailer Trailer               @relation(fields: [trailerId], references: [id])
+  truck   Truck?                @relation(fields: [truckId], references: [id])
+  driver  Driver?               @relation(fields: [driverId], references: [id])
+  items   TrailerManifestItem[]
+
+  @@index([orgId, status])
+}
+
+model TrailerManifestItem {
+  id         String @id @default(cuid())
+  manifestId String
+  loadId     String
+
+  manifest TrailerManifest @relation(fields: [manifestId], references: [id])
+  load     Load            @relation(fields: [loadId], references: [id])
+
+  @@unique([manifestId, loadId])
+}
+
+model Document {
+  id           String    @id @default(cuid())
+  orgId        String
+  loadId       String
+  stopId       String?
+  type         DocType
+  status       DocStatus @default(UPLOADED)
+  source       DocSource @default(DRIVER_UPLOAD)
+  filename     String
+  originalName String
+  mimeType     String
+  size         Int
+  uploadedById String?
+  uploadedAt   DateTime  @default(now())
+  verifiedById String?
+  verifiedAt   DateTime?
+  rejectedById String?
+  rejectedAt   DateTime?
+  rejectReason String?
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  load       Load         @relation(fields: [loadId], references: [id])
+  stop       Stop?        @relation(fields: [stopId], references: [id])
+  uploadedBy User?        @relation("UploadedDocs", fields: [uploadedById], references: [id])
+  verifiedBy User?        @relation("VerifiedDocs", fields: [verifiedById], references: [id])
+  rejectedBy User?        @relation("RejectedDocs", fields: [rejectedById], references: [id])
+  Event      Event[]
+  Task       Task[]
+
+  @@index([loadId, type, status], map: "doc_load_type_status_idx")
+  @@index([stopId])
+}
+
+model Event {
+  id         String    @id @default(cuid())
+  orgId      String
+  loadId     String?
+  stopId     String?
+  legId      String?
+  docId      String?
+  taskId     String?
+  invoiceId  String?
+  customerId String?
+  userId     String?
+  type       EventType
+  message    String
+  meta       Json?
+  createdAt  DateTime  @default(now())
+
+  org      Organization @relation(fields: [orgId], references: [id])
+  load     Load?        @relation(fields: [loadId], references: [id])
+  stop     Stop?        @relation(fields: [stopId], references: [id])
+  leg      LoadLeg?     @relation(fields: [legId], references: [id])
+  doc      Document?    @relation(fields: [docId], references: [id])
+  task     Task?        @relation(fields: [taskId], references: [id])
+  invoice  Invoice?     @relation(fields: [invoiceId], references: [id])
+  customer Customer?    @relation(fields: [customerId], references: [id])
+  user     User?        @relation(fields: [userId], references: [id])
+
+  @@index([orgId, createdAt])
+  @@index([loadId, createdAt])
+  @@index([stopId, createdAt])
+}
+
+model Task {
+  id            String       @id @default(cuid())
+  orgId         String
+  loadId        String?
+  stopId        String?
+  docId         String?
+  driverId      String?
+  invoiceId     String?
+  customerId    String?
+  dedupeKey     String?
+  type          TaskType
+  title         String
+  status        TaskStatus   @default(OPEN)
+  priority      TaskPriority @default(MED)
+  dueAt         DateTime?
+  assignedRole  Role?
+  assignedToId  String?
+  createdAt     DateTime     @default(now())
+  completedAt   DateTime?
+  createdById   String?
+  completedById String?
+
+  org         Organization @relation(fields: [orgId], references: [id])
+  load        Load?        @relation(fields: [loadId], references: [id])
+  stop        Stop?        @relation(fields: [stopId], references: [id])
+  doc         Document?    @relation(fields: [docId], references: [id])
+  driver      Driver?      @relation(fields: [driverId], references: [id])
+  invoice     Invoice?     @relation(fields: [invoiceId], references: [id])
+  customer    Customer?    @relation(fields: [customerId], references: [id])
+  assignedTo  User?        @relation("AssignedTasks", fields: [assignedToId], references: [id])
+  createdBy   User?        @relation("CreatedTasks", fields: [createdById], references: [id])
+  completedBy User?        @relation("CompletedTasks", fields: [completedById], references: [id])
+  Event       Event[]
+
+  @@unique([orgId, dedupeKey])
+  @@index([orgId, status])
+  @@index([orgId, status, dueAt])
+  @@index([orgId, type])
+}
+
+model StorageRecord {
+  id              String    @id @default(cuid())
+  orgId           String
+  loadId          String?
+  checkInAt       DateTime
+  checkOutAt      DateTime?
+  freeMinutes     Int
+  ratePerDay      Decimal   @db.Decimal(12, 2)
+  dwellMinutes    Int?
+  suggestedCharge Decimal?  @db.Decimal(12, 2)
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  load Load?        @relation(fields: [loadId], references: [id])
+}
+
+model OrgSettings {
+  id                           String          @id @default(cuid())
+  orgId                        String          @unique
+  companyDisplayName           String
+  remitToAddress               String
+  invoiceTerms                 String
+  invoiceTermsDays             Int?
+  invoiceFooter                String
+  logoUrl                      String?
+  invoicePrefix                String
+  nextInvoiceNumber            Int
+  podRequireSignature          Boolean         @default(true)
+  podRequirePrintedName        Boolean         @default(true)
+  podRequireDeliveryDate       Boolean         @default(true)
+  podMinPages                  Int             @default(1)
+  requiredDocs                 DocType[]
+  requiredDriverDocs           DriverDocType[]
+  collectPodDueMinutes         Int
+  missingPodAfterMinutes       Int
+  reminderFrequencyMinutes     Int
+  timezone                     String?
+  freeStorageMinutes           Int
+  storageRatePerDay            Decimal         @db.Decimal(12, 2)
+  pickupFreeDetentionMinutes   Int             @default(120)
+  deliveryFreeDetentionMinutes Int             @default(120)
+  detentionRatePerHour         Decimal?        @db.Decimal(12, 2)
+  driverRatePerMile            Decimal         @default(0.65) @db.Decimal(12, 2)
+  createdAt                    DateTime        @default(now())
+  updatedAt                    DateTime        @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+}
+
+model Invoice {
+  id              String        @id @default(cuid())
+  orgId           String
+  loadId          String
+  invoiceNumber   String
+  status          InvoiceStatus @default(GENERATED)
+  totalAmount     Decimal?      @db.Decimal(12, 2)
+  generatedAt     DateTime      @default(now())
+  sentAt          DateTime?
+  paidAt          DateTime?
+  disputeReason   String?
+  disputeNotes    String?
+  paymentRef      String?
+  shortPaidAmount Decimal?      @db.Decimal(12, 2)
+  voidedAt        DateTime?
+  pdfPath         String?
+  packetPath      String?
+
+  org   Organization      @relation(fields: [orgId], references: [id])
+  load  Load              @relation(fields: [loadId], references: [id])
+  items InvoiceLineItem[]
+  Event Event[]
+  Task  Task[]
+
+  @@unique([orgId, invoiceNumber])
+}
+
+model InvoiceLineItem {
+  id          String   @id @default(cuid())
+  invoiceId   String
+  code        String
+  description String?
+  quantity    Decimal? @db.Decimal(12, 2)
+  rate        Decimal? @db.Decimal(12, 2)
+  amount      Decimal  @db.Decimal(12, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+}
+
+enum SettlementStatus {
+  DRAFT
+  FINALIZED
+  PAID
+}
+
+model Settlement {
+  id          String           @id @default(cuid())
+  orgId       String
+  driverId    String
+  periodStart DateTime
+  periodEnd   DateTime
+  status      SettlementStatus @default(DRAFT)
+  gross       Decimal?         @db.Decimal(12, 2)
+  deductions  Decimal?         @db.Decimal(12, 2)
+  net         Decimal?         @db.Decimal(12, 2)
+  finalizedAt DateTime?
+  paidAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  org    Organization     @relation(fields: [orgId], references: [id])
+  driver Driver           @relation(fields: [driverId], references: [id])
+  items  SettlementItem[]
+
+  @@unique([orgId, driverId, periodStart, periodEnd])
+  @@index([orgId, periodEnd])
+}
+
+model SettlementItem {
+  id           String  @id @default(cuid())
+  settlementId String
+  loadId       String?
+  code         String
+  description  String?
+  amount       Decimal @db.Decimal(12, 2)
+
+  settlement Settlement @relation(fields: [settlementId], references: [id])
+  load       Load?      @relation(fields: [loadId], references: [id])
+
+  @@index([settlementId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  orgId     String
+  userId    String
+  action    String
+  entity    String
+  entityId  String?
+  summary   String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([orgId, createdAt])
+}
+
+model UserNotificationPref {
+  id      String              @id @default(cuid())
+  userId  String
+  event   NotificationEvent
+  channel NotificationChannel
+  enabled Boolean             @default(true)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, event, channel])
+  @@index([userId])
+}
+
+model Customer {
+  id             String   @id @default(cuid())
+  orgId          String
+  name           String
+  billingEmail   String?
+  billingPhone   String?
+  remitToAddress String?
+  termsDays      Int?
+  createdAt      DateTime @default(now())
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  loads  Load[]
+  tasks  Task[]
+  events Event[]
+
+  @@unique([orgId, name])
+  @@index([orgId, name])
+}
