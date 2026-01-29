@@ -1,8 +1,26 @@
+# Dependencies
 node_modules/
-uploads/
 .pnpm-store/
+
+# Next.js build output
+.next/
+out/
+
+# Secrets (ignore all env files, but keep examples)
 .env
 .env.*
-.DS_Store
 !.env.example
 !.env.docker.example
+
+# Uploads (local user data) - keep ignored if it's runtime-generated
+uploads/
+
+# OS junk
+.DS_Store
+
+# TypeScript / build caches
+*.tsbuildinfo
+dist/
+build/
+coverage/
+*.log
