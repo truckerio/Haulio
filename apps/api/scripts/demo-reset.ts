@@ -15,6 +15,11 @@ async function main() {
 
   await prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.userNotificationPref.deleteMany({ where: { userId: { in: userIds } } });
+  await prisma.learningExample.deleteMany({ where: { orgId: org.id } });
+  await prisma.learnedMapping.deleteMany({ where: { orgId: org.id } });
+  await prisma.loadConfirmationLearningExample.deleteMany({ where: { orgId: org.id } });
+  await prisma.loadConfirmationExtractEvent.deleteMany({ where: { orgId: org.id } });
+  await prisma.loadConfirmationDocument.deleteMany({ where: { orgId: org.id } });
   await prisma.auditLog.deleteMany({ where: { orgId: org.id } });
   await prisma.event.deleteMany({ where: { orgId: org.id } });
   await prisma.task.deleteMany({ where: { orgId: org.id } });
@@ -23,7 +28,6 @@ async function main() {
   await prisma.invoice.deleteMany({ where: { orgId: org.id } });
   await prisma.settlementItem.deleteMany({ where: { settlement: { orgId: org.id } } });
   await prisma.settlement.deleteMany({ where: { orgId: org.id } });
-  await prisma.storageRecord.deleteMany({ where: { orgId: org.id } });
   await prisma.loadLeg.deleteMany({ where: { orgId: org.id } });
   await prisma.trailerManifestItem.deleteMany({ where: { manifest: { orgId: org.id } } });
   await prisma.trailerManifest.deleteMany({ where: { orgId: org.id } });

@@ -1,6 +1,64 @@
 import { prisma, TaskPriority, TaskStatus, TaskType, Role, Prisma, toDecimal } from "@truckerio/db";
 import { createEvent } from "./events";
 
+export type TaskEntityType = "LOAD" | "INVOICE" | "DRIVER" | "STOP" | "DOC" | "TASK";
+
+export function getTaskEntity(task: {
+  type: TaskType;
+  id?: string | null;
+  loadId?: string | null;
+  stopId?: string | null;
+  docId?: string | null;
+  driverId?: string | null;
+  invoiceId?: string | null;
+  customerId?: string | null;
+}) {
+  const byType = (() => {
+    switch (task.type) {
+      case TaskType.COLLECT_POD:
+      case TaskType.MISSING_DOC:
+      case TaskType.STOP_DELAY_FOLLOWUP:
+        if (task.loadId) return { entityType: "LOAD" as const, entityId: task.loadId };
+        if (task.stopId) return { entityType: "STOP" as const, entityId: task.stopId };
+        if (task.docId) return { entityType: "DOC" as const, entityId: task.docId };
+        return null;
+      case TaskType.INVOICE_DISPUTE:
+      case TaskType.PAYMENT_FOLLOWUP:
+        if (task.invoiceId) return { entityType: "INVOICE" as const, entityId: task.invoiceId };
+        if (task.loadId) return { entityType: "LOAD" as const, entityId: task.loadId };
+        return null;
+      case TaskType.DRIVER_COMPLIANCE_EXPIRING:
+        if (task.driverId) return { entityType: "DRIVER" as const, entityId: task.driverId };
+        return null;
+      default:
+        return null;
+    }
+  })();
+
+  if (byType) return byType;
+
+  if (task.loadId) return { entityType: "LOAD" as const, entityId: task.loadId };
+  if (task.invoiceId) return { entityType: "INVOICE" as const, entityId: task.invoiceId };
+  if (task.driverId) return { entityType: "DRIVER" as const, entityId: task.driverId };
+  if (task.stopId) return { entityType: "STOP" as const, entityId: task.stopId };
+  if (task.docId) return { entityType: "DOC" as const, entityId: task.docId };
+  return { entityType: "TASK" as const, entityId: task.id ?? "unknown" };
+}
+
+export function buildTaskKey(task: {
+  type: TaskType;
+  id?: string | null;
+  loadId?: string | null;
+  stopId?: string | null;
+  docId?: string | null;
+  driverId?: string | null;
+  invoiceId?: string | null;
+  customerId?: string | null;
+}) {
+  const entity = getTaskEntity(task);
+  return `${task.type}:${entity.entityType}:${entity.entityId}`;
+}
+
 export async function createTask(params: {
   orgId: string;
   title: string;

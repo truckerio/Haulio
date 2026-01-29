@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "main": "src/index.ts",
   "scripts": {
-    "dev": "tsx watch src/index.ts"
+    "dev": "TMPDIR=/tmp tsx watch src/index.ts"
   },
   "dependencies": {
     "@truckerio/db": "workspace:*",

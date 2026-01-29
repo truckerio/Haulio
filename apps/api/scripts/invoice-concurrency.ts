@@ -33,6 +33,18 @@ async function main() {
     },
   });
 
+  const operatingEntity = await prisma.operatingEntity.create({
+    data: {
+      orgId: org.id,
+      name: "Concurrency Org",
+      type: "CARRIER",
+      addressLine1: "1 Concurrency Way",
+      remitToName: "Concurrency Org",
+      remitToAddressLine1: "1 Concurrency Way",
+      isDefault: true,
+    },
+  });
+
   const user = await prisma.user.create({
     data: {
       orgId: org.id,
@@ -49,6 +61,8 @@ async function main() {
         data: {
           orgId: org.id,
           loadNumber: `CC-${index + 1}`,
+          loadType: "COMPANY",
+          operatingEntityId: operatingEntity.id,
           customerName: "Concurrency Customer",
           status: "READY_TO_INVOICE",
           rate: "250.00",

@@ -5,14 +5,15 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: "#111827",
-        sand: "#f8f5f1",
-        moss: "#0f3d2e",
-        clay: "#d6bfa8",
-        ember: "#f97316",
+        ink: "var(--color-text)",
+        accent: "var(--color-accent)",
+        muted: "var(--color-text-muted)",
+        canvas: "var(--color-bg-muted)",
+        divider: "var(--color-divider)",
       },
       boxShadow: {
-        soft: "0 20px 40px rgba(15, 61, 46, 0.15)",
+        soft: "var(--shadow-card)",
+        subtle: "var(--shadow-subtle)",
       },
     },
   },

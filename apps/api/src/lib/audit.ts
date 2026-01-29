@@ -8,6 +8,8 @@ export async function logAudit(params: {
   entityId?: string | null;
   summary: string;
   meta?: Record<string, unknown>;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
 }) {
   await prisma.auditLog.create({
     data: {
@@ -18,6 +20,8 @@ export async function logAudit(params: {
       entityId: params.entityId ?? null,
       summary: params.summary,
       meta: params.meta ?? null,
+      before: params.before ?? null,
+      after: params.after ?? null,
     },
   });
 }

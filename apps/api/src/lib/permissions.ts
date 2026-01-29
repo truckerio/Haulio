@@ -30,13 +30,24 @@ export function hasPermission(user: AuthRequest["user"] | undefined, permission:
   return combined.has(permission);
 }
 
-export function requirePermission(...permissions: Permission[]) {
+export function authorize(params: { roles?: Role[]; permissions?: Permission[] }) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
-    const ok = permissions.some((permission) => hasPermission(req.user, permission));
-    if (!ok) {
+    if (!req.user) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const roleAllowed = params.roles ? params.roles.includes(req.user.role as Role) : true;
+    const permissionAllowed = params.permissions
+      ? params.permissions.some((permission) => hasPermission(req.user, permission))
+      : true;
+    if (!roleAllowed || !permissionAllowed) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
     next();
   };
+}
+
+export function requirePermission(...permissions: Permission[]) {
+  return authorize({ permissions });
 }

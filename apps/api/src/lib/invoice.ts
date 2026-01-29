@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import puppeteer from "puppeteer";
 import { format } from "date-fns";
-import type { Load, Stop, OrgSettings, Customer, InvoiceLineItem, Prisma } from "@truckerio/db";
+import type { Load, Stop, OrgSettings, Customer, InvoiceLineItem, Prisma, OperatingEntity } from "@truckerio/db";
 import { formatUSD } from "@truckerio/db";
 import { ensureUploadDirs, resolveUploadPath } from "./uploads";
 
@@ -11,6 +11,7 @@ export function renderInvoiceHtml(params: {
   load: Load & { customer?: Customer | null };
   stops: Stop[];
   settings: OrgSettings;
+  operatingEntity: OperatingEntity | null;
   items: InvoiceLineItem[];
   totalAmount: Prisma.Decimal | null;
 }) {
@@ -18,10 +19,30 @@ export function renderInvoiceHtml(params: {
   const delivery = params.stops.find((stop) => stop.type === "DELIVERY");
   const customerName = params.load.customer?.name ?? params.load.customerName ?? "Customer";
   const total = params.totalAmount ? formatUSD(params.totalAmount) : "0.00";
-  const shipperRef = params.load.shipperReferenceNumber;
-  const consigneeRef = params.load.consigneeReferenceNumber;
-  const palletCount = params.load.palletCount;
-  const weightLbs = params.load.weightLbs;
+  const shipperRef = params.load.shipperReferenceNumber ?? "—";
+  const consigneeRef = params.load.consigneeReferenceNumber ?? "—";
+  const palletCount = params.load.palletCount !== null && params.load.palletCount !== undefined ? String(params.load.palletCount) : "—";
+  const weightLbs = params.load.weightLbs !== null && params.load.weightLbs !== undefined ? `${params.load.weightLbs} lbs` : "—";
+
+  const entityName = params.operatingEntity?.name ?? params.settings.companyDisplayName ?? "Operating Entity";
+  const headerAddress = [
+    params.operatingEntity?.addressLine1,
+    params.operatingEntity?.addressLine2,
+    [params.operatingEntity?.city, params.operatingEntity?.state, params.operatingEntity?.zip].filter(Boolean).join(" "),
+  ]
+    .map((line) => line?.trim())
+    .filter(Boolean)
+    .join("\n");
+  const remitAddress = [
+    params.operatingEntity?.remitToName ?? entityName,
+    params.operatingEntity?.remitToAddressLine1,
+    [params.operatingEntity?.remitToCity, params.operatingEntity?.remitToState, params.operatingEntity?.remitToZip]
+      .filter(Boolean)
+      .join(" "),
+  ]
+    .map((line) => line?.trim())
+    .filter(Boolean)
+    .join("\n");
 
   return `
   <html>
@@ -39,22 +60,34 @@ export function renderInvoiceHtml(params: {
     </head>
     <body>
       <h1>Invoice ${params.invoiceNumber}</h1>
-      <div class="muted">${params.settings.companyDisplayName}</div>
+      <div class="muted">${entityName}</div>
       <div class="row">
         <div class="box" style="width: 48%;">
-          <div><strong>Remit To</strong></div>
-          <div style="white-space: pre-line">${params.settings.remitToAddress}</div>
+          <div><strong>Operating Entity</strong></div>
+          <div style="white-space: pre-line">${headerAddress || "—"}</div>
         </div>
         <div class="box" style="width: 48%;">
           <div><strong>Invoice Details</strong></div>
           <div>Load: ${params.load.loadNumber}</div>
           <div>Customer: ${customerName}</div>
-          ${shipperRef ? `<div>Shipper ref: ${shipperRef}</div>` : ""}
-          ${consigneeRef ? `<div>Consignee ref: ${consigneeRef}</div>` : ""}
-          ${palletCount !== null && palletCount !== undefined ? `<div>Pallets: ${palletCount}</div>` : ""}
-          ${weightLbs !== null && weightLbs !== undefined ? `<div>Weight: ${weightLbs} lbs</div>` : ""}
+          <div>Shipper ref: ${shipperRef}</div>
+          <div>Consignee ref: ${consigneeRef}</div>
+          <div>Pallets: ${palletCount}</div>
+          <div>Weight: ${weightLbs}</div>
           <div>Issued: ${format(new Date(), "PPP")}</div>
           <div>Terms: ${params.settings.invoiceTerms}</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="box" style="width: 48%;">
+          <div><strong>Remit To</strong></div>
+          <div style="white-space: pre-line">${remitAddress || "—"}</div>
+        </div>
+        <div class="box" style="width: 48%;">
+          <div><strong>Operating Details</strong></div>
+          <div>Type: ${params.operatingEntity?.type ?? "—"}</div>
+          <div>MC: ${params.operatingEntity?.mcNumber ?? "—"}</div>
+          <div>DOT: ${params.operatingEntity?.dotNumber ?? "—"}</div>
         </div>
       </div>
       <div class="row">
@@ -96,6 +129,7 @@ export async function generateInvoicePdf(params: {
   load: Load & { customer?: Customer | null };
   stops: Stop[];
   settings: OrgSettings;
+  operatingEntity: OperatingEntity | null;
   items: InvoiceLineItem[];
   totalAmount: Prisma.Decimal | null;
 }) {

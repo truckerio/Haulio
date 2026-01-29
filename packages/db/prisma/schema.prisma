@@ -15,12 +15,16 @@ enum Role {
 }
 
 enum LoadStatus {
+  DRAFT
   PLANNED
   ASSIGNED
   IN_TRANSIT
   DELIVERED
+  POD_RECEIVED
   READY_TO_INVOICE
   INVOICED
+  PAID
+  CANCELLED
 }
 
 enum StopType {
@@ -97,6 +101,11 @@ enum DocSource {
   API
 }
 
+enum OnboardingStatus {
+  NOT_ACTIVATED
+  OPERATIONAL
+}
+
 enum LoadConfirmationStatus {
   UPLOADED
   EXTRACTING
@@ -109,6 +118,7 @@ enum LoadConfirmationStatus {
 enum EventType {
   LOAD_CREATED
   LOAD_ASSIGNED
+  LOAD_STATUS_UPDATED
   STOP_ARRIVED
   STOP_DEPARTED
   DOC_UPLOADED
@@ -135,6 +145,52 @@ enum InvoiceStatus {
   VOID
 }
 
+enum LearningDomain {
+  MATCH_CUSTOMER
+  MATCH_SHIPPER
+  MATCH_CONSIGNEE
+  MATCH_ADDRESS
+  IMPORT_MAPPING
+  CHARGE_SUGGESTION
+  ATTENTION_OUTCOME
+}
+
+enum OperatingEntityType {
+  CARRIER
+  BROKER
+}
+
+enum LoadType {
+  COMPANY
+  BROKERED
+  VAN
+  REEFER
+  FLATBED
+  OTHER
+}
+
+enum LoadBusinessType {
+  COMPANY
+  BROKER
+}
+
+enum TrackingProviderType {
+  PHONE
+  SAMSARA
+}
+
+enum TrackingSessionStatus {
+  OFF
+  ON
+  ERROR
+  ENDED
+}
+
+enum TrackingIntegrationStatus {
+  CONNECTED
+  DISCONNECTED
+}
+
 enum Permission {
   LOAD_CREATE
   LOAD_EDIT
@@ -151,6 +207,15 @@ enum Permission {
   SETTLEMENT_FINALIZE
 }
 
+enum LoadChargeType {
+  LINEHAUL
+  LUMPER
+  DETENTION
+  LAYOVER
+  OTHER
+  ADJUSTMENT
+}
+
 enum DriverDocType {
   CDL
   MED_CARD
@@ -165,6 +230,33 @@ enum StopStatus {
   ARRIVED
   DEPARTED
   SKIPPED
+}
+
+enum DriverStatus {
+  AVAILABLE
+  ON_LOAD
+  UNAVAILABLE
+}
+
+enum TruckStatus {
+  AVAILABLE
+  ASSIGNED
+  MAINTENANCE
+  OUT_OF_SERVICE
+}
+
+enum TrailerStatus {
+  AVAILABLE
+  ASSIGNED
+  MAINTENANCE
+  OUT_OF_SERVICE
+}
+
+enum TrailerType {
+  DRY_VAN
+  REEFER
+  FLATBED
+  OTHER
 }
 
 enum DelayReason {
@@ -190,6 +282,26 @@ enum NotificationEvent {
   POD_MISSING
 }
 
+enum OperatingMode {
+  CARRIER
+  BROKER
+  BOTH
+}
+
+enum TrackingPreference {
+  MANUAL
+  SAMSARA
+  MOTIVE
+  OTHER
+}
+
+enum SettlementSchedule {
+  WEEKLY
+  BIWEEKLY
+  SEMI_MONTHLY
+  MONTHLY
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
@@ -201,20 +313,44 @@ model Organization {
   trailers    Trailer[]
   customers   Customer[]
   loads       Load[]
+  operatingEntities OperatingEntity[]
   stops       Stop[]
   documents   Document[]
   loadConfirmationDocuments LoadConfirmationDocument[]
+  loadConfirmationExtractEvents LoadConfirmationExtractEvent[]
+  loadConfirmationLearningExamples LoadConfirmationLearningExample[]
+  learningExamples LearningExample[]
+  learnedMappings LearnedMapping[]
   events      Event[]
   tasks       Task[]
   settings    OrgSettings?
   audits      AuditLog[]
   invoices    Invoice[]
   settlements Settlement[]
+  loadCharges LoadCharge[]
   storage     StorageRecord[]
+  trackingIntegrations TrackingIntegration[]
+  truckTelematicsMappings TruckTelematicsMapping[]
+  trackingSessions LoadTrackingSession[]
+  locationPings LocationPing[]
   legs        LoadLeg[]
   manifests   TrailerManifest[]
   invites     UserInvite[]
   passwordResets PasswordReset[]
+  onboardingState OnboardingState?
+  sequence   OrgSequence?
+}
+
+model OrgSequence {
+  id             String   @id @default(cuid())
+  orgId          String   @unique
+  nextLoadNumber Int      @default(1001)
+  nextTripNumber Int      @default(1001)
+  loadPrefix     String   @default("LD-") @db.VarChar(10)
+  tripPrefix     String   @default("TR-") @db.VarChar(10)
+  updatedAt      DateTime @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
 }
 
 model User {
@@ -224,6 +360,8 @@ model User {
   passwordHash String
   role         Role
   name         String?
+  phone        String?
+  profilePhotoUrl String?
   permissions  Permission[] @default([])
   isActive     Boolean      @default(true)
   timezone     String?
@@ -234,6 +372,7 @@ model User {
   sessions          Session[]
   driver            Driver?
   createdLoads      Load[]                 @relation("CreatedLoads")
+  deletedLoads      Load[]                 @relation("DeletedLoads")
   events            Event[]
   documents         Document[]             @relation("UploadedDocs")
   verifiedDocs      Document[]             @relation("VerifiedDocs")
@@ -243,6 +382,7 @@ model User {
   assignedTasks     Task[]                 @relation("AssignedTasks")
   createdTasks      Task[]                 @relation("CreatedTasks")
   completedTasks    Task[]                 @relation("CompletedTasks")
+  trackingSessionsStarted LoadTrackingSession[] @relation("TrackingSessionsStarted")
   notificationPrefs UserNotificationPref[]
   invites           UserInvite[]
   passwordResets    PasswordReset[]
@@ -305,12 +445,15 @@ model Driver {
   orgId            String
   userId           String?   @unique
   name             String
+  status           DriverStatus @default(AVAILABLE)
+  profilePhotoUrl  String?
   phone            String?
   license          String?
   licenseState     String?
   licenseExpiresAt DateTime?
   medCardExpiresAt DateTime?
   payRatePerMile   Decimal?  @db.Decimal(12, 2)
+  archivedAt       DateTime?
   createdAt        DateTime  @default(now())
 
   org        Organization      @relation(fields: [orgId], references: [id])
@@ -320,13 +463,17 @@ model Driver {
   manifests  TrailerManifest[]
   Task       Task[]
   Settlement Settlement[]
+  locationPings LocationPing[]
 }
 
 model Truck {
   id        String   @id @default(cuid())
   orgId     String
   unit      String
+  vin       String?
   plate     String?
+  plateState String?
+  status    TruckStatus @default(AVAILABLE)
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
 
@@ -334,13 +481,21 @@ model Truck {
   loads     Load[]
   legs      LoadLeg[]
   manifests TrailerManifest[]
+  telematicsMappings TruckTelematicsMapping[]
+  locationPings LocationPing[]
+
+  @@unique([orgId, unit])
+  @@unique([orgId, vin])
 }
 
 model Trailer {
   id        String   @id @default(cuid())
   orgId     String
   unit      String
+  type      TrailerType @default(OTHER)
   plate     String?
+  plateState String?
+  status    TrailerStatus @default(AVAILABLE)
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
 
@@ -348,6 +503,8 @@ model Trailer {
   loads     Load[]
   legs      LoadLeg[]
   manifests TrailerManifest[]
+
+  @@unique([orgId, unit])
 }
 
 model Load {
@@ -355,9 +512,17 @@ model Load {
   orgId            String
   loadNumber       String
   status           LoadStatus @default(PLANNED)
+  loadType         LoadType   @default(COMPANY)
+  businessType     LoadBusinessType?
+  operatingEntityId String
   customerId       String?
   customerName     String?
   customerRef      String?
+  externalTripId   String?    @db.VarChar(64)
+  salesRepName     String?    @db.VarChar(128)
+  dropName         String?    @db.VarChar(128)
+  notes            String?
+  desiredInvoiceDate DateTime?
   bolNumber        String?
   shipperReferenceNumber   String?  @db.VarChar(64)
   consigneeReferenceNumber String?  @db.VarChar(64)
@@ -368,32 +533,166 @@ model Load {
   assignedDriverId String?
   truckId          String?
   trailerId        String?
+  assignedDriverAt DateTime?
+  assignedTruckAt  DateTime?
+  assignedTrailerAt DateTime?
   plannedAt        DateTime?
   deliveredAt      DateTime?
   podVerifiedAt    DateTime?
   lockedAt         DateTime?
   createdById      String?
+  deletedAt        DateTime?
+  deletedById      String?
+  deletedReason    String?
   createdAt        DateTime   @default(now())
 
   org            Organization          @relation(fields: [orgId], references: [id])
+  operatingEntity OperatingEntity      @relation(fields: [operatingEntityId], references: [id])
   customer       Customer?             @relation(fields: [customerId], references: [id])
   driver         Driver?               @relation("DriverLoads", fields: [assignedDriverId], references: [id])
   truck          Truck?                @relation(fields: [truckId], references: [id])
   trailer        Trailer?              @relation(fields: [trailerId], references: [id])
   createdBy      User?                 @relation("CreatedLoads", fields: [createdById], references: [id])
+  deletedBy      User?                 @relation("DeletedLoads", fields: [deletedById], references: [id])
   stops          Stop[]
   docs           Document[]
   events         Event[]
   tasks          Task[]
   invoices       Invoice[]
   storage        StorageRecord[]
+  trackingSessions LoadTrackingSession[]
+  locationPings LocationPing[]
   legs           LoadLeg[]
   manifestItems  TrailerManifestItem[]
   SettlementItem SettlementItem[]
   loadConfirmationDocuments LoadConfirmationDocument[]
+  charges        LoadCharge[]
 
   @@unique([orgId, loadNumber])
   @@index([orgId, status])
+  @@index([orgId, status, createdAt])
+  @@index([orgId, operatingEntityId])
+  @@index([orgId, deletedAt])
+}
+
+model LoadCharge {
+  id          String         @id @default(cuid())
+  orgId       String
+  loadId      String
+  type        LoadChargeType
+  description String?
+  amountCents Int
+  createdAt   DateTime       @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  load Load         @relation(fields: [loadId], references: [id])
+
+  @@index([orgId, loadId])
+  @@index([loadId])
+}
+
+model OperatingEntity {
+  id        String              @id @default(cuid())
+  orgId     String
+  name      String
+  type      OperatingEntityType
+  addressLine1 String?
+  addressLine2 String?
+  city      String?
+  state     String?
+  zip       String?
+  phone     String?
+  email     String?
+  mcNumber  String?
+  dotNumber String?
+  remitToName String?
+  remitToAddressLine1 String?
+  remitToCity String?
+  remitToState String?
+  remitToZip String?
+  isDefault Boolean            @default(false)
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  org   Organization @relation(fields: [orgId], references: [id])
+  loads Load[]
+
+  @@index([orgId])
+  @@index([orgId, isDefault])
+}
+
+model TrackingIntegration {
+  id           String                    @id @default(cuid())
+  orgId        String
+  providerType TrackingProviderType
+  status       TrackingIntegrationStatus @default(DISCONNECTED)
+  configJson   Json?
+  errorMessage String?
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, providerType])
+  @@index([orgId, status])
+}
+
+model TruckTelematicsMapping {
+  id           String                @id @default(cuid())
+  orgId        String
+  truckId      String
+  providerType TrackingProviderType
+  externalId   String
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  org   Organization @relation(fields: [orgId], references: [id])
+  truck Truck        @relation(fields: [truckId], references: [id])
+
+  @@unique([orgId, providerType, externalId])
+  @@unique([orgId, truckId, providerType])
+  @@index([orgId, truckId])
+}
+
+model LoadTrackingSession {
+  id            String                @id @default(cuid())
+  orgId         String
+  loadId        String
+  providerType  TrackingProviderType
+  status        TrackingSessionStatus @default(OFF)
+  startedByUserId String?
+  startedAt     DateTime?
+  endedAt       DateTime?
+
+  org           Organization @relation(fields: [orgId], references: [id])
+  load          Load         @relation(fields: [loadId], references: [id])
+  startedByUser User?        @relation("TrackingSessionsStarted", fields: [startedByUserId], references: [id])
+
+  @@index([orgId, loadId])
+}
+
+model LocationPing {
+  id          String                @id @default(cuid())
+  orgId       String
+  loadId      String?
+  truckId     String?
+  driverId    String?
+  providerType TrackingProviderType
+  lat         Decimal               @db.Decimal(9, 6)
+  lng         Decimal               @db.Decimal(9, 6)
+  accuracyM   Float?
+  speedMph    Float?
+  heading     Float?
+  capturedAt  DateTime
+  createdAt   DateTime              @default(now())
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  load   Load?        @relation(fields: [loadId], references: [id])
+  truck  Truck?       @relation(fields: [truckId], references: [id])
+  driver Driver?      @relation(fields: [driverId], references: [id])
+
+  @@index([orgId, loadId, capturedAt])
+  @@index([orgId, truckId, capturedAt])
 }
 
 model LoadLeg {
@@ -521,6 +820,7 @@ model Document {
   Task       Task[]
 
   @@index([loadId, type, status], map: "doc_load_type_status_idx")
+  @@index([orgId, type, status])
   @@index([stopId])
 }
 
@@ -535,6 +835,8 @@ model LoadConfirmationDocument {
   sha256           String
   status           LoadConfirmationStatus @default(UPLOADED)
   extractedJson    Json?
+  extractedText    String?                @db.Text
+  extractedDraft   Json?
   normalizedDraft  Json?
   errorMessage     String?
   createdLoadId    String?
@@ -545,9 +847,60 @@ model LoadConfirmationDocument {
   uploadedBy User?        @relation("LoadConfirmationUploads", fields: [uploadedByUserId], references: [id])
   createdLoad Load?       @relation(fields: [createdLoadId], references: [id])
   extractEvents LoadConfirmationExtractEvent[]
+  learningExamples LoadConfirmationLearningExample[]
 
   @@index([orgId, sha256])
   @@index([orgId, status])
+}
+
+model LoadConfirmationLearningExample {
+  id             String   @id @default(cuid())
+  orgId          String
+  docId          String?
+  docFingerprint String?
+  brokerName     String?
+  extractedText  String?  @db.Text
+  extractedDraft Json?
+  correctedDraft Json
+  sizeBytes      Int
+  createdAt      DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+  doc LoadConfirmationDocument? @relation(fields: [docId], references: [id])
+
+  @@index([orgId, createdAt])
+  @@index([orgId, docFingerprint])
+  @@index([orgId, brokerName])
+}
+
+model LearningExample {
+  id            String        @id @default(cuid())
+  orgId         String
+  domain        LearningDomain
+  inputJson     Json
+  correctedJson Json
+  contextJson   Json?
+  createdAt     DateTime      @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, domain, createdAt])
+}
+
+model LearnedMapping {
+  id         String        @id @default(cuid())
+  orgId      String
+  domain     LearningDomain
+  key        String
+  valueJson  Json
+  count      Int           @default(1)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, domain, key])
+  @@index([orgId, domain, updatedAt])
 }
 
 model LoadConfirmationExtractEvent {
@@ -636,6 +989,7 @@ model Task {
   @@index([orgId, type])
 }
 
+// Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
 model StorageRecord {
   id              String    @id @default(cuid())
   orgId           String
@@ -656,6 +1010,8 @@ model OrgSettings {
   orgId                        String          @unique
   companyDisplayName           String
   remitToAddress               String
+  currency                     String          @default("USD")
+  operatingMode                OperatingMode   @default(CARRIER)
   invoiceTerms                 String
   invoiceTermsDays             Int?
   invoiceFooter                String
@@ -671,8 +1027,14 @@ model OrgSettings {
   collectPodDueMinutes         Int
   missingPodAfterMinutes       Int
   reminderFrequencyMinutes     Int
+  requireRateConBeforeDispatch Boolean         @default(false)
+  trackingPreference           TrackingPreference @default(MANUAL)
+  settlementSchedule           SettlementSchedule @default(WEEKLY)
+  settlementTemplate           Json?
   timezone                     String?
+  // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
   freeStorageMinutes           Int
+  // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
   storageRatePerDay            Decimal         @db.Decimal(12, 2)
   pickupFreeDetentionMinutes   Int             @default(120)
   deliveryFreeDetentionMinutes Int             @default(120)
@@ -776,12 +1138,28 @@ model AuditLog {
   entityId  String?
   summary   String
   meta      Json?
+  before    Json?
+  after     Json?
   createdAt DateTime @default(now())
 
   org  Organization @relation(fields: [orgId], references: [id])
   user User         @relation(fields: [userId], references: [id])
 
   @@index([orgId, createdAt])
+}
+
+model OnboardingState {
+  id             String   @id @default(cuid())
+  orgId          String   @unique
+  status         OnboardingStatus @default(NOT_ACTIVATED)
+  completedSteps Json
+  percentComplete Int
+  currentStep    Int
+  completedAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
 }
 
 model UserNotificationPref {

@@ -3,9 +3,9 @@ services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_DB: truckerio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-haulio_dev}
     ports:
       - "5432:5432"
     volumes:

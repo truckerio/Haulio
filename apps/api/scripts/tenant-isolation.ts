@@ -63,6 +63,18 @@ async function main() {
     },
   });
 
+  const operatingEntityB = await prisma.operatingEntity.create({
+    data: {
+      orgId: orgB.id,
+      name: "Tenant Org B",
+      type: "CARRIER",
+      addressLine1: "1 Tenant Way",
+      remitToName: "Tenant Org B",
+      remitToAddressLine1: "1 Tenant Way",
+      isDefault: true,
+    },
+  });
+
   const userA = await prisma.user.create({
     data: { orgId: orgA.id, email: "tenant-a@test.local", role: "ADMIN", name: "Tenant A", passwordHash: "x" },
   });
@@ -72,6 +84,8 @@ async function main() {
     data: {
       orgId: orgB.id,
       loadNumber: `TEN-${Date.now()}`,
+      loadType: "COMPANY",
+      operatingEntityId: operatingEntityB.id,
       customerName: "Tenant Customer",
       rate: new Prisma.Decimal("500.00"),
       stops: {

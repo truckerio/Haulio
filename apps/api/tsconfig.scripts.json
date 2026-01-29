@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@truckerio/db": ["../../packages/db/src/index.ts"],
+      "@truckerio/shared": ["../../packages/shared/src/index.ts"]
+    }
+  },
+  "include": ["../../scripts/qa/**/*.ts", "./scripts/**/*.ts"]
+}

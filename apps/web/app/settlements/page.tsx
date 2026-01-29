@@ -1,12 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { SectionHeader } from "@/components/ui/section-header";
+import { StatusChip } from "@/components/ui/status-chip";
+import { RefinePanel } from "@/components/ui/refine-panel";
+import { EmptyState } from "@/components/ui/empty-state";
+import { FormField } from "@/components/ui/form-field";
+import { Select } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { ErrorBanner } from "@/components/ui/error-banner";
+import { RouteGuard } from "@/components/rbac/route-guard";
+import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
+import { formatSettlementStatusLabel } from "@/lib/status-format";
 
 export default function SettlementsPage() {
+  return (
+    <AppShell title="Settlements" subtitle="Driver pay loop">
+      <SettlementsContent />
+    </AppShell>
+  );
+}
+
+function SettlementsContent() {
+  const { user } = useUser();
+  const canAccess = Boolean(user && (user.role === "ADMIN" || user.role === "BILLING"));
   const [settlements, setSettlements] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
   const [weeks, setWeeks] = useState<any[]>([]);
@@ -16,7 +37,7 @@ export default function SettlementsPage() {
   const [form, setForm] = useState({ driverId: "", periodStart: "", periodEnd: "" });
   const [formError, setFormError] = useState<string | null>(null);
   const [filters, setFilters] = useState({
-    status: "PENDING",
+    status: "ALL",
     from: "",
     to: "",
     week: "",
@@ -29,7 +50,14 @@ export default function SettlementsPage() {
   const endDate = form.periodEnd ? new Date(form.periodEnd) : null;
   const invalidRange = Boolean(startDate && endDate && startDate.getTime() > endDate.getTime());
 
-  const buildParams = () => {
+  const settlementTone = (status?: string | null) => {
+    if (status === "PAID") return "success" as const;
+    if (status === "FINALIZED") return "success" as const;
+    if (status === "DRAFT") return "warning" as const;
+    return "neutral" as const;
+  };
+
+  const buildParams = useCallback(() => {
     const params = new URLSearchParams();
     if (filters.status) params.set("status", filters.status);
     if (filters.from) params.set("from", filters.from);
@@ -38,9 +66,9 @@ export default function SettlementsPage() {
     if (filters.groupBy) params.set("groupBy", filters.groupBy);
     if (filters.driverId) params.set("driverId", filters.driverId);
     return params.toString();
-  };
+  }, [filters]);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const query = buildParams();
       const meData = await apiFetch<{ user: { role: string } }>("/auth/me");
@@ -60,11 +88,12 @@ export default function SettlementsPage() {
     } catch (err) {
       setError((err as Error).message);
     }
-  };
+  }, [buildParams]);
 
   useEffect(() => {
+    if (!canAccess) return;
     loadData();
-  }, [filters]);
+  }, [canAccess, loadData]);
 
   const generateSettlement = async () => {
     if (!form.driverId || !form.periodStart || !form.periodEnd || invalidRange) return;
@@ -98,42 +127,42 @@ export default function SettlementsPage() {
   };
 
   return (
-    <AppShell title="Settlements" subtitle="Driver pay loop">
-      {error ? <Card><div className="text-sm text-red-600">{error}</div></Card> : null}
+    <RouteGuard allowedRoles={["ADMIN", "BILLING"]}>
+      {error ? <ErrorBanner message={error} /> : null}
       {userRole && userRole !== "DRIVER" ? (
         <Card className="space-y-3">
-          <div className="text-xs uppercase tracking-widest text-black/50">Generate settlement</div>
+          <SectionHeader title="Generate settlement" subtitle="Select driver and pay period" />
           <div className="grid gap-3 lg:grid-cols-3">
-            <select
-              className="rounded-2xl border border-black/10 bg-white px-3 py-2"
-              value={form.driverId}
-              onChange={(e) => setForm({ ...form, driverId: e.target.value })}
-            >
-              <option value="">Driver</option>
-              {drivers.map((driver) => (
-                <option key={driver.id} value={driver.id}>
-                  {driver.name}
-                </option>
-              ))}
-            </select>
-            <input
-              type="date"
-              className="rounded-2xl border border-black/10 bg-white px-3 py-2"
-              value={form.periodStart}
-              onChange={(e) => setForm({ ...form, periodStart: e.target.value })}
-            />
-            <input
-              type="date"
-              className="rounded-2xl border border-black/10 bg-white px-3 py-2"
-              value={form.periodEnd}
-              onChange={(e) => setForm({ ...form, periodEnd: e.target.value })}
-            />
+            <FormField label="Driver" htmlFor="settlementDriver">
+              <Select value={form.driverId} onChange={(e) => setForm({ ...form, driverId: e.target.value })}>
+                <option value="">Driver</option>
+                {drivers.map((driver) => (
+                  <option key={driver.id} value={driver.id}>
+                    {driver.name}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+            <FormField label="Period start" htmlFor="settlementStart">
+              <Input
+                type="date"
+                value={form.periodStart}
+                onChange={(e) => setForm({ ...form, periodStart: e.target.value })}
+              />
+            </FormField>
+            <FormField label="Period end" htmlFor="settlementEnd">
+              <Input
+                type="date"
+                value={form.periodEnd}
+                onChange={(e) => setForm({ ...form, periodEnd: e.target.value })}
+              />
+            </FormField>
           </div>
           {invalidRange ? (
-            <div className="text-sm text-red-600">End date must be after start date.</div>
+            <div className="text-sm text-[color:var(--color-danger)]">End date must be after start date.</div>
           ) : null}
           {formError ? (
-            <div className="text-sm text-red-600">{formError}</div>
+            <div className="text-sm text-[color:var(--color-danger)]">{formError}</div>
           ) : null}
           <Button onClick={generateSettlement} disabled={!form.driverId || !form.periodStart || !form.periodEnd || invalidRange}>
             Generate
@@ -141,153 +170,173 @@ export default function SettlementsPage() {
         </Card>
       ) : null}
 
-      <Card className="space-y-3">
-        <div className="text-xs uppercase tracking-widest text-black/50">Settlements</div>
-        <div className="grid gap-3 lg:grid-cols-6">
-          <select
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-            value={filters.status}
-            onChange={(e) => setFilters({ ...filters, status: e.target.value })}
-          >
-            <option value="PENDING">Pending</option>
-            <option value="DRAFT">Draft</option>
-            <option value="FINALIZED">Finalized</option>
-            <option value="PAID">Paid</option>
-          </select>
-          <input
-            type="date"
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-            value={filters.from}
-            onChange={(e) => setFilters({ ...filters, from: e.target.value })}
-          />
-          <input
-            type="date"
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-            value={filters.to}
-            onChange={(e) => setFilters({ ...filters, to: e.target.value })}
-          />
-          <select
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-            value={filters.week}
-            onChange={(e) => setFilters({ ...filters, week: e.target.value })}
-          >
-            <option value="">Week</option>
-            {weeks.map((week: any) => (
-              <option key={week.weekKey} value={week.weekKey}>
-                {week.weekLabel}
-              </option>
-            ))}
-          </select>
-          <select
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-            value={filters.groupBy}
-            onChange={(e) => setFilters({ ...filters, groupBy: e.target.value })}
-          >
-            <option value="week">Group by week</option>
-            <option value="none">Flat list</option>
-          </select>
-          {userRole && ["ADMIN", "DISPATCHER", "BILLING"].includes(userRole) ? (
-            <select
-              className="rounded-2xl border border-black/10 bg-white px-3 py-2 text-sm"
-              value={filters.driverId}
-              onChange={(e) => setFilters({ ...filters, driverId: e.target.value })}
-            >
-              <option value="">Driver</option>
-              {drivers.map((driver) => (
-                <option key={driver.id} value={driver.id}>
-                  {driver.name}
-                </option>
-              ))}
-            </select>
-          ) : null}
-        </div>
+      <Card className="space-y-4">
+        <SectionHeader title="Settlements" subtitle="Generate, review, and finalize driver pay" />
+        <RefinePanel>
+          <div className="grid gap-3 lg:grid-cols-6">
+            <FormField label="Status" htmlFor="filterStatus">
+              <Select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
+                <option value="ALL">All</option>
+                <option value="PENDING">Pending</option>
+                <option value="DRAFT">Pending</option>
+                <option value="FINALIZED">Approved</option>
+                <option value="PAID">Paid</option>
+              </Select>
+            </FormField>
+            <FormField label="From" htmlFor="filterFrom">
+              <Input type="date" value={filters.from} onChange={(e) => setFilters({ ...filters, from: e.target.value })} />
+            </FormField>
+            <FormField label="To" htmlFor="filterTo">
+              <Input type="date" value={filters.to} onChange={(e) => setFilters({ ...filters, to: e.target.value })} />
+            </FormField>
+            <FormField label="Week" htmlFor="filterWeek">
+              <Select value={filters.week} onChange={(e) => setFilters({ ...filters, week: e.target.value })}>
+                <option value="">Week</option>
+                {weeks.map((week: any) => (
+                  <option key={week.weekKey} value={week.weekKey}>
+                    {week.weekLabel}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+            <FormField label="Group by" htmlFor="filterGroupBy">
+              <Select value={filters.groupBy} onChange={(e) => setFilters({ ...filters, groupBy: e.target.value })}>
+                <option value="week">Group by week</option>
+                <option value="none">Flat list</option>
+              </Select>
+            </FormField>
+            {userRole && ["ADMIN", "DISPATCHER", "BILLING"].includes(userRole) ? (
+              <FormField label="Driver" htmlFor="filterDriver">
+                <Select value={filters.driverId} onChange={(e) => setFilters({ ...filters, driverId: e.target.value })}>
+                  <option value="">Driver</option>
+                  {drivers.map((driver) => (
+                    <option key={driver.id} value={driver.id}>
+                      {driver.name}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+            ) : null}
+          </div>
+        </RefinePanel>
         {totals ? (
-          <div className="text-sm text-black/60">
-            {filters.status === "PENDING" ? "Pending total" : "Total"}: ${totals.net} · {totals.count} settlement(s)
+          <div className="flex flex-wrap items-center gap-3 text-sm text-[color:var(--color-text-muted)]">
+            <span>{totals.count} settlements</span>
+            <span>Net ${totals.net}</span>
           </div>
         ) : null}
-        <div className="grid gap-3">
-          {filters.groupBy === "week"
-            ? groups.map((group) => (
-              <div key={group.weekKey} className="rounded-2xl border border-black/10 bg-white/70 p-4">
-                <div className="text-xs uppercase tracking-widest text-black/50">{group.weekLabel}</div>
-                <div className="text-sm text-black/60">Net ${group.totals?.net ?? "0.00"} · {group.totals?.count ?? 0} settlement(s)</div>
-                <div className="mt-3 grid gap-2">
-                  {group.settlements.map((settlement: any) => (
-                    <div key={settlement.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-black/10 bg-white px-4 py-2">
-                      <div>
-                        <div className="text-xs uppercase tracking-widest text-black/50">{settlement.status}</div>
-                        <div className="text-lg font-semibold">{settlement.driver?.name ?? "Driver"}</div>
-                        <div className="text-sm text-black/60">
-                          {new Date(settlement.periodStart).toLocaleDateString()} → {new Date(settlement.periodEnd).toLocaleDateString()}
+        <div className="grid gap-4">
+          {groups.length > 0 ? (
+            groups.map((group) => {
+              const groupLabel = group.label ?? group.weekLabel ?? group.weekKey ?? "Period";
+              const groupCount = group.count ?? group.totals?.count ?? group.settlements?.length ?? 0;
+              const groupItems = group.items ?? group.settlements ?? [];
+              return (
+              <div key={group.key ?? group.weekKey ?? groupLabel} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-ink">{groupLabel}</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">{groupCount} settlements</div>
+                </div>
+                <div className="mt-3 grid gap-3">
+                  {groupItems.map((settlement: any) => (
+                    <div
+                      key={settlement.id}
+                      className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-white p-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-semibold text-ink">{settlement.periodLabel}</div>
+                          <div className="text-xs text-[color:var(--color-text-muted)]">{settlement.driverName}</div>
                         </div>
+                        <StatusChip label={formatSettlementStatusLabel(settlement.status)} tone={settlementTone(settlement.status)} />
                       </div>
-                      <div className="text-sm text-black/60">
-                        Net ${settlement.net ?? settlement.gross ?? "0.00"}
+                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-[color:var(--color-text-muted)]">
+                        <div>Net ${settlement.net}</div>
+                        <div>{settlement.loadCount} loads</div>
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button variant="secondary" onClick={() => viewSettlement(settlement.id)}>View</Button>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button size="sm" variant="secondary" onClick={() => viewSettlement(settlement.id)}>
+                          View
+                        </Button>
                         {settlement.status === "DRAFT" ? (
-                          <Button onClick={() => finalizeSettlement(settlement.id)}>Finalize</Button>
+                          <Button size="sm" onClick={() => finalizeSettlement(settlement.id)}>
+                            Finalize
+                          </Button>
                         ) : null}
                         {settlement.status === "FINALIZED" ? (
-                          <Button onClick={() => markPaid(settlement.id)}>Mark paid</Button>
+                          <Button size="sm" variant="secondary" onClick={() => markPaid(settlement.id)}>
+                            Mark paid
+                          </Button>
                         ) : null}
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
-            ))
-            : settlements.map((settlement) => (
-              <div key={settlement.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-black/10 bg-white/70 px-4 py-2">
-                <div>
-                  <div className="text-xs uppercase tracking-widest text-black/50">{settlement.status}</div>
-                  <div className="text-lg font-semibold">{settlement.driver?.name ?? "Driver"}</div>
-                  <div className="text-sm text-black/60">
-                    {new Date(settlement.periodStart).toLocaleDateString()} → {new Date(settlement.periodEnd).toLocaleDateString()}
+            );})
+          ) : settlements.length > 0 ? (
+            settlements.map((settlement) => (
+              <div key={settlement.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-semibold text-ink">{settlement.periodLabel}</div>
+                    <div className="text-xs text-[color:var(--color-text-muted)]">{settlement.driverName}</div>
                   </div>
+                  <StatusChip label={formatSettlementStatusLabel(settlement.status)} tone={settlementTone(settlement.status)} />
                 </div>
-                <div className="text-sm text-black/60">
-                  Net ${settlement.net ?? settlement.gross ?? "0.00"}
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-[color:var(--color-text-muted)]">
+                  <div>Net ${settlement.net}</div>
+                  <div>{settlement.loadCount} loads</div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="secondary" onClick={() => viewSettlement(settlement.id)}>View</Button>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => viewSettlement(settlement.id)}>
+                    View
+                  </Button>
                   {settlement.status === "DRAFT" ? (
-                    <Button onClick={() => finalizeSettlement(settlement.id)}>Finalize</Button>
+                    <Button size="sm" onClick={() => finalizeSettlement(settlement.id)}>
+                      Finalize
+                    </Button>
                   ) : null}
                   {settlement.status === "FINALIZED" ? (
-                    <Button onClick={() => markPaid(settlement.id)}>Mark paid</Button>
+                    <Button size="sm" variant="secondary" onClick={() => markPaid(settlement.id)}>
+                      Mark paid
+                    </Button>
                   ) : null}
                 </div>
               </div>
-            ))}
-          {filters.groupBy === "week" && groups.length === 0 ? (
-            <div className="text-sm text-black/60">No settlements yet.</div>
-          ) : null}
-          {filters.groupBy === "none" && settlements.length === 0 ? (
-            <div className="text-sm text-black/60">No settlements yet.</div>
-          ) : null}
+            ))
+          ) : (
+            <EmptyState title="No settlements yet." description="Generate settlements once loads are completed." />
+          )}
         </div>
       </Card>
 
       {selected ? (
-        <Card className="space-y-3">
-          <div className="text-xs uppercase tracking-widest text-black/50">Settlement detail</div>
-          <div className="text-lg font-semibold">{selected.driver?.name}</div>
-          <div className="grid gap-2">
-            {selected.items?.map((item: any) => (
-              <div key={item.id} className="flex items-center justify-between rounded-2xl border border-black/10 bg-white/70 px-4 py-2">
-                <div>
-                  <div className="text-xs uppercase tracking-widest text-black/50">{item.code}</div>
-                  <div className="text-sm text-black/60">{item.description ?? item.loadId ?? "-"}</div>
-                </div>
-                <div className="text-sm font-semibold">${item.amount}</div>
-              </div>
-            ))}
+        <Card className="space-y-2">
+          <SectionHeader title="Settlement details" subtitle={selected.periodLabel} />
+          <div className="text-sm text-[color:var(--color-text-muted)]">Driver: {selected.driverName}</div>
+          <div className="text-sm text-[color:var(--color-text-muted)]">
+            Status: {formatSettlementStatusLabel(selected.status)}
           </div>
+          <div className="text-sm text-[color:var(--color-text-muted)]">Net: ${selected.net}</div>
+          {selected.items?.length ? (
+            <div className="mt-2 space-y-2 text-sm">
+              {selected.items.map((item: any) => (
+                <div
+                  key={item.id}
+                  className="flex items-center justify-between rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2"
+                >
+                  <div>
+                    <div className="text-sm text-ink">{item.description}</div>
+                    <div className="text-xs text-[color:var(--color-text-muted)]">{item.type}</div>
+                  </div>
+                  <div className="text-sm text-ink">${item.amount}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </Card>
       ) : null}
-    </AppShell>
+    </RouteGuard>
   );
 }

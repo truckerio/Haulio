@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api";
+import { FormField } from "@/components/ui/form-field";
 
 export default function ResetPasswordPage() {
   const router = useRouter();
@@ -55,26 +56,30 @@ export default function ResetPasswordPage() {
         <Card className="space-y-4">
           <div>
             <h2 className="text-xl font-semibold">Reset password</h2>
-            <p className="text-sm text-black/60">Choose a new password to finish resetting.</p>
+            <p className="text-sm text-[color:var(--color-text-muted)]">Choose a new password to finish resetting.</p>
           </div>
           <form className="space-y-3" onSubmit={handleSubmit}>
-            <Input
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="New password"
-              type="password"
-            />
-            <Input
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              placeholder="Confirm password"
-              type="password"
-            />
+            <FormField label="New password" htmlFor="resetPassword">
+              <Input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 8 characters"
+                type="password"
+              />
+            </FormField>
+            <FormField label="Confirm password" htmlFor="resetConfirm">
+              <Input
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                placeholder="Re-enter password"
+                type="password"
+              />
+            </FormField>
             <Button type="submit" size="lg" className="w-full" disabled={loading}>
               {loading ? "Updating..." : "Reset password"}
             </Button>
           </form>
-          {status ? <div className="text-sm text-black/70">{status}</div> : null}
+          {status ? <div className="text-sm text-[color:var(--color-text-muted)]">{status}</div> : null}
           <Button variant="ghost" size="sm" className="w-full" onClick={() => router.push("/")}>
             Back to login
           </Button>

@@ -1,5 +1,14 @@
-import "dotenv/config";
-import { prisma, TaskPriority, TaskType, InvoiceStatus, StopType } from "@truckerio/db";
+import "./lib/env";
+import {
+  prisma,
+  TaskPriority,
+  TaskStatus,
+  TaskType,
+  InvoiceStatus,
+  StopType,
+  LoadStatus,
+  DocStatus,
+} from "@truckerio/db";
 import { processLoadConfirmations } from "./load-confirmations";
 
 const parseTermsDays = (value?: string | null) => {
@@ -7,6 +16,39 @@ const parseTermsDays = (value?: string | null) => {
   const match = value.match(/(\\d+)/);
   return match ? Number(match[1]) : null;
 };
+
+async function completeTaskSystem(params: {
+  taskId: string;
+  orgId: string;
+  loadId?: string | null;
+  title: string;
+  reason: string;
+}) {
+  const updated = await prisma.task.updateMany({
+    where: {
+      id: params.taskId,
+      orgId: params.orgId,
+      status: { in: [TaskStatus.OPEN, TaskStatus.IN_PROGRESS] },
+    },
+    data: {
+      status: TaskStatus.DONE,
+      completedAt: new Date(),
+      completedById: null,
+    },
+  });
+  if (updated.count === 0) return false;
+  await prisma.event.create({
+    data: {
+      orgId: params.orgId,
+      loadId: params.loadId ?? null,
+      type: "TASK_DONE",
+      message: params.title,
+      taskId: params.taskId,
+      meta: { taskId: params.taskId, reason: params.reason, system: true },
+    },
+  });
+  return true;
+}
 
 async function ensureMissingPodTasks() {
   const orgs = await prisma.organization.findMany({ include: { settings: true } });
@@ -57,6 +99,57 @@ async function ensureMissingPodTasks() {
           taskId: task.id,
           meta: { taskId: task.id, type: TaskType.MISSING_DOC },
         },
+      });
+    }
+  }
+}
+
+async function cleanupMissingPodTasks() {
+  const tasks = await prisma.task.findMany({
+    where: {
+      type: TaskType.MISSING_DOC,
+      status: { in: [TaskStatus.OPEN, TaskStatus.IN_PROGRESS] },
+      dedupeKey: { contains: "MISSING_DOC:POD:" },
+    },
+    include: {
+      load: {
+        select: {
+          id: true,
+          orgId: true,
+          status: true,
+          podVerifiedAt: true,
+          docs: { select: { type: true, status: true } },
+        },
+      },
+    },
+  });
+
+  for (const task of tasks) {
+    const load = task.load;
+    if (!load) {
+      await completeTaskSystem({
+        taskId: task.id,
+        orgId: task.orgId,
+        title: task.title,
+        reason: "load_missing",
+      });
+      continue;
+    }
+    if (load.orgId !== task.orgId) continue;
+
+    const terminalStatus = [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED].includes(load.status);
+    const hasVerifiedPod =
+      Boolean(load.podVerifiedAt) ||
+      load.docs.some((doc) => doc.type === "POD" && doc.status === DocStatus.VERIFIED);
+
+    if (terminalStatus || hasVerifiedPod) {
+      const reason = terminalStatus ? `load_${load.status.toLowerCase()}` : "pod_verified";
+      await completeTaskSystem({
+        taskId: task.id,
+        orgId: task.orgId,
+        loadId: load.id,
+        title: task.title,
+        reason,
       });
     }
   }
@@ -155,12 +248,48 @@ async function ensureComplianceTasks() {
   }
 }
 
+let lastLearningPruneAt: number | null = null;
+
+async function pruneLearningExamples() {
+  const orgDomains = await prisma.learningExample.findMany({
+    select: { orgId: true, domain: true },
+    distinct: ["orgId", "domain"],
+  });
+
+  for (const entry of orgDomains) {
+    const excess = await prisma.learningExample.findMany({
+      where: { orgId: entry.orgId, domain: entry.domain },
+      orderBy: { createdAt: "desc" },
+      skip: 500,
+      select: { id: true },
+    });
+    if (excess.length > 0) {
+      await prisma.learningExample.deleteMany({
+        where: { id: { in: excess.map((row) => row.id) } },
+      });
+    }
+  }
+
+  const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  await prisma.learnedMapping.deleteMany({
+    where: {
+      count: { lte: 1 },
+      updatedAt: { lt: cutoff },
+    },
+  });
+}
+
 async function runLoop() {
   try {
     await ensureMissingPodTasks();
+    await cleanupMissingPodTasks();
     await ensureInvoiceAgingTasks();
     await ensureComplianceTasks();
     await processLoadConfirmations();
+    if (!lastLearningPruneAt || Date.now() - lastLearningPruneAt > 24 * 60 * 60 * 1000) {
+      await pruneLearningExamples();
+      lastLearningPruneAt = Date.now();
+    }
   } catch (error) {
     console.error("Worker error", error);
   }

@@ -1,2 +1,2 @@
-loadNumber,customerName,status,rate,miles,assignedDriverEmail,truckUnit,trailerUnit
-LD-4001,Example Customer,PLANNED,1500,520,driver@demo.com,T-101,TR-201
+loadNumber,customerName,status,rate,miles,shipperReferenceNumber,consigneeReferenceNumber,palletCount,weightLbs,assignedDriverEmail,truckUnit,trailerUnit
+LD-4001,Example Customer,PLANNED,1500,520,SHIP-REF-1,CONS-REF-9,24,42000,driver@demo.com,T-101,TR-201

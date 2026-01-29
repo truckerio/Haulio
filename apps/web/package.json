@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm run lint && pnpm run typecheck"
   },
   "dependencies": {
     "@truckerio/shared": "workspace:*",
@@ -23,6 +26,8 @@
     "@types/node": "^20.14.15",
     "@types/react": "^18.3.4",
     "@types/react-dom": "^18.3.0",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.35",
     "postcss": "^8.4.41",
     "typescript": "^5.5.4"
   }

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { apiFetch, setCsrfToken } from "@/lib/api";
+import { FormField } from "@/components/ui/form-field";
 
 export default function HomePage() {
   const router = useRouter();
@@ -48,27 +49,31 @@ export default function HomePage() {
         <div className="grid gap-8 lg:grid-cols-[1.1fr,0.9fr]">
           <div className="space-y-6">
             <h1 className="text-4xl font-semibold leading-tight">
-              TruckerIO back-office meets a zero-friction driver flow.
+              Haulio back-office meets a zero-friction driver flow.
             </h1>
-            <p className="text-lg text-black/70">
-              Dispatch, billing, storage, and audit tools with a driver experience built for real-world signal
+            <p className="text-lg text-[color:var(--color-text-muted)]">
+              Dispatch, billing, and audit tools with a driver experience built for real-world signal
               conditions.
             </p>
           </div>
           <Card className="space-y-4">
             <div>
               <h2 className="text-xl font-semibold">Log in</h2>
-              <p className="text-sm text-black/60">Enter your email and password.</p>
+              <p className="text-sm text-[color:var(--color-text-muted)]">Enter your email and password.</p>
             </div>
             <form className="space-y-3" onSubmit={handleLogin}>
-              <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-              <Input
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-                type="password"
-              />
-              {error ? <div className="text-sm text-red-600">{error}</div> : null}
+              <FormField label="Email" htmlFor="loginEmail">
+                <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" />
+              </FormField>
+              <FormField label="Password" htmlFor="loginPassword">
+                <Input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Your password"
+                  type="password"
+                />
+              </FormField>
+              {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}
               <Button type="submit" size="lg" className="w-full" disabled={loading}>
                 {loading ? "Signing in..." : "Sign in"}
               </Button>

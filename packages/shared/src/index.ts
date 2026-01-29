@@ -2,12 +2,16 @@ export const ROLES = ["ADMIN", "DISPATCHER", "BILLING", "DRIVER"] as const;
 export type Role = (typeof ROLES)[number];
 
 export const LOAD_STATUSES = [
+  "DRAFT",
   "PLANNED",
   "ASSIGNED",
   "IN_TRANSIT",
   "DELIVERED",
+  "POD_RECEIVED",
   "READY_TO_INVOICE",
   "INVOICED",
+  "PAID",
+  "CANCELLED",
 ] as const;
 export type LoadStatus = (typeof LOAD_STATUSES)[number];
 

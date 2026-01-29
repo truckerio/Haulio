@@ -1,6 +1,6 @@
 {
-  "name": "TruckerIO Driver",
-  "short_name": "TruckerIO",
+  "name": "Haulio Driver",
+  "short_name": "Haulio",
   "start_url": "/driver",
   "display": "standalone",
   "background_color": "#f8f5f1",

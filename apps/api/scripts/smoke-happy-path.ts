@@ -83,18 +83,39 @@ async function main() {
   });
   const driver = await prisma.driver.upsert({
     where: { userId: driverUser.id },
-    update: { orgId: org.id, name: driverUser.name ?? "Happy Driver" },
-    create: { orgId: org.id, userId: driverUser.id, name: driverUser.name ?? "Happy Driver" },
+    update: { orgId: org.id, name: driverUser.name ?? "Happy Driver", status: "AVAILABLE" },
+    create: { orgId: org.id, userId: driverUser.id, name: driverUser.name ?? "Happy Driver", status: "AVAILABLE" },
   });
 
   let truck = await prisma.truck.findFirst({ where: { orgId: org.id, unit: "HP-TRUCK" } });
   if (!truck) {
-    truck = await prisma.truck.create({ data: { orgId: org.id, unit: "HP-TRUCK" } });
+    truck = await prisma.truck.create({
+      data: { orgId: org.id, unit: "HP-TRUCK", vin: "1HGCM82633A004352", status: "AVAILABLE" },
+    });
+  } else if (truck.status !== "AVAILABLE") {
+    truck = await prisma.truck.update({ where: { id: truck.id }, data: { status: "AVAILABLE" } });
   }
   let trailer = await prisma.trailer.findFirst({ where: { orgId: org.id, unit: "HP-TRAILER" } });
   if (!trailer) {
-    trailer = await prisma.trailer.create({ data: { orgId: org.id, unit: "HP-TRAILER" } });
+    trailer = await prisma.trailer.create({
+      data: { orgId: org.id, unit: "HP-TRAILER", type: "DRY_VAN", status: "AVAILABLE" },
+    });
+  } else if (trailer.status !== "AVAILABLE") {
+    trailer = await prisma.trailer.update({ where: { id: trailer.id }, data: { status: "AVAILABLE" } });
   }
+
+  await prisma.load.updateMany({
+    where: { orgId: org.id, assignedDriverId: driver.id },
+    data: { assignedDriverId: null, assignedDriverAt: null },
+  });
+  await prisma.load.updateMany({
+    where: { orgId: org.id, truckId: truck.id },
+    data: { truckId: null, assignedTruckAt: null },
+  });
+  await prisma.load.updateMany({
+    where: { orgId: org.id, trailerId: trailer.id },
+    data: { trailerId: null, assignedTrailerAt: null },
+  });
 
   const dispatcherAuth = await authFor(dispatcher.id);
   const billingAuth = await authFor(billing.id);

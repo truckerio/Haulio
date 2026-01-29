@@ -98,6 +98,18 @@ async function main() {
     throw new Error("No organization found");
   }
 
+  const defaultOperatingEntity =
+    (await prisma.operatingEntity.findFirst({ where: { orgId: org.id, isDefault: true } })) ??
+    (await prisma.operatingEntity.create({
+      data: {
+        orgId: org.id,
+        name: org.name,
+        type: "CARRIER",
+        remitToName: org.name,
+        isDefault: true,
+      },
+    }));
+
   if (wipe) {
     await prisma.task.deleteMany({ where: { orgId: org.id } });
     await prisma.event.deleteMany({ where: { orgId: org.id } });
@@ -157,18 +169,20 @@ async function main() {
     const status = row.status?.trim() || (assignedDriverId ? "ASSIGNED" : "PLANNED");
 
     const load = await prisma.load.create({
-        data: {
-          orgId: org.id,
-          loadNumber,
-          customerName: row.customerName || "Unknown",
-          shipperReferenceNumber: normalizeReference(row.shipperReferenceNumber ?? "") ?? undefined,
-          consigneeReferenceNumber: normalizeReference(row.consigneeReferenceNumber ?? "") ?? undefined,
-          palletCount: toInt(row.palletCount ?? "") ?? undefined,
-          weightLbs: toInt(row.weightLbs ?? "") ?? undefined,
-          miles: toNumber(row.miles ?? "") ?? undefined,
-          rate: toNumber(row.rate ?? "") ?? undefined,
-          assignedDriverId: assignedDriverId ?? null,
-          truckId: truckId ?? null,
+      data: {
+        orgId: org.id,
+        loadNumber,
+        loadType: row.loadType?.trim() === "BROKERED" ? "BROKERED" : "COMPANY",
+        operatingEntityId: defaultOperatingEntity.id,
+        customerName: row.customerName || "Unknown",
+        shipperReferenceNumber: normalizeReference(row.shipperReferenceNumber ?? "") ?? undefined,
+        consigneeReferenceNumber: normalizeReference(row.consigneeReferenceNumber ?? "") ?? undefined,
+        palletCount: toInt(row.palletCount ?? "") ?? undefined,
+        weightLbs: toInt(row.weightLbs ?? "") ?? undefined,
+        miles: toNumber(row.miles ?? "") ?? undefined,
+        rate: toNumber(row.rate ?? "") ?? undefined,
+        assignedDriverId: assignedDriverId ?? null,
+        truckId: truckId ?? null,
         trailerId: trailerId ?? null,
         status: status as any,
       },

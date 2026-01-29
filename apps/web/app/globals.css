@@ -5,24 +5,36 @@
 :root {
   --font-display: "Space Grotesk", sans-serif;
   --font-body: "Instrument Sans", sans-serif;
-  --ink: #0f172a;
-  --muted: #586072;
-  --canvas: #f5f2ec;
-  --card: #ffffff;
-  --accent: #0f3d2e;
-  --accent-2: #f97316;
+  --color-text: #111111;
+  --color-text-muted: #5f6572;
+  --color-text-subtle: #8a909c;
+  --color-bg: #ffffff;
+  --color-bg-muted: #f6f7f8;
+  --color-surface: #ffffff;
+  --color-divider: rgba(0, 0, 0, 0.06);
+  --color-divider-strong: rgba(0, 0, 0, 0.12);
+  --color-accent: #0f3d2e;
+  --color-accent-soft: rgba(15, 61, 46, 0.18);
+  --color-success: #0f766e;
+  --color-success-soft: rgba(15, 118, 110, 0.12);
+  --color-warning: #b45309;
+  --color-warning-soft: rgba(180, 83, 9, 0.14);
+  --color-danger: #b91c1c;
+  --color-danger-soft: rgba(185, 28, 28, 0.12);
+  --color-info: #0369a1;
+  --color-info-soft: rgba(3, 105, 161, 0.12);
+  --radius-card: 14px;
+  --radius-control: 12px;
+  --shadow-card: 0 12px 30px rgba(15, 23, 42, 0.08);
+  --shadow-subtle: 0 6px 16px rgba(15, 23, 42, 0.06);
 }
 
 body {
   font-family: var(--font-body);
-  color: var(--ink);
-  background-color: var(--canvas);
-  background-image:
-    radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.9), transparent 45%),
-    radial-gradient(circle at 88% 12%, rgba(216, 191, 168, 0.4), transparent 50%),
-    radial-gradient(circle at 80% 88%, rgba(15, 61, 46, 0.08), transparent 45%),
-    linear-gradient(160deg, rgba(248, 245, 241, 0.6), rgba(250, 248, 244, 0.95));
-  background-attachment: fixed;
+  color: var(--color-text);
+  background-color: var(--color-bg-muted);
+  background-image: radial-gradient(circle at 18% 20%, rgba(255, 255, 255, 0.9), transparent 45%);
+  overflow-x: hidden;
 }
 
 h1,
@@ -33,12 +45,37 @@ h4 {
 }
 
 ::selection {
-  background: var(--accent-2);
+  background: var(--color-accent);
   color: #ffffff;
 }
 
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 8px;
+  z-index: 50;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #ffffff;
+  padding: 8px 16px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+}
+
+.skip-link:focus {
+  left: 16px;
+}
+
 .page-fade {
-  animation: pageFade 0.45s ease both;
+  animation: pageFade 0.2s ease-out both;
+}
+
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--color-divider-strong);
+  box-shadow: 0 0 0 2px var(--color-accent-soft);
 }
 
 @keyframes pageFade {

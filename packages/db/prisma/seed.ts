@@ -2,12 +2,10 @@ import bcrypt from "bcryptjs";
 import { prisma, Prisma } from "../src";
 
 async function main() {
-  await prisma.auditLog.deleteMany();
   await prisma.session.deleteMany();
   await prisma.event.deleteMany();
   await prisma.document.deleteMany();
   await prisma.task.deleteMany();
-  await prisma.storageRecord.deleteMany();
   await prisma.invoice.deleteMany();
   await prisma.stop.deleteMany();
   await prisma.load.deleteMany();
@@ -69,6 +67,7 @@ async function main() {
       orgId: org.id,
       userId: driverUser.id,
       name: "Dani Driver",
+      status: "ON_LOAD",
       phone: "(555) 010-2000",
       license: "D-1234567",
       licenseState: "TX",
@@ -79,17 +78,17 @@ async function main() {
   });
 
   const truck1 = await prisma.truck.create({
-    data: { orgId: org.id, unit: "T-101", plate: "ABC-123" },
+    data: { orgId: org.id, unit: "T-101", vin: "1HGBH41JXMN109186", plate: "ABC-123", plateState: "TX", status: "ASSIGNED" },
   });
   const truck2 = await prisma.truck.create({
-    data: { orgId: org.id, unit: "T-102", plate: "DEF-456" },
+    data: { orgId: org.id, unit: "T-102", vin: "1HGCM82633A004352", plate: "DEF-456", plateState: "TX", status: "ASSIGNED" },
   });
 
   const trailer1 = await prisma.trailer.create({
-    data: { orgId: org.id, unit: "TR-201", plate: "TR-201" },
+    data: { orgId: org.id, unit: "TR-201", type: "DRY_VAN", plate: "TR-201", plateState: "TX", status: "ASSIGNED" },
   });
   const trailer2 = await prisma.trailer.create({
-    data: { orgId: org.id, unit: "TR-202", plate: "TR-202" },
+    data: { orgId: org.id, unit: "TR-202", type: "REEFER", plate: "TR-202", plateState: "TX", status: "ASSIGNED" },
   });
 
   await prisma.orgSettings.create({
@@ -101,6 +100,12 @@ async function main() {
       invoiceFooter: "Thank you for your business.",
       invoicePrefix: "INV-",
       nextInvoiceNumber: 1001,
+      currency: "USD",
+      operatingMode: "CARRIER",
+      requireRateConBeforeDispatch: false,
+      trackingPreference: "MANUAL",
+      settlementSchedule: "WEEKLY",
+      settlementTemplate: { includeLinehaul: true, includeFuelSurcharge: false, includeAccessorials: false },
       podRequireSignature: true,
       podRequirePrintedName: true,
       podRequireDeliveryDate: true,
@@ -111,13 +116,27 @@ async function main() {
       missingPodAfterMinutes: 120,
       reminderFrequencyMinutes: 20,
       timezone: "America/Chicago",
+      // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
       freeStorageMinutes: 120,
+      // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
       storageRatePerDay: new Prisma.Decimal("150.00"),
       pickupFreeDetentionMinutes: 120,
       deliveryFreeDetentionMinutes: 120,
       detentionRatePerHour: new Prisma.Decimal("75.00"),
       invoiceTermsDays: 30,
       driverRatePerMile: new Prisma.Decimal("0.65"),
+    },
+  });
+
+  const operatingEntity = await prisma.operatingEntity.create({
+    data: {
+      orgId: org.id,
+      name: "Demo Transport LLC",
+      type: "CARRIER",
+      addressLine1: "Demo Transport LLC\n123 Freight Ave\nDallas, TX 75201",
+      remitToName: "Demo Transport LLC",
+      remitToAddressLine1: "Demo Transport LLC\n123 Freight Ave\nDallas, TX 75201",
+      isDefault: true,
     },
   });
 
@@ -168,12 +187,17 @@ async function main() {
       orgId: org.id,
       loadNumber: "LD-1001",
       status: "ASSIGNED",
+      loadType: "COMPANY",
+      operatingEntityId: operatingEntity.id,
       customerId: customerA.id,
       customerName: "Blue Ridge Foods",
       miles: 280,
       assignedDriverId: driver.id,
       truckId: truck1.id,
       trailerId: trailer1.id,
+      assignedDriverAt: new Date(),
+      assignedTruckAt: new Date(),
+      assignedTrailerAt: new Date(),
       rate: new Prisma.Decimal("1400.00"),
       customerRef: "PO-4491",
       bolNumber: "BOL-1001",
@@ -216,12 +240,17 @@ async function main() {
       orgId: org.id,
       loadNumber: "LD-1002",
       status: "IN_TRANSIT",
+      loadType: "COMPANY",
+      operatingEntityId: operatingEntity.id,
       customerId: customerB.id,
       customerName: "Granite Mills",
       miles: 210,
       assignedDriverId: driver.id,
       truckId: truck2.id,
       trailerId: trailer2.id,
+      assignedDriverAt: new Date(),
+      assignedTruckAt: new Date(),
+      assignedTrailerAt: new Date(),
       rate: new Prisma.Decimal("1150.00"),
       customerRef: "PO-7781",
       createdById: dispatch.id,
@@ -261,6 +290,8 @@ async function main() {
       orgId: org.id,
       loadNumber: "LD-1003",
       status: "DELIVERED",
+      loadType: "COMPANY",
+      operatingEntityId: operatingEntity.id,
       customerId: customerC.id,
       customerName: "Freshline Produce",
       miles: 165,
@@ -305,6 +336,8 @@ async function main() {
       orgId: org.id,
       loadNumber: "LD-1004",
       status: "READY_TO_INVOICE",
+      loadType: "COMPANY",
+      operatingEntityId: operatingEntity.id,
       customerId: customerD.id,
       customerName: "Sunrise Paper",
       miles: 310,
@@ -351,6 +384,8 @@ async function main() {
       orgId: org.id,
       loadNumber: "LD-1005",
       status: "INVOICED",
+      loadType: "BROKERED",
+      operatingEntityId: operatingEntity.id,
       lockedAt: new Date(),
       customerId: customerE.id,
       customerName: "Ironline Steel",

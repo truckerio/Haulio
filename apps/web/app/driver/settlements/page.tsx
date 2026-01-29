@@ -1,10 +1,26 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { DriverShell } from "@/components/driver/driver-shell";
+import { DriverStatusChip } from "@/components/driver/driver-status-chip";
+import { InlineHelper } from "@/components/driver/inline-helper";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { apiFetch } from "@/lib/api";
+
+type SettlementStatus = "DRAFT" | "FINALIZED" | "PAID";
+
+type DriverSettlement = {
+  id: string;
+  status: SettlementStatus;
+  periodStart: string;
+  periodEnd: string;
+  weekLabel?: string | null;
+  net?: string | number | null;
+  gross?: string | number | null;
+  paidAt?: string | null;
+};
 
 function startOfIsoWeek(date: Date) {
   const copy = new Date(date);
@@ -18,12 +34,18 @@ function formatDate(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
-export default function DriverSettlementsPage() {
+function DriverSettlementsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [settlements, setSettlements] = useState<any[]>([]);
+  const [settlements, setSettlements] = useState<DriverSettlement[]>([]);
   const [totals, setTotals] = useState<{ count: number; net: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const formatMoney = (value: DriverSettlement["net"] | DriverSettlement["gross"]) => {
+    if (value === null || value === undefined) return "0.00";
+    if (typeof value === "number") return value.toFixed(2);
+    return value;
+  };
 
   const filters = useMemo(() => {
     return {
@@ -33,14 +55,14 @@ export default function DriverSettlementsPage() {
     };
   }, [searchParams]);
 
-  const buildParams = () => {
+  const buildParams = useCallback(() => {
     const params = new URLSearchParams();
     if (filters.status && filters.status !== "ALL") params.set("status", filters.status);
     if (filters.from) params.set("from", filters.from);
     if (filters.to) params.set("to", filters.to);
     params.set("groupBy", "none");
     return params.toString();
-  };
+  }, [filters]);
 
   const setRange = (range: "this" | "last" | "last4") => {
     const today = new Date();
@@ -70,11 +92,17 @@ export default function DriverSettlementsPage() {
     router.push(`/driver/settlements?${params.toString()}`);
   };
 
+  const openSettlement = (id: string) => {
+    router.push(`/driver/settlements/${id}`);
+  };
+
   useEffect(() => {
     const loadData = async () => {
       try {
         const query = buildParams();
-        const data = await apiFetch<any>(`/settlements?${query}`);
+        const data = await apiFetch<{ settlements?: DriverSettlement[]; totals?: { count: number; net: string } }>(
+          `/settlements?${query}`
+        );
         setSettlements(data.settlements ?? []);
         setTotals(data.totals ?? null);
         setError(null);
@@ -83,59 +111,100 @@ export default function DriverSettlementsPage() {
       }
     };
     loadData();
-  }, [filters]);
+  }, [buildParams]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sand via-white to-clay px-6 py-10">
-      <div className="mx-auto flex max-w-xl flex-col gap-6">
-        <Card className="space-y-3">
-          <div className="text-xs uppercase tracking-widest text-black/50">Pay</div>
-          <div className="text-2xl font-semibold">Settlements</div>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="ghost" onClick={() => router.push("/driver")}>Back to driver home</Button>
-            <Button variant={filters.status === "PENDING" ? "default" : "secondary"} onClick={() => setStatus("PENDING")}>
-              Pending
-            </Button>
-            <Button variant={filters.status === "PAID" ? "default" : "secondary"} onClick={() => setStatus("PAID")}>
-              Paid
-            </Button>
-            <Button variant={filters.status === "ALL" ? "default" : "secondary"} onClick={() => setStatus("ALL")}>
-              All
-            </Button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={() => setRange("this")}>This week</Button>
-            <Button variant="secondary" onClick={() => setRange("last")}>Last week</Button>
-            <Button variant="secondary" onClick={() => setRange("last4")}>Last 4 weeks</Button>
-          </div>
+    <DriverShell>
+      <Card className="space-y-3">
+        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Pay</div>
+        <div className="text-2xl font-semibold">Settlements</div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="ghost" onClick={() => router.push("/driver")}>
+            Back to driver home
+          </Button>
+          <Button variant={filters.status === "PENDING" ? "primary" : "secondary"} onClick={() => setStatus("PENDING")}>
+            Pending
+          </Button>
+          <Button variant={filters.status === "PAID" ? "primary" : "secondary"} onClick={() => setStatus("PAID")}>
+            Paid
+          </Button>
+          <Button variant={filters.status === "ALL" ? "primary" : "secondary"} onClick={() => setStatus("ALL")}>
+            All
+          </Button>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => setRange("this")}>
+            This week
+          </Button>
+          <Button variant="secondary" onClick={() => setRange("last")}>
+            Last week
+          </Button>
+          <Button variant="secondary" onClick={() => setRange("last4")}>
+            Last 4 weeks
+          </Button>
+        </div>
+      </Card>
+
+      {error ? (
+        <Card>
+          <div className="text-sm text-[color:var(--color-danger)]">{error}</div>
         </Card>
+      ) : null}
 
-        {error ? (
-          <Card>
-            <div className="text-sm text-red-600">{error}</div>
-          </Card>
-        ) : null}
-
-        <Card className="space-y-3">
-          <div className="text-xs uppercase tracking-widest text-black/50">
-            {filters.status === "PENDING" ? "Pending total" : "Total"}: ${totals?.net ?? "0.00"} · {totals?.count ?? 0} settlement(s)
-          </div>
-          {settlements.length === 0 ? (
-            <div className="text-sm text-black/60">No settlements found.</div>
-          ) : (
-            settlements.map((settlement) => (
-              <div key={settlement.id} className="rounded-2xl border border-black/10 bg-white/70 px-4 py-2 text-sm">
-                <div className="text-xs uppercase tracking-widest text-black/50">{settlement.status}</div>
-                <div className="font-semibold">{settlement.weekLabel ?? "Pay period"}</div>
-                <div className="text-xs text-black/60">
-                  {new Date(settlement.periodStart).toLocaleDateString()} → {new Date(settlement.periodEnd).toLocaleDateString()}
+      <Card className="space-y-3">
+        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
+          {filters.status === "PENDING" ? "Pending total" : "Total"}: ${totals?.net ?? "0.00"} · {totals?.count ?? 0} settlement(s)
+        </div>
+        {settlements.length === 0 ? (
+          <div className="text-sm text-[color:var(--color-text-muted)]">No settlements found.</div>
+        ) : (
+          settlements.map((settlement) => (
+            <button
+              key={settlement.id}
+              type="button"
+              onClick={() => openSettlement(settlement.id)}
+              className="w-full rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3 text-left text-sm transition hover:border-[color:var(--color-divider-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] focus-visible:ring-offset-2"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="font-semibold">{settlement.weekLabel ?? "Pay period"}</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">
+                    {new Date(settlement.periodStart).toLocaleDateString()} →{" "}
+                    {new Date(settlement.periodEnd).toLocaleDateString()}
+                  </div>
                 </div>
-                <div className="text-sm text-black/70">Net ${settlement.net ?? settlement.gross ?? "0.00"}</div>
+                <DriverStatusChip status={settlement.status} />
               </div>
-            ))
-          )}
-        </Card>
-      </div>
-    </div>
+              <div className="mt-2 text-sm text-[color:var(--color-text-muted)]">
+                Net ${formatMoney(settlement.net ?? settlement.gross)}
+              </div>
+              {settlement.paidAt ? (
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Paid on {new Date(settlement.paidAt).toLocaleDateString()}
+                </div>
+              ) : (
+                <InlineHelper text="Why pending?" href="/driver/pay#blockers" className="mt-1 inline-block" />
+              )}
+            </button>
+          ))
+        )}
+      </Card>
+    </DriverShell>
+  );
+}
+
+export default function DriverSettlementsPage() {
+  return (
+      <Suspense
+        fallback={
+          <DriverShell>
+            <Card>
+              <div className="text-sm text-[color:var(--color-text-muted)]">Loading settlements...</div>
+            </Card>
+          </DriverShell>
+        }
+      >
+      <DriverSettlementsContent />
+    </Suspense>
   );
 }

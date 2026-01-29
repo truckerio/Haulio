@@ -9,6 +9,22 @@ const API_BASE = process.env.API_BASE || process.env.NEXT_PUBLIC_API_BASE || "ht
 
 type Auth = { cookie: string; csrf: string };
 
+async function ensureOperatingEntity(orgId: string, name: string, remitToAddress?: string) {
+  const existing = await prisma.operatingEntity.findFirst({ where: { orgId, isDefault: true } });
+  if (existing) return existing;
+  return prisma.operatingEntity.create({
+    data: {
+      orgId,
+      name,
+      type: "CARRIER",
+      addressLine1: remitToAddress ?? null,
+      remitToName: name,
+      remitToAddressLine1: remitToAddress ?? null,
+      isDefault: true,
+    },
+  });
+}
+
 async function authFor(userId: string): Promise<Auth> {
   const session = await createSession({ userId });
   const csrf = createCsrfToken();
@@ -70,6 +86,8 @@ async function testRejectRequiresReason() {
     },
   });
 
+  const operatingEntity = await ensureOperatingEntity(org.id, "Failure Org", "1 Failure Way");
+
   const billing = await prisma.user.upsert({
     where: { orgId_email: { orgId: org.id, email: "billing@failure.test" } },
     update: { role: "BILLING", name: "Failure Billing", isActive: true },
@@ -81,6 +99,8 @@ async function testRejectRequiresReason() {
     data: {
       orgId: org.id,
       loadNumber: `FAIL-${Date.now()}`,
+      loadType: "COMPANY",
+      operatingEntityId: operatingEntity.id,
       customerName: "Failure Customer",
       rate: new Prisma.Decimal("900.00"),
       stops: {
@@ -115,16 +135,18 @@ async function testInvoiceConcurrency() {
   const orgName = "Smoke Concurrency Org";
   const org = (await prisma.organization.findFirst({ where: { name: orgName } })) ??
     (await prisma.organization.create({ data: { name: orgName } }));
+  const runSuffix = String(Date.now()).slice(-6);
+  const invoicePrefix = `CON-${runSuffix}-`;
   await prisma.orgSettings.upsert({
     where: { orgId: org.id },
-    update: { nextInvoiceNumber: 1, invoicePrefix: "CON-" },
+    update: { nextInvoiceNumber: 1, invoicePrefix },
     create: {
       orgId: org.id,
       companyDisplayName: "Concurrency Org",
       remitToAddress: "1 Concurrency Way",
       invoiceTerms: "Net 30",
       invoiceFooter: "Thanks",
-      invoicePrefix: "CON-",
+      invoicePrefix,
       nextInvoiceNumber: 1,
       podRequireSignature: true,
       podRequirePrintedName: true,
@@ -143,6 +165,8 @@ async function testInvoiceConcurrency() {
     },
   });
 
+  const operatingEntity = await ensureOperatingEntity(org.id, "Concurrency Org", "1 Concurrency Way");
+
   const billing = await prisma.user.upsert({
     where: { orgId_email: { orgId: org.id, email: "billing@concurrency.test" } },
     update: { role: "BILLING", name: "Concurrency Billing", isActive: true },
@@ -156,8 +180,11 @@ async function testInvoiceConcurrency() {
         data: {
           orgId: org.id,
           loadNumber: `CON-${Date.now()}-${index}`,
+          loadType: "COMPANY",
+          operatingEntityId: operatingEntity.id,
           customerName: "Concurrency Customer",
           rate: new Prisma.Decimal("500.00"),
+          status: "READY_TO_INVOICE",
           stops: {
             create: [
               { orgId: org.id, type: "PICKUP", name: "Pickup", address: "1 Con", city: "Austin", state: "TX", zip: "78701", sequence: 1 },
@@ -179,7 +206,7 @@ async function testInvoiceConcurrency() {
   if (unique.size !== results.length) {
     throw new Error(`Invoice numbers collided: ${results.join(", ")}`);
   }
-  const numeric = results.map((value) => Number(value.replace("CON-", ""))).sort((a, b) => a - b);
+  const numeric = results.map((value) => Number(value.replace(invoicePrefix, ""))).sort((a, b) => a - b);
   for (let i = 1; i < numeric.length; i += 1) {
     if (numeric[i] !== numeric[i - 1] + 1) {
       throw new Error(`Invoice numbers not monotonic: ${numeric.join(", ")}`);
@@ -219,6 +246,8 @@ async function testTaskDedupe() {
     },
   });
 
+  const operatingEntity = await ensureOperatingEntity(org.id, "Dedupe Org", "1 Dedupe Way");
+
   const billing = await prisma.user.upsert({
     where: { orgId_email: { orgId: org.id, email: "billing@dedupe.test" } },
     update: { role: "BILLING", name: "Dedupe Billing", isActive: true },
@@ -230,6 +259,8 @@ async function testTaskDedupe() {
     data: {
       orgId: org.id,
       loadNumber: `DD-${Date.now()}`,
+      loadType: "COMPANY",
+      operatingEntityId: operatingEntity.id,
       customerName: "Dedupe Customer",
       rate: new Prisma.Decimal("800.00"),
       stops: {

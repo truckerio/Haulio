@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api";
+import { FormField } from "@/components/ui/form-field";
 
 export default function ForgotPasswordPage() {
   const router = useRouter();
@@ -45,17 +46,19 @@ export default function ForgotPasswordPage() {
         <Card className="space-y-4">
           <div>
             <h2 className="text-xl font-semibold">Forgot password</h2>
-            <p className="text-sm text-black/60">Enter your email to get a reset link.</p>
+            <p className="text-sm text-[color:var(--color-text-muted)]">Enter your email to get a reset link.</p>
           </div>
           <form className="space-y-3" onSubmit={handleSubmit}>
-            <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
+            <FormField label="Email" htmlFor="forgotEmail">
+              <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" />
+            </FormField>
             <Button type="submit" size="lg" className="w-full" disabled={loading}>
               {loading ? "Sending..." : "Send reset link"}
             </Button>
           </form>
-          {status ? <div className="text-sm text-black/70">{status}</div> : null}
+          {status ? <div className="text-sm text-[color:var(--color-text-muted)]">{status}</div> : null}
           {resetUrl ? (
-            <div className="rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-xs break-all">
+            <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-3 py-2 text-xs break-all">
               Reset link: <a className="underline" href={resetUrl}>{resetUrl}</a>
             </div>
           ) : null}

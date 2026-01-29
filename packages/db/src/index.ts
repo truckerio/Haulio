@@ -8,6 +8,18 @@ export const prisma =
     log: ["warn", "error"],
   });
 
+prisma.$use(async (params, next) => {
+  const allowAuditLogDelete = process.env.ALLOW_AUDIT_LOG_DELETE === "true";
+  if (
+    !allowAuditLogDelete &&
+    params.model === "AuditLog" &&
+    ["update", "updateMany", "delete", "deleteMany"].includes(params.action)
+  ) {
+    throw new Error("AuditLog is append-only");
+  }
+  return next(params);
+});
+
 if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;
 }

@@ -50,6 +50,7 @@ export async function ensureUploadDirs() {
   await fs.mkdir(path.join(base, "docs"), { recursive: true });
   await fs.mkdir(path.join(base, "invoices"), { recursive: true });
   await fs.mkdir(path.join(base, "packets"), { recursive: true });
+  await fs.mkdir(path.join(base, "profiles"), { recursive: true });
   await fs.mkdir(path.join(base, "org"), { recursive: true });
 }
 
@@ -93,6 +94,28 @@ export function buildDocFilename(loadNumber: string, type: string, mimeType: str
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "");
   const ext = mimeType.includes("pdf") ? "pdf" : mimeType.includes("png") ? "png" : "jpg";
   return `${loadNumber}-${safeType}-${stamp}-${nanoid(6)}.${ext}`;
+}
+
+export function buildProfileFilename(entityId: string, mimeType: string) {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "");
+  const ext = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
+  return `${entityId}-${stamp}-${nanoid(6)}.${ext}`;
+}
+
+export async function saveDriverProfilePhoto(file: Express.Multer.File, driverId: string) {
+  await ensureUploadDirs();
+  const filename = buildProfileFilename(driverId, file.mimetype);
+  const target = resolveUploadPath(path.posix.join("profiles", filename));
+  await fs.writeFile(target, file.buffer);
+  return { filename, target };
+}
+
+export async function saveUserProfilePhoto(file: Express.Multer.File, userId: string) {
+  await ensureUploadDirs();
+  const filename = buildProfileFilename(`user-${userId}`, file.mimetype);
+  const target = resolveUploadPath(path.posix.join("profiles", filename));
+  await fs.writeFile(target, file.buffer);
+  return { filename, target };
 }
 
 export async function saveDocumentFile(file: Express.Multer.File, loadId: string, orgId: string, type: string) {

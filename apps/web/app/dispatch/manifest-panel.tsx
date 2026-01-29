@@ -4,9 +4,11 @@ import { useEffect, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { FormField } from "@/components/ui/form-field";
+import { Select } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api";
 
-type Asset = { id: string; name?: string; unit?: string };
+type Asset = { id: string; name?: string | null; unit?: string | null; reason?: string | null };
 
 const statuses = ["PLANNED", "LOADED", "IN_TRANSIT", "ARRIVED", "UNLOADED", "COMPLETE"];
 
@@ -105,70 +107,74 @@ export function ManifestPanel({
   return (
     <div className="grid gap-4">
       <Card className="space-y-3">
-        <div className="text-sm uppercase tracking-widest text-black/50">Trailer manifests</div>
+        <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Trailer manifests</div>
         <div className="grid gap-3 lg:grid-cols-3">
-          <select
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2"
-            value={form.trailerId}
-            onChange={(event) => setForm({ ...form, trailerId: event.target.value })}
-          >
-            <option value="">Trailer</option>
-            {trailers.map((trailer) => (
-              <option key={trailer.id} value={trailer.id}>
-                {trailer.unit}
-              </option>
-            ))}
-          </select>
-          <select
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2"
-            value={form.truckId}
-            onChange={(event) => setForm({ ...form, truckId: event.target.value })}
-          >
-            <option value="">Truck (optional)</option>
-            {trucks.map((truck) => (
-              <option key={truck.id} value={truck.id}>
-                {truck.unit}
-              </option>
-            ))}
-          </select>
-          <select
-            className="rounded-2xl border border-black/10 bg-white px-3 py-2"
-            value={form.driverId}
-            onChange={(event) => setForm({ ...form, driverId: event.target.value })}
-          >
-            <option value="">Driver (optional)</option>
-            {drivers.map((driver) => (
-              <option key={driver.id} value={driver.id}>
-                {driver.name}
-              </option>
-            ))}
-          </select>
+          <FormField label="Trailer" htmlFor="manifestTrailer" required>
+            <Select value={form.trailerId} onChange={(event) => setForm({ ...form, trailerId: event.target.value })}>
+              <option value="">Select trailer</option>
+              {trailers.map((trailer) => (
+                <option key={trailer.id} value={trailer.id}>
+                  {trailer.unit}
+                </option>
+              ))}
+            </Select>
+          </FormField>
+          <FormField label="Truck" htmlFor="manifestTruck">
+            <Select value={form.truckId} onChange={(event) => setForm({ ...form, truckId: event.target.value })}>
+              <option value="">Truck (optional)</option>
+              {trucks.map((truck) => (
+                <option key={truck.id} value={truck.id}>
+                  {truck.unit}
+                </option>
+              ))}
+            </Select>
+          </FormField>
+          <FormField label="Driver" htmlFor="manifestDriver">
+            <Select value={form.driverId} onChange={(event) => setForm({ ...form, driverId: event.target.value })}>
+              <option value="">Driver (optional)</option>
+              {drivers.map((driver) => (
+                <option key={driver.id} value={driver.id}>
+                  {driver.name}
+                </option>
+              ))}
+            </Select>
+          </FormField>
         </div>
         <div className="grid gap-3 lg:grid-cols-2">
-          <Input placeholder="Origin yard or hub" value={form.origin} onChange={(event) => setForm({ ...form, origin: event.target.value })} />
-          <Input
-            placeholder="Destination yard or hub"
-            value={form.destination}
-            onChange={(event) => setForm({ ...form, destination: event.target.value })}
-          />
+          <FormField label="Origin yard or hub" htmlFor="manifestOrigin">
+            <Input placeholder="Origin yard" value={form.origin} onChange={(event) => setForm({ ...form, origin: event.target.value })} />
+          </FormField>
+          <FormField label="Destination yard or hub" htmlFor="manifestDestination">
+            <Input
+              placeholder="Destination yard"
+              value={form.destination}
+              onChange={(event) => setForm({ ...form, destination: event.target.value })}
+            />
+          </FormField>
         </div>
         <div className="grid gap-3 lg:grid-cols-2">
-          <Input
-            type="datetime-local"
-            value={form.plannedDepartureAt}
-            onChange={(event) => setForm({ ...form, plannedDepartureAt: event.target.value })}
-          />
-          <Input
-            type="datetime-local"
-            value={form.plannedArrivalAt}
-            onChange={(event) => setForm({ ...form, plannedArrivalAt: event.target.value })}
-          />
+          <FormField label="Planned departure" htmlFor="manifestDeparture">
+            <Input
+              type="datetime-local"
+              value={form.plannedDepartureAt}
+              onChange={(event) => setForm({ ...form, plannedDepartureAt: event.target.value })}
+            />
+          </FormField>
+          <FormField label="Planned arrival" htmlFor="manifestArrival">
+            <Input
+              type="datetime-local"
+              value={form.plannedArrivalAt}
+              onChange={(event) => setForm({ ...form, plannedArrivalAt: event.target.value })}
+            />
+          </FormField>
         </div>
-        <Input
-          placeholder="Load numbers (comma or new line separated)"
-          value={form.loadNumbers}
-          onChange={(event) => setForm({ ...form, loadNumbers: event.target.value })}
-        />
+        <FormField label="Load numbers" htmlFor="manifestLoadNumbers" hint="Comma or new line separated">
+          <Input
+            placeholder="LD-1001, LD-1002"
+            value={form.loadNumbers}
+            onChange={(event) => setForm({ ...form, loadNumbers: event.target.value })}
+          />
+        </FormField>
         <Button onClick={createManifest}>Create manifest</Button>
       </Card>
 
@@ -176,24 +182,26 @@ export function ManifestPanel({
         <Card key={manifest.id} className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <div className="text-sm uppercase tracking-widest text-black/50">{manifest.status}</div>
+              <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">{manifest.status}</div>
               <div className="text-lg font-semibold">Trailer {manifest.trailer?.unit}</div>
-              <div className="text-sm text-black/60">
-                {manifest.origin || "Origin yard"} → {manifest.destination || "Destination yard"}
+              <div className="text-sm text-[color:var(--color-text-muted)]">
+                {manifest.origin || "Origin yard"} {"->"} {manifest.destination || "Destination yard"}
               </div>
             </div>
-            <div className="text-sm text-black/60">
-              Driver: {manifest.driver?.name ?? "Unassigned"} · Truck {manifest.truck?.unit ?? "-"}
+            <div className="text-sm text-[color:var(--color-text-muted)]">
+              Driver: {manifest.driver?.name ?? "Unassigned"} - Truck {manifest.truck?.unit ?? "-"}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <select className="rounded-2xl border border-black/10 bg-white px-3 py-2" defaultValue={manifest.status}>
-              {statuses.map((status) => (
-                <option key={status} value={status}>
-                  {status}
-                </option>
-              ))}
-            </select>
+            <FormField label="Manifest status" htmlFor={`manifestStatus-${manifest.id}`}>
+              <Select defaultValue={manifest.status}>
+                {statuses.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
             <Button
               variant="secondary"
               onClick={(event) => {
@@ -206,28 +214,33 @@ export function ManifestPanel({
               Update status
             </Button>
           </div>
-          <div className="rounded-2xl border border-black/10 bg-white/70 p-3">
-            <div className="text-xs uppercase tracking-widest text-black/50">Loads on trailer</div>
+          <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 p-3">
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Loads on trailer</div>
             <div className="mt-2 flex flex-wrap gap-2 text-sm">
               {manifest.items?.length ? (
                 manifest.items.map((item: any) => (
-                  <div key={item.id} className="flex items-center gap-2 rounded-full border border-black/10 bg-white px-3 py-1">
+                  <div key={item.id} className="flex items-center gap-2 rounded-full border border-[color:var(--color-divider)] bg-white px-3 py-1">
                     <span>{item.load?.loadNumber}</span>
-                    <button className="text-xs text-black/60" onClick={() => removeLoad(manifest.id, item.loadId)}>
+                    <button
+                      className="rounded-full text-xs text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+                      onClick={() => removeLoad(manifest.id, item.loadId)}
+                    >
                       Remove
                     </button>
                   </div>
                 ))
               ) : (
-                <div className="text-sm text-black/60">No loads attached yet.</div>
+                <div className="text-sm text-[color:var(--color-text-muted)]">No loads attached yet.</div>
               )}
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Input
-                placeholder="Add load numbers"
-                value={loadInputs[manifest.id] ?? ""}
-                onChange={(event) => setLoadInputs((prev) => ({ ...prev, [manifest.id]: event.target.value }))}
-              />
+              <FormField label="Add load numbers" htmlFor={`manifestAddLoads-${manifest.id}`}>
+                <Input
+                  placeholder="LD-1003, LD-1004"
+                  value={loadInputs[manifest.id] ?? ""}
+                  onChange={(event) => setLoadInputs((prev) => ({ ...prev, [manifest.id]: event.target.value }))}
+                />
+              </FormField>
               <Button variant="secondary" onClick={() => addLoads(manifest.id)}>
                 Add loads
               </Button>

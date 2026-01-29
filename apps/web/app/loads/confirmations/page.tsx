@@ -5,6 +5,8 @@ import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api";
+import { FormField } from "@/components/ui/form-field";
+import { Input } from "@/components/ui/input";
 
 export default function LoadConfirmationsPage() {
   const [docs, setDocs] = useState<any[]>([]);
@@ -39,32 +41,33 @@ export default function LoadConfirmationsPage() {
   return (
     <AppShell title="Load Confirmations" subtitle="Upload confirmations and create loads">
       <Card className="space-y-4">
-        <div className="text-sm uppercase tracking-widest text-black/50">Upload confirmations</div>
-        <input
-          type="file"
-          multiple
-          accept="application/pdf,image/*"
-          onChange={(e) => handleUpload(e.target.files)}
-        />
-        {error ? <div className="text-sm text-red-600">{error}</div> : null}
-        <div className="text-xs text-black/50">PDF or image files. Extraction runs automatically.</div>
+        <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Upload confirmations</div>
+        <FormField label="Upload load confirmations" htmlFor="loadConfirmationFiles" hint="PDF or image files. Extraction runs automatically.">
+          <Input
+            type="file"
+            multiple
+            accept="application/pdf,image/*"
+            onChange={(e) => handleUpload(e.target.files)}
+          />
+        </FormField>
+        {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}
       </Card>
 
       <Card className="space-y-4">
-        <div className="text-sm uppercase tracking-widest text-black/50">Uploads</div>
-        {docs.length === 0 ? <div className="text-sm text-black/60">No confirmations yet.</div> : null}
+        <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Uploads</div>
+        {docs.length === 0 ? <div className="text-sm text-[color:var(--color-text-muted)]">No confirmations yet.</div> : null}
         <div className="grid gap-2">
           {docs.map((doc) => (
             <div
               key={doc.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-black/10 bg-white/70 px-4 py-3"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3"
             >
               <div>
                 <div className="text-sm font-semibold">{doc.filename}</div>
-                <div className="text-xs text-black/50">{doc.status} · {new Date(doc.createdAt).toLocaleString()}</div>
-                {doc.errorMessage ? <div className="text-xs text-red-600">{doc.errorMessage}</div> : null}
+                <div className="text-xs text-[color:var(--color-text-muted)]">{doc.status} · {new Date(doc.createdAt).toLocaleString()}</div>
+                {doc.errorMessage ? <div className="text-xs text-[color:var(--color-danger)]">{doc.errorMessage}</div> : null}
                 {doc.createdLoadId ? (
-                  <div className="text-xs text-emerald-700">Created load: {doc.createdLoadId}</div>
+                  <div className="text-xs text-[color:var(--color-success)]">Created load: {doc.createdLoadId}</div>
                 ) : null}
               </div>
               <div className="flex items-center gap-2">

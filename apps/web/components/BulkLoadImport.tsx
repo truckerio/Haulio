@@ -3,6 +3,9 @@
 import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { FormField } from "@/components/ui/form-field";
+import { Input } from "@/components/ui/input";
+import { CheckboxField } from "@/components/ui/checkbox";
 import { apiFetch } from "@/lib/api";
 
 export function BulkLoadImport({ onImported }: { onImported: () => void }) {
@@ -44,26 +47,36 @@ export function BulkLoadImport({ onImported }: { onImported: () => void }) {
 
   return (
     <Card className="space-y-4">
-      <div className="text-sm uppercase tracking-widest text-black/50">Bulk load import</div>
-      <div className="text-sm text-black/60">
+      <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Bulk load import</div>
+      <div className="text-sm text-[color:var(--color-text-muted)]">
         Upload the CSV templates. Loads can include miles. Stops should follow yard → yard → consignee pattern.
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
-        <label className="text-sm">
-          Loads CSV
-          <input type="file" accept=".csv" className="mt-2 block w-full text-sm" onChange={(e) => setLoadsFile(e.target.files?.[0] ?? null)} />
-        </label>
-        <label className="text-sm">
-          Stops CSV
-          <input type="file" accept=".csv" className="mt-2 block w-full text-sm" onChange={(e) => setStopsFile(e.target.files?.[0] ?? null)} />
-        </label>
+        <FormField label="Loads CSV" htmlFor="loadsCsv" hint="Upload the loads.csv template">
+          <Input
+            id="loadsCsv"
+            type="file"
+            accept=".csv"
+            onChange={(e) => setLoadsFile(e.target.files?.[0] ?? null)}
+          />
+        </FormField>
+        <FormField label="Stops CSV" htmlFor="stopsCsv" hint="Upload the stops.csv template">
+          <Input
+            id="stopsCsv"
+            type="file"
+            accept=".csv"
+            onChange={(e) => setStopsFile(e.target.files?.[0] ?? null)}
+          />
+        </FormField>
       </div>
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={wipeLoads} onChange={(e) => setWipeLoads(e.target.checked)} />
-        Wipe existing loads before import
-      </label>
-      {error ? <div className="text-sm text-red-600">{error}</div> : null}
-      {result ? <div className="text-sm text-emerald-700">{result}</div> : null}
+      <CheckboxField
+        id="wipeLoads"
+        label="Wipe existing loads before import"
+        checked={wipeLoads}
+        onChange={(e) => setWipeLoads(e.target.checked)}
+      />
+      {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}
+      {result ? <div className="text-sm text-[color:var(--color-success)]">{result}</div> : null}
       <Button onClick={runImport}>Import CSV</Button>
     </Card>
   );

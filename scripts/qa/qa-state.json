@@ -1,0 +1,26 @@
+{
+  "password": "qa1234!",
+  "orgA": {
+    "id": "cmkqp4tdp000010ff9wfhwkbk",
+    "operatingEntityId": "cmkqp4te3000710ffy609dt4m",
+    "users": {
+      "admin": "qa-admin-a@test.local",
+      "dispatcher": "qa-dispatch-a@test.local",
+      "billing": "qa-billing-a@test.local",
+      "driver": "qa-driver-a@test.local"
+    },
+    "driverId": "cmkqp4teg000n10ff5shvgkse",
+    "truckId": "cmkqp4tei000p10ffrm228v2v",
+    "trailerId": "cmkqp4tej000r10ff28cu58mm",
+    "customerId": "cmkqp4tek000t10ff5knptj31"
+  },
+  "orgB": {
+    "id": "cmkqp4tds000110ffzeky2tws",
+    "operatingEntityId": "cmkqp4te5000910ff14voy1xl",
+    "users": {
+      "admin": "qa-admin-b@test.local",
+      "dispatcher": "qa-dispatch-b@test.local"
+    },
+    "customerId": "cmkqp4tel000v10ff9xfzyy1k"
+  }
+}

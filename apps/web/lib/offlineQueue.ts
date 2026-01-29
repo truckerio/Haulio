@@ -11,7 +11,7 @@ export type QueuedUpload = {
   createdAt: number;
 };
 
-const DB_NAME = "truckerio-uploads";
+const DB_NAME = "haulio-uploads";
 const STORE_NAME = "uploads";
 
 async function getDb() {

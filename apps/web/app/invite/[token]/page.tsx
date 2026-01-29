@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api";
+import { FormField } from "@/components/ui/form-field";
 
 export default function InviteAcceptPage() {
   const params = useParams();
@@ -55,29 +56,35 @@ export default function InviteAcceptPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sand via-white to-clay px-6 py-12">
+    <div className="min-h-screen bg-[color:var(--color-bg-muted)] px-6 py-12">
       <div className="mx-auto max-w-lg">
         <Card className="space-y-4">
           <div>
-            <div className="text-xs uppercase tracking-widest text-black/50">Welcome</div>
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Welcome</div>
             <h1 className="text-2xl font-semibold">Set your password</h1>
             {invite ? (
-              <div className="text-sm text-black/60">
+              <div className="text-sm text-[color:var(--color-text-muted)]">
                 {invite.org?.name} · {invite.user?.email}
               </div>
             ) : null}
           </div>
           {done ? (
             <div className="space-y-3">
-              <div className="text-sm text-emerald-700">Password set. You can sign in now.</div>
+              <div className="text-sm text-[color:var(--color-success)]">Password set. You can sign in now.</div>
               <Button onClick={() => router.push("/")}>Go to login</Button>
             </div>
           ) : (
             <>
-              <Input placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} />
-              <Input type="password" placeholder="New password" value={password} onChange={(e) => setPassword(e.target.value)} />
-              <Input type="password" placeholder="Confirm password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-              {error ? <div className="text-sm text-red-600">{error}</div> : null}
+              <FormField label="Full name" htmlFor="inviteName">
+                <Input placeholder="Taylor Johnson" value={name} onChange={(e) => setName(e.target.value)} />
+              </FormField>
+              <FormField label="New password" htmlFor="invitePassword">
+                <Input type="password" placeholder="At least 8 characters" value={password} onChange={(e) => setPassword(e.target.value)} />
+              </FormField>
+              <FormField label="Confirm password" htmlFor="inviteConfirm">
+                <Input type="password" placeholder="Re-enter password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+              </FormField>
+              {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}
               <Button onClick={acceptInvite} disabled={loading}>
                 {loading ? "Saving..." : "Set password"}
               </Button>

@@ -8,7 +8,8 @@
     "packages/*"
   ],
   "devDependencies": {
-    "@types/node": "^20.11.30"
+    "@types/node": "^20.11.30",
+    "typescript": "^5.5.4"
   },
   "scripts": {
     "dev": "pnpm -r --parallel dev",
@@ -22,7 +23,14 @@
     "demo:up": "bash scripts/demo-up.sh",
     "demo:down": "bash scripts/demo-down.sh",
     "demo:seed": "pnpm --filter @truckerio/api exec tsx scripts/demo-seed.ts",
+    "demo:refresh": "pnpm --filter @truckerio/api exec tsx scripts/demo-refresh.ts",
     "demo:reset": "pnpm --filter @truckerio/api exec tsx scripts/demo-reset.ts",
-    "demo:smoke": "pnpm --filter @truckerio/api exec tsx scripts/smoke-happy-path.ts && pnpm --filter @truckerio/api exec tsx scripts/smoke-failure-paths.ts && pnpm --filter @truckerio/api exec tsx scripts/tenant-isolation.ts"
+    "company:reset": "pnpm --filter @truckerio/api exec tsx scripts/company-reset.ts",
+    "demo:smoke": "pnpm --filter @truckerio/api exec tsx scripts/smoke-happy-path.ts && pnpm --filter @truckerio/api exec tsx scripts/smoke-failure-paths.ts && pnpm --filter @truckerio/api exec tsx scripts/tenant-isolation.ts",
+    "qa:setup": "pnpm --filter @truckerio/api exec tsx --tsconfig tsconfig.scripts.json ../../scripts/qa/qa-setup.ts",
+    "qa:tests": "pnpm --filter @truckerio/api exec tsx --tsconfig tsconfig.scripts.json ../../scripts/qa/qa-tests.ts",
+    "qa:smoke": "pnpm --filter @truckerio/api exec tsx --tsconfig tsconfig.scripts.json ../../scripts/qa/qa-smoke.ts",
+    "qa:report": "pnpm --filter @truckerio/api exec tsx --tsconfig tsconfig.scripts.json ../../scripts/qa/qa-report.ts",
+    "qa:all": "bash -c 'pnpm qa:setup && pnpm qa:tests && pnpm qa:smoke; pnpm qa:report'"
   }
 }
