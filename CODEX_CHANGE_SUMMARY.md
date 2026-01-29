@@ -1,4 +1,4 @@
-# Trucker.io V1 Change Summary
+# Haulio V1 Change Summary
 
 ## 1) End-to-end flow now covered
 - Load → POD verification → auto invoice creation → invoice status tracking (SENT/ACCEPTED/DISPUTED/PAID/SHORT_PAID/VOID).

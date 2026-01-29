@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>TruckerIO Bulk CSV Import Guide</title>
+  <title>Haulio Bulk CSV Import Guide</title>
   <style>
     body { font-family: Arial, sans-serif; color: #0f172a; padding: 40px; line-height: 1.5; }
     h1 { margin-bottom: 4px; }
@@ -15,7 +15,7 @@
   </style>
 </head>
 <body>
-  <h1>TruckerIO Bulk CSV Import Guide</h1>
+  <h1>Haulio Bulk CSV Import Guide</h1>
   <div class="note">Use this guide to import 300-500 loads quickly from a spreadsheet.</div>
 
   <h2>Overview</h2>
@@ -37,6 +37,10 @@
       <tr><td>customerName</td><td>Customer name</td></tr>
       <tr><td>status</td><td>PLANNED, ASSIGNED, IN_TRANSIT, DELIVERED, READY_TO_INVOICE, INVOICED</td></tr>
       <tr><td>rate</td><td>Numeric linehaul rate</td></tr>
+      <tr><td>shipperReferenceNumber</td><td>Optional shipper reference number</td></tr>
+      <tr><td>consigneeReferenceNumber</td><td>Optional consignee reference number</td></tr>
+      <tr><td>palletCount</td><td>Optional pallet count (integer)</td></tr>
+      <tr><td>weightLbs</td><td>Optional weight in lbs (integer)</td></tr>
       <tr><td>assignedDriverEmail</td><td>Driver email (must exist in system)</td></tr>
       <tr><td>truckUnit</td><td>Truck unit (auto-created if missing)</td></tr>
       <tr><td>trailerUnit</td><td>Trailer unit (auto-created if missing)</td></tr>
@@ -51,7 +55,7 @@
     <tbody>
       <tr><td>loadNumber</td><td>Matches loads.csv</td></tr>
       <tr><td>sequence</td><td>Order of stops (1, 2, 3...)</td></tr>
-      <tr><td>type</td><td>PICKUP or DELIVERY</td></tr>
+      <tr><td>type</td><td>PICKUP (Shipper) or DELIVERY (Consignee)</td></tr>
       <tr><td>name</td><td>Stop name (yard or customer)</td></tr>
       <tr><td>address</td><td>Street address</td></tr>
       <tr><td>city</td><td>City</td></tr>
@@ -62,12 +66,12 @@
     </tbody>
   </table>
 
-  <h2>Yard -> Yard -> Delivery Pattern</h2>
+  <h2>Yard -> Yard -> Consignee Pattern</h2>
   <p>For LTL and cross-dock flows, use three stops:</p>
   <ol>
     <li>Origin Yard (PICKUP)</li>
     <li>Destination Yard (PICKUP)</li>
-    <li>Final Delivery (DELIVERY)</li>
+    <li>Final Consignee (DELIVERY)</li>
   </ol>
 
   <h2>UI Import Steps</h2>
@@ -82,14 +86,14 @@
   <h2>Example</h2>
   <div class="mono">
     loads.csv<br />
-    loadNumber,customerName,status,rate,assignedDriverEmail,truckUnit,trailerUnit<br />
-    LD-3001,Delta Foods,PLANNED,1450,driver@demo.com,T-101,TR-201<br /><br />
+    loadNumber,customerName,status,rate,shipperReferenceNumber,consigneeReferenceNumber,palletCount,weightLbs,assignedDriverEmail,truckUnit,trailerUnit<br />
+    LD-3001,Delta Foods,PLANNED,1450,SHIP-REF-1,CONS-REF-9,24,42000,driver@demo.com,T-101,TR-201<br /><br />
 
     stops.csv<br />
     loadNumber,sequence,type,name,address,city,state,zip,appointmentStart,appointmentEnd<br />
     LD-3001,1,PICKUP,Origin Yard,100 Yard Way,Memphis,TN,38103,2026-02-01T14:00:00Z,2026-02-01T16:00:00Z<br />
     LD-3001,2,PICKUP,Destination Yard,400 Yard Ave,Nashville,TN,37209,2026-02-01T20:00:00Z,2026-02-01T22:00:00Z<br />
-    LD-3001,3,DELIVERY,Final Delivery,88 Market St,Nashville,TN,37209,2026-02-02T02:00:00Z,2026-02-02T04:00:00Z<br />
+    LD-3001,3,DELIVERY,Final Consignee,88 Market St,Nashville,TN,37209,2026-02-02T02:00:00Z,2026-02-02T04:00:00Z<br />
   </div>
 
   <h2>Notes</h2>

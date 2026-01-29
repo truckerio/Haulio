@@ -1,6 +1,15 @@
-# TruckerIO Demo MVP
+# Haulio Demo MVP
 
-Back-office suite (Loads, Dispatch, Billing, Storage, Audit, Admin) with a zero-friction Driver portal.
+Back-office suite (Loads, Dispatch, Billing, Audit, Admin) with a zero-friction Driver portal.
+
+## Scope
+
+Ops OS includes:
+- Loads/Open Load, Dispatch, Task Inbox/Today, Billing/Settlements, Driver Ops (next), Finance (planned).
+
+Out of scope:
+- Yard Storage / trailer yard inventory (YMS). This belongs to Yard OS.
+- Any Yard UI must live in Yard OS and integrate only via minimal signals (e.g., trailer availability status), not a Storage UI.
 
 ## Setup
 
@@ -20,6 +29,21 @@ pnpm dev:web   # Next.js on http://localhost:3000
 pnpm dev:api   # Express API on http://localhost:4000
 pnpm dev:worker # Task automation worker
 ```
+
+## Reset for a new company
+
+This wipes all data, clears uploads, and creates a fresh company + admin.
+
+```bash
+COMPANY_NAME="Your Company" \
+ADMIN_EMAIL="admin@yourco.com" \
+ADMIN_PASSWORD="change-me" \
+pnpm company:reset
+```
+
+Optional overrides:
+- `COMPANY_TIMEZONE`, `COMPANY_REMIT_TO`, `INVOICE_PREFIX`, `RESET_UPLOADS=false`
+- `REQUIRED_DOCS` (comma list, e.g. `POD`) and `REQUIRED_DRIVER_DOCS` (e.g. `CDL,MED_CARD`)
 
 ## Docker demo (one-command)
 
@@ -54,6 +78,19 @@ Worker (Node):
 - Dockerfile: `Dockerfile.worker`
 - Docker command: `node apps/worker/dist/index.js`
 - Env: `DATABASE_URL=...`
+
+## OCR for scanned confirmations (local)
+
+The RC Inbox ("Load Confirmations") OCR fallback is fully local and requires
+system tools:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ocrmypdf tesseract-ocr poppler-utils
+```
+
+If these tools are missing, scanned PDFs/images will show a clear error and
+remain reviewable manually.
 
 ## Custom local hostname (optional)
 

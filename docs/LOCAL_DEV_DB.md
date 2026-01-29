@@ -25,3 +25,7 @@ scripts/setup-local-db.sh
 Notes:
 - If socket auth fails, specify host and user explicitly: `psql -h localhost -U <role> -d postgres`.
 - If you need a different database name, pass it as the first arg to the script.
+
+Docker compose:
+- `docker-compose.yml` uses `POSTGRES_DB` if set (default `haulio_dev`).
+- Add `POSTGRES_DB=haulio_dev` to your root `.env` to keep Docker + Prisma aligned.
