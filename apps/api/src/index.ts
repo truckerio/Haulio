@@ -516,9 +516,8 @@ async function upsertOnboardingState(params: {
   ];
   const completedSteps = normalizeOnboardingSteps(mergedSteps);
   const percentComplete = calculateOnboardingPercent(completedSteps);
-  const currentStep =
-    params.currentStep ??
-    Math.min(ONBOARDING_STEPS.length, Math.max(1, completedSteps.length + 1));
+  const computedStep = Math.min(ONBOARDING_STEPS.length, Math.max(1, completedSteps.length + 1));
+  const currentStep = params.currentStep ?? existing?.currentStep ?? computedStep;
   const completedAt =
     completedSteps.length === ONBOARDING_STEPS.length
       ? existing?.completedAt ?? new Date()
