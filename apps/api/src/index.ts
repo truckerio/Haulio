@@ -502,7 +502,7 @@ async function upsertOnboardingState(params: {
     ]);
 
   const inferredSteps: string[] = [];
-  if (settings?.id) inferredSteps.push("basics", "preferences", "tracking", "finance");
+  if (settings?.id) inferredSteps.push("basics");
   if (operatingCount > 0) inferredSteps.push("operating");
   if (employeeCount > 1) inferredSteps.push("team");
   if (driverCount > 0) inferredSteps.push("drivers");
