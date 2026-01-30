@@ -48,13 +48,7 @@ export default function HomePage() {
       <div className="mx-auto max-w-5xl">
         <div className="grid gap-8 lg:grid-cols-[1.1fr,0.9fr]">
           <div className="space-y-6">
-            <h1 className="text-4xl font-semibold leading-tight">
-              Haulio back-office meets a zero-friction driver flow.
-            </h1>
-            <p className="text-lg text-[color:var(--color-text-muted)]">
-              Dispatch, billing, and audit tools with a driver experience built for real-world signal
-              conditions.
-            </p>
+            <h1 className="text-4xl font-semibold leading-tight">HAULIO</h1>
           </div>
           <Card className="space-y-4">
             <div>
