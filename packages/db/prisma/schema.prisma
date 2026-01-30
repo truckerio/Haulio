@@ -346,9 +346,22 @@ model Organization {
   passwordResets PasswordReset[]
   onboardingState OnboardingState?
   sequence   OrgSequence?
+  setupCodes SetupCode[]
   teams      Team[]
   teamMembers TeamMember[]
   teamAssignments TeamAssignment[]
+}
+
+model SetupCode {
+  id         String   @id @default(cuid())
+  code       String   @unique
+  orgId      String?
+  consumedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  org Organization? @relation(fields: [orgId], references: [id])
+
+  @@index([consumedAt])
 }
 
 model OrgSequence {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,10 +10,37 @@ import { FormField } from "@/components/ui/form-field";
 
 export default function HomePage() {
   const router = useRouter();
+  const [checking, setChecking] = useState(true);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    const checkStatus = async () => {
+      try {
+        const data = await apiFetch<{ hasOrg: boolean }>("/setup/status");
+        if (!mounted) return;
+        if (!data.hasOrg) {
+          router.replace("/setup");
+          return;
+        }
+      } catch (err) {
+        if (!mounted) return;
+        setStatusError((err as Error).message);
+      } finally {
+        if (mounted) {
+          setChecking(false);
+        }
+      }
+    };
+    checkStatus();
+    return () => {
+      mounted = false;
+    };
+  }, [router]);
 
   const handleLogin = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -42,6 +69,33 @@ export default function HomePage() {
       setLoading(false);
     }
   };
+
+  if (checking) {
+    return (
+      <div className="min-h-screen px-6 py-12">
+        <div className="mx-auto max-w-5xl">
+          <Card className="space-y-2 p-6">
+            <div className="text-lg font-semibold">Preparing login…</div>
+            <div className="text-sm text-[color:var(--color-text-muted)]">Checking setup status.</div>
+            {statusError ? <div className="text-sm text-[color:var(--color-danger)]">{statusError}</div> : null}
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  if (statusError) {
+    return (
+      <div className="min-h-screen px-6 py-12">
+        <div className="mx-auto max-w-5xl">
+          <Card className="space-y-2 p-6">
+            <div className="text-lg font-semibold">Setup check failed</div>
+            <div className="text-sm text-[color:var(--color-text-muted)]">{statusError}</div>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen px-6 py-12">

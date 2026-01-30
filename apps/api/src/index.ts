@@ -102,6 +102,7 @@ import {
   validateTmsHeaders,
 } from "./lib/tms-load-sheet";
 import { allocateLoadAndTripNumbers, getOrgSequence } from "./lib/sequences";
+import { normalizeSetupCode } from "./lib/setup-codes";
 import path from "path";
 
 const app = express();
@@ -859,6 +860,133 @@ app.use((req, _res, next) => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+const setupLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+});
+
+app.get("/setup/status", async (_req, res) => {
+  const org = await prisma.organization.findFirst({ select: { id: true } });
+  res.json({ hasOrg: Boolean(org) });
+});
+
+app.post("/setup/validate", setupLimiter, async (req, res) => {
+  const schema = z.object({ code: z.string().min(4) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const normalized = normalizeSetupCode(parsed.data.code);
+  if (!normalized) {
+    res.json({ valid: false });
+    return;
+  }
+  const setup = await prisma.setupCode.findFirst({
+    where: { code: normalized, consumedAt: null },
+    select: { id: true },
+  });
+  if (!setup) {
+    res.json({ valid: false });
+    return;
+  }
+  res.cookie("setup_code", normalized, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: false,
+    maxAge: 15 * 60 * 1000,
+  });
+  res.json({ valid: true });
+});
+
+app.post("/setup/consume-and-create-org", setupLimiter, async (req, res) => {
+  const schema = z.object({
+    code: z.string().optional(),
+    companyName: z.string().min(2),
+    admin: z.object({
+      name: z.string().min(2),
+      email: z.string().email(),
+      password: z.string().min(8),
+    }),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
+    return;
+  }
+  const existingOrg = await prisma.organization.findFirst({ select: { id: true } });
+  if (existingOrg) {
+    res.status(400).json({ error: "Setup already completed." });
+    return;
+  }
+  const cookieCode = req.cookies?.setup_code;
+  const code = normalizeSetupCode(parsed.data.code ?? cookieCode ?? "");
+  if (!code) {
+    res.status(400).json({ error: "Setup code is required." });
+    return;
+  }
+
+  const ipAddress =
+    (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
+    req.socket.remoteAddress ||
+    null;
+  const userAgent = req.headers["user-agent"] || null;
+
+  try {
+    const { org, user } = await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "SetupCode" WHERE "code" = ${code} AND "consumedAt" IS NULL FOR UPDATE
+      `;
+      const setup = rows[0];
+      if (!setup) {
+        throw new Error("INVALID_SETUP_CODE");
+      }
+
+      const org = await tx.organization.create({
+        data: { name: parsed.data.companyName },
+      });
+      const passwordHash = await bcrypt.hash(parsed.data.admin.password, 10);
+      const user = await tx.user.create({
+        data: {
+          orgId: org.id,
+          email: normalizeEmail(parsed.data.admin.email),
+          name: parsed.data.admin.name,
+          role: "ADMIN",
+          passwordHash,
+          canSeeAllTeams: true,
+        },
+      });
+      await tx.setupCode.update({
+        where: { id: setup.id },
+        data: { orgId: org.id, consumedAt: new Date() },
+      });
+      return { org, user };
+    });
+
+    const session = await createSession({ userId: user.id, ipAddress, userAgent: userAgent ? String(userAgent) : null });
+    setSessionCookie(res, session.token, session.expiresAt);
+    const csrfToken = createCsrfToken();
+    setCsrfCookie(res, csrfToken);
+    res.clearCookie("setup_code");
+    res.json({
+      org: { id: org.id, name: org.name },
+      user: { id: user.id, email: user.email, role: user.role, name: user.name },
+      csrfToken,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("INVALID_SETUP_CODE")) {
+      res.status(400).json({ error: "Invalid or already used setup code." });
+      return;
+    }
+    if (message.toLowerCase().includes("unique")) {
+      res.status(409).json({ error: "An account with that email already exists." });
+      return;
+    }
+    sendServerError(res, "Failed to create organization.", error);
+  }
 });
 
 const parseBooleanParam = (value: string | undefined) => {

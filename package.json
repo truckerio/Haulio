@@ -27,6 +27,7 @@
     "demo:reset": "pnpm --filter @truckerio/api exec tsx scripts/demo-reset.ts",
     "company:reset": "pnpm --filter @truckerio/api exec tsx scripts/company-reset.ts",
     "demo:smoke": "pnpm --filter @truckerio/api exec tsx scripts/smoke-happy-path.ts && pnpm --filter @truckerio/api exec tsx scripts/smoke-failure-paths.ts && pnpm --filter @truckerio/api exec tsx scripts/tenant-isolation.ts",
+    "setupcode:create": "pnpm --filter @truckerio/api exec tsx scripts/setupcode-create.ts",
     "qa:setup": "pnpm --filter @truckerio/api exec tsx --tsconfig tsconfig.scripts.json ../../scripts/qa/qa-setup.ts",
     "qa:tests": "pnpm --filter @truckerio/api exec tsx --tsconfig tsconfig.scripts.json ../../scripts/qa/qa-tests.ts",
     "qa:smoke": "pnpm --filter @truckerio/api exec tsx --tsconfig tsconfig.scripts.json ../../scripts/qa/qa-smoke.ts",
