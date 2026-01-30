@@ -300,7 +300,7 @@ function OnboardingWizard() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            settlementSchedule: financeForm.settlementSchedule,
+            settlementSchedule: financeForm.settlementSchedule || undefined,
             settlementTemplate: {
               includeLinehaul: financeForm.includeLinehaul,
               includeFuelSurcharge: financeForm.includeFuelSurcharge,
