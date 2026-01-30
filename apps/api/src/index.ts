@@ -8449,6 +8449,7 @@ app.post("/onboarding/preferences", requireAuth, requireCsrf, requireRole("ADMIN
   const schema = z.object({
     requiredDocs: z.array(z.nativeEnum(DocType)).optional(),
     requireRateConBeforeDispatch: z.boolean().optional(),
+    currentStep: z.number().int().min(1).max(ONBOARDING_STEPS.length).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -8484,6 +8485,7 @@ app.post("/onboarding/preferences", requireAuth, requireCsrf, requireRole("ADMIN
   const state = await upsertOnboardingState({
     orgId: req.user!.orgId,
     completedSteps: ["preferences"],
+    currentStep: parsed.data.currentStep,
   });
   res.json({ settings, state });
 });
@@ -8491,6 +8493,7 @@ app.post("/onboarding/preferences", requireAuth, requireCsrf, requireRole("ADMIN
 app.post("/onboarding/tracking", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
     trackingPreference: z.enum(["MANUAL", "SAMSARA", "MOTIVE", "OTHER"]),
+    currentStep: z.number().int().min(1).max(ONBOARDING_STEPS.length).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -8515,6 +8518,7 @@ app.post("/onboarding/tracking", requireAuth, requireCsrf, requireRole("ADMIN"),
   const state = await upsertOnboardingState({
     orgId: req.user!.orgId,
     completedSteps: ["tracking"],
+    currentStep: parsed.data.currentStep,
   });
   res.json({ settings, state });
 });
@@ -8529,6 +8533,7 @@ app.post("/onboarding/finance", requireAuth, requireCsrf, requireRole("ADMIN"), 
         includeAccessorials: z.boolean().optional(),
       })
       .optional(),
+    currentStep: z.number().int().min(1).max(ONBOARDING_STEPS.length).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -8564,6 +8569,7 @@ app.post("/onboarding/finance", requireAuth, requireCsrf, requireRole("ADMIN"), 
   const state = await upsertOnboardingState({
     orgId: req.user!.orgId,
     completedSteps: ["finance"],
+    currentStep: parsed.data.currentStep,
   });
   res.json({ settings, state });
 });

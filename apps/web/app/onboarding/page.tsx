@@ -155,6 +155,13 @@ function OnboardingWizard() {
   const current = STEPS[currentStep - 1];
 
   const completedSteps = new Set(state?.completedSteps ?? []);
+  const detectedTimezone = useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch {
+      return "";
+    }
+  }, []);
 
   const loadOnboarding = async () => {
     setLoading(true);
@@ -196,7 +203,7 @@ function OnboardingWizard() {
       ...prev,
       legalName: prev.legalName || settings.companyDisplayName || "",
       displayName: prev.displayName || settings.companyDisplayName || "",
-      timezone: prev.timezone || settings.timezone || "",
+      timezone: prev.timezone || settings.timezone || detectedTimezone || "",
       currency: prev.currency || settings.currency || "USD",
       operatingMode: prev.operatingMode || settings.operatingMode || "CARRIER",
       dotNumber: prev.dotNumber || defaultEntity?.dotNumber || "",
@@ -215,7 +222,7 @@ function OnboardingWizard() {
       includeFuelSurcharge: settings.settlementTemplate?.includeFuelSurcharge ?? prev.includeFuelSurcharge,
       includeAccessorials: settings.settlementTemplate?.includeAccessorials ?? prev.includeAccessorials,
     }));
-  }, [settings, entities]);
+  }, [settings, entities, detectedTimezone]);
 
   const markStepComplete = async (stepKey: string, nextStep?: number) => {
     const data = await apiFetch<{ state: OnboardingState }>("/onboarding/complete-step", {
@@ -277,6 +284,7 @@ function OnboardingWizard() {
           body: JSON.stringify({
             requiredDocs,
             requireRateConBeforeDispatch: preferences.requireRateCon,
+            currentStep: currentStep + 1,
           }),
         });
         setState(data.state);
@@ -284,7 +292,7 @@ function OnboardingWizard() {
         const data = await apiFetch<{ state: OnboardingState }>("/onboarding/tracking", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ trackingPreference: trackingChoice }),
+          body: JSON.stringify({ trackingPreference: trackingChoice, currentStep: currentStep + 1 }),
         });
         setState(data.state);
       } else if (current.key === "finance") {
@@ -298,6 +306,7 @@ function OnboardingWizard() {
               includeFuelSurcharge: financeForm.includeFuelSurcharge,
               includeAccessorials: financeForm.includeAccessorials,
             },
+            currentStep: currentStep + 1,
           }),
         });
         setState(data.state);
@@ -865,6 +874,18 @@ function OnboardingWizard() {
               </div>
             ))}
             {trucks.length === 0 ? <EmptyState title="No trucks yet." /> : null}
+          </div>
+
+          <div className="grid gap-2">
+            {trailers.slice(0, 4).map((trailer) => (
+              <div key={trailer.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-2 text-sm">
+                <div className="font-semibold">{trailer.unit}</div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  {(trailer.type || "Trailer").toString().replace(/_/g, " ")}
+                </div>
+              </div>
+            ))}
+            {trailers.length === 0 ? <EmptyState title="No trailers yet." /> : null}
           </div>
         </div>
       );
