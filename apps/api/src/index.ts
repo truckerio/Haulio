@@ -947,6 +947,36 @@ app.post("/setup/consume-and-create-org", setupLimiter, async (req, res) => {
       const org = await tx.organization.create({
         data: { name: parsed.data.companyName },
       });
+      await tx.orgSettings.create({
+        data: {
+          orgId: org.id,
+          companyDisplayName: parsed.data.companyName,
+          remitToAddress: "",
+          currency: "USD",
+          operatingMode: "CARRIER",
+          invoiceTerms: "",
+          invoiceFooter: "",
+          invoicePrefix: "",
+          nextInvoiceNumber: 0,
+          podRequireSignature: true,
+          podRequirePrintedName: true,
+          podRequireDeliveryDate: true,
+          podMinPages: 1,
+          requiredDocs: [],
+          requiredDriverDocs: [],
+          collectPodDueMinutes: 0,
+          missingPodAfterMinutes: 0,
+          reminderFrequencyMinutes: 0,
+          freeStorageMinutes: 0,
+          storageRatePerDay: new Prisma.Decimal(0),
+          pickupFreeDetentionMinutes: 0,
+          deliveryFreeDetentionMinutes: 0,
+          detentionRatePerHour: null,
+          driverRatePerMile: new Prisma.Decimal(0),
+          trackingPreference: "MANUAL",
+          settlementSchedule: "WEEKLY",
+        },
+      });
       const passwordHash = await bcrypt.hash(parsed.data.admin.password, 10);
       const user = await tx.user.create({
         data: {
