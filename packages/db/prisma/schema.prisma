@@ -174,6 +174,13 @@ enum LoadBusinessType {
   BROKER
 }
 
+enum TeamEntityType {
+  LOAD
+  TRUCK
+  TRAILER
+  DRIVER
+}
+
 enum TrackingProviderType {
   PHONE
   SAMSARA
@@ -339,6 +346,9 @@ model Organization {
   passwordResets PasswordReset[]
   onboardingState OnboardingState?
   sequence   OrgSequence?
+  teams      Team[]
+  teamMembers TeamMember[]
+  teamAssignments TeamAssignment[]
 }
 
 model OrgSequence {
@@ -353,6 +363,53 @@ model OrgSequence {
   org Organization @relation(fields: [orgId], references: [id])
 }
 
+model Team {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org         Organization  @relation(fields: [orgId], references: [id])
+  defaultUsers User[]       @relation("UserDefaultTeam")
+  members     TeamMember[]
+  assignments TeamAssignment[]
+
+  @@unique([orgId, name])
+  @@index([orgId])
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  orgId     String
+  teamId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  team Team         @relation(fields: [teamId], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@unique([teamId, userId])
+  @@index([orgId, userId])
+}
+
+model TeamAssignment {
+  id         String         @id @default(cuid())
+  orgId      String
+  teamId     String
+  entityType TeamEntityType
+  entityId   String
+  createdAt  DateTime       @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  team Team         @relation(fields: [teamId], references: [id])
+
+  @@unique([orgId, entityType, entityId])
+  @@index([orgId, teamId])
+}
+
 model User {
   id           String       @id @default(cuid())
   orgId        String
@@ -364,11 +421,14 @@ model User {
   profilePhotoUrl String?
   permissions  Permission[] @default([])
   isActive     Boolean      @default(true)
+  canSeeAllTeams Boolean    @default(false)
+  defaultTeamId String?
   timezone     String?
   lastLoginAt  DateTime?
   createdAt    DateTime     @default(now())
 
   org               Organization           @relation(fields: [orgId], references: [id])
+  defaultTeam       Team?                  @relation("UserDefaultTeam", fields: [defaultTeamId], references: [id])
   sessions          Session[]
   driver            Driver?
   createdLoads      Load[]                 @relation("CreatedLoads")
@@ -386,6 +446,7 @@ model User {
   notificationPrefs UserNotificationPref[]
   invites           UserInvite[]
   passwordResets    PasswordReset[]
+  teamMemberships   TeamMember[]
 
   @@unique([orgId, email])
 }
@@ -519,6 +580,7 @@ model Load {
   customerName     String?
   customerRef      String?
   externalTripId   String?    @db.VarChar(64)
+  tripNumber       String?    @db.VarChar(64)
   salesRepName     String?    @db.VarChar(128)
   dropName         String?    @db.VarChar(128)
   notes            String?
@@ -569,6 +631,7 @@ model Load {
   charges        LoadCharge[]
 
   @@unique([orgId, loadNumber])
+  @@unique([orgId, tripNumber])
   @@index([orgId, status])
   @@index([orgId, status, createdAt])
   @@index([orgId, operatingEntityId])

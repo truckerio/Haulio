@@ -16,6 +16,8 @@ CREATE TABLE "LoadConfirmationDocument" (
     "sha256" TEXT NOT NULL,
     "status" "LoadConfirmationStatus" NOT NULL DEFAULT 'UPLOADED',
     "extractedJson" JSONB,
+    "extractedText" TEXT,
+    "extractedDraft" JSONB,
     "normalizedDraft" JSONB,
     "errorMessage" TEXT,
     "createdLoadId" TEXT,
@@ -47,3 +49,5 @@ ALTER TABLE "LoadConfirmationDocument" ADD CONSTRAINT "LoadConfirmationDocument_
 
 ALTER TABLE "LoadConfirmationExtractEvent" ADD CONSTRAINT "LoadConfirmationExtractEvent_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "LoadConfirmationExtractEvent" ADD CONSTRAINT "LoadConfirmationExtractEvent_docId_fkey" FOREIGN KEY ("docId") REFERENCES "LoadConfirmationDocument"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+ALTER TABLE "LoadConfirmationLearningExample" ADD CONSTRAINT "LoadConfirmationLearningExample_docId_fkey" FOREIGN KEY ("docId") REFERENCES "LoadConfirmationDocument"("id") ON DELETE SET NULL ON UPDATE CASCADE;

@@ -110,6 +110,7 @@ const defaultFilters = {
   minRate: "",
   maxRate: "",
   operatingEntityId: "",
+  teamId: "",
 };
 
 type Filters = typeof defaultFilters;
@@ -135,6 +136,7 @@ export default function DispatchPage() {
   const [operatingEntities, setOperatingEntities] = useState<Array<{ id: string; name: string; isDefault?: boolean }>>(
     []
   );
+  const [teams, setTeams] = useState<Array<{ id: string; name: string; active?: boolean }>>([]);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [view, setView] = useState<"cards" | "board" | "compact">("board");
   const [showFilters, setShowFilters] = useState(false);
@@ -158,10 +160,11 @@ export default function DispatchPage() {
   const [blocked, setBlocked] = useState<{ message?: string; ctaHref?: string } | null>(null);
 
   const canDispatch = Boolean(user && (user.role === "ADMIN" || user.role === "DISPATCHER"));
+  const canSeeAllTeams = Boolean(user?.canSeeAllTeams);
   const canOverride = user?.role === "ADMIN";
   const dispatchStage =
     selectedLoad?.status && ["DRAFT", "PLANNED", "ASSIGNED"].includes(selectedLoad.status);
-  const rateConRequired = Boolean(dispatchSettings?.requireRateConBeforeDispatch);
+  const rateConRequired = Boolean(dispatchSettings?.requireRateConBeforeDispatch && selectedLoad?.loadType === "BROKERED");
   const hasRateCon = (selectedLoad?.docs ?? []).some((doc: any) => doc.type === "RATECON");
   const rateConMissing = Boolean(dispatchStage && rateConRequired && !hasRateCon);
   const assignDisabled =
@@ -231,12 +234,15 @@ export default function DispatchPage() {
     if (!hasAccess) return;
     const params = new URLSearchParams(window.location.search);
     const fromUrl = params.get("operatingEntityId");
+    const teamFromUrl = canSeeAllTeams ? params.get("teamId") : "";
     const stored = window.localStorage.getItem(STORAGE_KEY);
     const value = fromUrl || stored || "";
-    if (value) {
-      setFilters((prev) => ({ ...prev, operatingEntityId: value }));
-    }
-  }, [hasAccess]);
+    setFilters((prev) => ({
+      ...prev,
+      operatingEntityId: value,
+      teamId: teamFromUrl || "",
+    }));
+  }, [hasAccess, canSeeAllTeams]);
 
   useEffect(() => {
     if (!hasAccess) return;
@@ -248,9 +254,14 @@ export default function DispatchPage() {
       params.delete("operatingEntityId");
       window.localStorage.removeItem(STORAGE_KEY);
     }
+    if (canSeeAllTeams && filters.teamId) {
+      params.set("teamId", filters.teamId);
+    } else {
+      params.delete("teamId");
+    }
     const query = params.toString();
     router.replace(query ? `/dispatch?${query}` : "/dispatch");
-  }, [filters.operatingEntityId, hasAccess, router]);
+  }, [filters.operatingEntityId, filters.teamId, hasAccess, router, canSeeAllTeams]);
 
   const loadAssets = useCallback(async () => {
     if (!canDispatch) return;
@@ -265,6 +276,17 @@ export default function DispatchPage() {
     setTrailers(trailersData.trailers ?? []);
     setOperatingEntities(entitiesData.entities ?? []);
   }, [canDispatch]);
+
+  useEffect(() => {
+    if (!canSeeAllTeams) {
+      setTeams([]);
+      setFilters((prev) => ({ ...prev, teamId: "" }));
+      return;
+    }
+    apiFetch<{ teams: Array<{ id: string; name: string; active?: boolean }> }>("/teams")
+      .then((data) => setTeams(data.teams ?? []))
+      .catch(() => setTeams([]));
+  }, [canSeeAllTeams]);
 
   useEffect(() => {
     if (!canDispatch) return;
@@ -290,8 +312,9 @@ export default function DispatchPage() {
     if (nextFilters.fromDate) params.set("fromDate", nextFilters.fromDate);
     if (nextFilters.toDate) params.set("toDate", nextFilters.toDate);
     if (nextFilters.operatingEntityId) params.set("operatingEntityId", nextFilters.operatingEntityId);
+    if (canSeeAllTeams && nextFilters.teamId) params.set("teamId", nextFilters.teamId);
     return params.toString();
-  }, [filters, pageIndex]);
+  }, [filters, pageIndex, canSeeAllTeams]);
 
   const loadDispatchLoads = useCallback(async (nextFilters = filters, page = pageIndex) => {
     if (!canDispatch) return;
@@ -329,10 +352,11 @@ export default function DispatchPage() {
   useEffect(() => {
     if (!selectedLoadId || !canDispatch) return;
     refreshSelectedLoad(selectedLoadId);
-    apiFetch<AvailabilityData>(`/dispatch/availability?loadId=${selectedLoadId}`)
+    const teamQuery = canSeeAllTeams && filters.teamId ? `&teamId=${filters.teamId}` : "";
+    apiFetch<AvailabilityData>(`/dispatch/availability?loadId=${selectedLoadId}${teamQuery}`)
       .then((data) => setAvailability(data))
       .catch(() => setAvailability(null));
-  }, [selectedLoadId, canDispatch, refreshSelectedLoad]);
+  }, [selectedLoadId, canDispatch, refreshSelectedLoad, filters.teamId, canSeeAllTeams]);
 
   useEffect(() => {
     setConfirmReassign(false);
@@ -939,6 +963,18 @@ export default function DispatchPage() {
                   ))}
                 </Select>
               </FormField>
+              {canSeeAllTeams ? (
+                <FormField label="Team" htmlFor="dispatchTeam">
+                  <Select value={filters.teamId} onChange={(e) => setFilters({ ...filters, teamId: e.target.value })}>
+                    <option value="">All teams</option>
+                    {teams.map((team) => (
+                      <option key={team.id} value={team.id}>
+                        {team.name}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+              ) : null}
             </div>
           </details>
           <div className="mt-3 flex flex-wrap gap-2">

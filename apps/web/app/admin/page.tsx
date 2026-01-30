@@ -32,7 +32,16 @@ export default function AdminPage() {
   const canAccess = Boolean(user && user.role === "ADMIN");
   const [settings, setSettings] = useState<any | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<any | null>(null);
+  const [sequence, setSequence] = useState<any | null>(null);
+  const [sequenceDraft, setSequenceDraft] = useState<any | null>(null);
+  const [sequenceError, setSequenceError] = useState<string | null>(null);
+  const [sequenceSaving, setSequenceSaving] = useState(false);
   const [users, setUsers] = useState<any[]>([]);
+  const [teams, setTeams] = useState<any[]>([]);
+  const [teamName, setTeamName] = useState("");
+  const [teamMemberSelections, setTeamMemberSelections] = useState<Record<string, string>>({});
+  const [teamsError, setTeamsError] = useState<string | null>(null);
+  const [teamsSaving, setTeamsSaving] = useState(false);
   const [drivers, setDrivers] = useState<any[]>([]);
   const [showArchivedDrivers, setShowArchivedDrivers] = useState(false);
   const [customers, setCustomers] = useState<any[]>([]);
@@ -132,10 +141,25 @@ export default function AdminPage() {
     }
   };
 
+  const loadSequences = async () => {
+    try {
+      const data = await apiFetch<{ sequence: any }>("/admin/sequences");
+      setSequence(data.sequence);
+      setSequenceDraft(data.sequence);
+      setSequenceError(null);
+    } catch (err) {
+      setSequence(null);
+      setSequenceDraft(null);
+      setSequenceError((err as Error).message || "Failed to load numbering settings.");
+    }
+  };
+
   const loadData = async () => {
     await loadSettings();
+    await loadSequences();
     const results = await Promise.allSettled([
       apiFetch<{ users: any[] }>("/admin/users"),
+      apiFetch<{ teams: any[] }>("/admin/teams"),
       apiFetch<{ drivers: any[] }>("/admin/drivers"),
       apiFetch<{ customers: any[] }>("/customers"),
       apiFetch<{ entities: any[] }>("/api/operating-entities"),
@@ -147,6 +171,7 @@ export default function AdminPage() {
 
     const [
       usersResult,
+      teamsResult,
       driversResult,
       customersResult,
       entitiesResult,
@@ -157,6 +182,13 @@ export default function AdminPage() {
     ] = results;
 
     if (usersResult.status === "fulfilled") setUsers(usersResult.value.users);
+    if (teamsResult.status === "fulfilled") {
+      setTeams(teamsResult.value.teams ?? []);
+      setTeamsError(null);
+    } else {
+      setTeams([]);
+      setTeamsError("Failed to load teams.");
+    }
     if (driversResult.status === "fulfilled") setDrivers(driversResult.value.drivers);
     if (customersResult.status === "fulfilled") {
       setCustomers(customersResult.value.customers);
@@ -202,6 +234,12 @@ export default function AdminPage() {
   }, [settings, settingsDraft]);
 
   useEffect(() => {
+    if (!sequenceDraft && sequence) {
+      setSequenceDraft(sequence);
+    }
+  }, [sequence, sequenceDraft]);
+
+  useEffect(() => {
     const next: Record<string, string> = {};
     truckMappings.forEach((mapping) => {
       if (mapping.truckId && mapping.externalId) {
@@ -234,6 +272,86 @@ export default function AdminPage() {
       body: JSON.stringify(payload),
     });
     loadSettings();
+  };
+
+  const updateSequences = async () => {
+    if (!sequenceDraft) return;
+    setSequenceSaving(true);
+    setSequenceError(null);
+    try {
+      const payload = {
+        loadPrefix: sequenceDraft.loadPrefix ?? "",
+        tripPrefix: sequenceDraft.tripPrefix ?? "",
+        nextLoadNumber: Number(sequenceDraft.nextLoadNumber || 0),
+        nextTripNumber: Number(sequenceDraft.nextTripNumber || 0),
+      };
+      const data = await apiFetch<{ sequence: any }>("/admin/sequences", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setSequence(data.sequence);
+      setSequenceDraft(data.sequence);
+    } catch (err) {
+      setSequenceError((err as Error).message || "Failed to update numbering settings.");
+    } finally {
+      setSequenceSaving(false);
+    }
+  };
+
+  const createTeam = async () => {
+    const name = teamName.trim();
+    if (!name) return;
+    setTeamsSaving(true);
+    setTeamsError(null);
+    try {
+      await apiFetch("/admin/teams", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      setTeamName("");
+      await loadData();
+    } catch (err) {
+      setTeamsError((err as Error).message || "Failed to create team.");
+    } finally {
+      setTeamsSaving(false);
+    }
+  };
+
+  const addTeamMember = async (teamId: string) => {
+    const userId = teamMemberSelections[teamId];
+    if (!userId) return;
+    setTeamsSaving(true);
+    setTeamsError(null);
+    try {
+      await apiFetch(`/admin/teams/${teamId}/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      setTeamMemberSelections((prev) => ({ ...prev, [teamId]: "" }));
+      await loadData();
+    } catch (err) {
+      setTeamsError((err as Error).message || "Failed to add team member.");
+    } finally {
+      setTeamsSaving(false);
+    }
+  };
+
+  const removeTeamMember = async (teamId: string, userId: string) => {
+    setTeamsSaving(true);
+    setTeamsError(null);
+    try {
+      await apiFetch(`/admin/teams/${teamId}/members/${userId}`, {
+        method: "DELETE",
+      });
+      await loadData();
+    } catch (err) {
+      setTeamsError((err as Error).message || "Failed to remove team member.");
+    } finally {
+      setTeamsSaving(false);
+    }
   };
 
   const saveCustomer = async () => {
@@ -647,6 +765,125 @@ export default function AdminPage() {
                 />
               </FormField>
               <Button onClick={updateSettings}>Save settings</Button>
+            </Card>
+
+            <Card className="space-y-4">
+              <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Numbering</div>
+              {sequenceError ? <ErrorBanner message={sequenceError} /> : null}
+              <div className="grid gap-3 lg:grid-cols-2">
+                <FormField label="Load prefix" htmlFor="loadPrefix">
+                  <Input
+                    placeholder="LD-"
+                    value={sequenceDraft?.loadPrefix ?? ""}
+                    onChange={(e) => setSequenceDraft({ ...(sequenceDraft ?? {}), loadPrefix: e.target.value })}
+                  />
+                </FormField>
+                <FormField label="Next load number" htmlFor="nextLoadNumber">
+                  <Input
+                    placeholder="1001"
+                    value={sequenceDraft?.nextLoadNumber ?? ""}
+                    onChange={(e) => setSequenceDraft({ ...(sequenceDraft ?? {}), nextLoadNumber: e.target.value })}
+                  />
+                </FormField>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-2">
+                <FormField label="Trip prefix" htmlFor="tripPrefix">
+                  <Input
+                    placeholder="TR-"
+                    value={sequenceDraft?.tripPrefix ?? ""}
+                    onChange={(e) => setSequenceDraft({ ...(sequenceDraft ?? {}), tripPrefix: e.target.value })}
+                  />
+                </FormField>
+                <FormField label="Next trip number" htmlFor="nextTripNumber">
+                  <Input
+                    placeholder="1001"
+                    value={sequenceDraft?.nextTripNumber ?? ""}
+                    onChange={(e) => setSequenceDraft({ ...(sequenceDraft ?? {}), nextTripNumber: e.target.value })}
+                  />
+                </FormField>
+              </div>
+              <div className="text-xs text-[color:var(--color-text-muted)]">
+                Changing next number affects future loads only.
+              </div>
+              <Button onClick={updateSequences} disabled={sequenceSaving}>
+                {sequenceSaving ? "Saving..." : "Save numbering"}
+              </Button>
+            </Card>
+
+            <Card className="space-y-4">
+              <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Teams</div>
+              {teamsError ? <ErrorBanner message={teamsError} /> : null}
+              <div className="grid gap-3 lg:grid-cols-[1fr,auto]">
+                <Input
+                  placeholder="New team name"
+                  value={teamName}
+                  onChange={(e) => setTeamName(e.target.value)}
+                />
+                <Button onClick={createTeam} disabled={teamsSaving || !teamName.trim()}>
+                  {teamsSaving ? "Saving..." : "Create team"}
+                </Button>
+              </div>
+              <div className="grid gap-3">
+                {teams.map((team) => {
+                  const memberIds = new Set((team.members ?? []).map((member: any) => member.id));
+                  const availableUsers = users.filter((user) => !memberIds.has(user.id));
+                  return (
+                    <div key={team.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-lg font-semibold">{team.name}</div>
+                        <div className="text-xs text-[color:var(--color-text-muted)]">
+                          {team.members?.length ?? 0} member{team.members?.length === 1 ? "" : "s"}
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-2">
+                        {(team.members ?? []).map((member: any) => (
+                          <div key={member.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                            <div>
+                              <div className="font-semibold">{member.name ?? member.email}</div>
+                              <div className="text-xs text-[color:var(--color-text-muted)]">{member.email}</div>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => removeTeamMember(team.id, member.id)}
+                              disabled={teamsSaving}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        ))}
+                        {team.members?.length ? null : (
+                          <div className="text-xs text-[color:var(--color-text-muted)]">No members yet.</div>
+                        )}
+                      </div>
+                      <div className="mt-3 grid gap-2 lg:grid-cols-[1fr,auto]">
+                        <Select
+                          value={teamMemberSelections[team.id] ?? ""}
+                          onChange={(e) =>
+                            setTeamMemberSelections((prev) => ({ ...prev, [team.id]: e.target.value }))
+                          }
+                        >
+                          <option value="">Select user</option>
+                          {availableUsers.map((user) => (
+                            <option key={user.id} value={user.id}>
+                              {user.name ?? user.email} ({user.role})
+                            </option>
+                          ))}
+                        </Select>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => addTeamMember(team.id)}
+                          disabled={teamsSaving || !teamMemberSelections[team.id]}
+                        >
+                          Add member
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {teams.length === 0 ? <EmptyState title="No teams yet." /> : null}
+              </div>
             </Card>
 
             <Card className="space-y-4">

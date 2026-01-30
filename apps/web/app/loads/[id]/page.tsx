@@ -214,12 +214,19 @@ export default function LoadDetailsPage() {
     }
   }, [activeTab, pendingAnchor, loadId, load?.docs?.length]);
 
+  const docTypeOptions = useMemo(() => {
+    if (load?.loadType === "COMPANY") {
+      return DOC_TYPES.filter((type) => type !== "RATECON");
+    }
+    return DOC_TYPES;
+  }, [load?.loadType]);
+
   useEffect(() => {
     if (!docTypeParam) return;
-    if (DOC_TYPES.includes(docTypeParam as (typeof DOC_TYPES)[number])) {
+    if (docTypeOptions.includes(docTypeParam as (typeof DOC_TYPES)[number])) {
       setUploadType(docTypeParam);
     }
-  }, [docTypeParam]);
+  }, [docTypeParam, docTypeOptions]);
 
   useEffect(() => {
     if (!user || user.role !== "ADMIN") return;
@@ -248,7 +255,7 @@ export default function LoadDetailsPage() {
     if (podDocs.some((doc: any) => doc.status === "VERIFIED")) return "Verified";
     return "Uploaded";
   }, [podDocs]);
-  const rateConRequired = Boolean(settings?.requireRateConBeforeDispatch);
+  const rateConRequired = Boolean(settings?.requireRateConBeforeDispatch && load?.loadType === "BROKERED");
   const hasRateCon = useMemo(
     () => (load?.docs ?? []).some((doc: any) => doc.type === "RATECON"),
     [load?.docs]
@@ -770,6 +777,7 @@ export default function LoadDetailsPage() {
               <StatusChip label={load?.status ?? "UNKNOWN"} tone={statusTone(load?.status)} />
               {billingLabel ? <StatusChip label={billingLabel} tone={billingTone(billingLabel)} /> : null}
             </div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">Trip: {load?.tripNumber ?? "-"}</div>
             <div className="text-sm text-[color:var(--color-text-muted)]">
               {routeSummary} - {customerName}
             </div>
@@ -1254,7 +1262,7 @@ export default function LoadDetailsPage() {
                 <div className="space-y-2">
                   <FormField label="Document type" htmlFor="uploadType">
                     <Select value={uploadType} onChange={(e) => setUploadType(e.target.value)}>
-                      {DOC_TYPES.map((type) => (
+                      {docTypeOptions.map((type) => (
                         <option key={type} value={type}>
                           {type}
                         </option>

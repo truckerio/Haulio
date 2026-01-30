@@ -43,6 +43,7 @@ import {
   TrackingSessionStatus,
   SettlementStatus,
   LearningDomain,
+  TeamEntityType,
   add,
   formatUSD,
   mul,
@@ -72,8 +73,16 @@ import { generatePacketZip } from "./lib/packet";
 import { hasPermission, requirePermission } from "./lib/permissions";
 import { requireOrgEntity } from "./lib/tenant";
 import { requireOperationalOrg } from "./lib/onboarding";
-import { fetchSamsaraVehicleLocation, validateSamsaraToken } from "./lib/samsara";
+import { fetchSamsaraVehicleLocation, fetchSamsaraVehicles, formatSamsaraError, validateSamsaraToken } from "./lib/samsara";
 import { assertLoadStatusTransition, formatLoadStatusLabel, mapExternalLoadStatus } from "./lib/load-status";
+import {
+  applyTeamFilterOverride,
+  ensureDefaultTeamForOrg,
+  ensureEntityAssignedToDefaultTeam,
+  ensureTeamAssignmentsForEntityType,
+  getScopedEntityIds,
+  getUserTeamScope,
+} from "./lib/team-scope";
 import {
   applyLearned,
   buildLearningKeyForAddress,
@@ -92,6 +101,7 @@ import {
   previewTmsLoadSheet,
   validateTmsHeaders,
 } from "./lib/tms-load-sheet";
+import { allocateLoadAndTripNumbers, getOrgSequence } from "./lib/sequences";
 import path from "path";
 
 const app = express();
@@ -616,6 +626,23 @@ function extractSamsaraToken(config: Prisma.JsonValue | null) {
   return typeof token === "string" && token.trim().length > 0 ? token : null;
 }
 
+function sendSamsaraError(res: Response, error: unknown) {
+  const info = formatSamsaraError(error);
+  const status =
+    info.code === "UNAUTHORIZED"
+      ? 400
+      : info.code === "RATE_LIMITED"
+        ? 429
+        : info.code === "NETWORK_ERROR"
+          ? 503
+          : 502;
+  res.status(status).json({
+    error: info.message,
+    code: `SAMSARA_${info.code}`,
+    retryAfter: info.retryAfter ?? null,
+  });
+}
+
 type DraftStop = {
   type: "PICKUP" | "DELIVERY";
   name: string;
@@ -693,7 +720,6 @@ function normalizeLoadDraft(raw: any): DraftLoad {
 }
 
 function isDraftReady(draft: DraftLoad) {
-  if (!draft.loadNumber || draft.loadNumber.length < 2) return false;
   if (!draft.customerName || draft.customerName.length < 2) return false;
   if (!draft.stops || draft.stops.length < 2) return false;
   const hasPickupDate = draft.stops.some((stop) => stop.type === "PICKUP" && stop.apptStart);
@@ -1136,16 +1162,22 @@ app.post("/auth/reset", async (req, res) => {
 });
 
 app.get("/auth/me", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
-  const org = await prisma.organization.findFirst({
-    where: { id: req.user!.orgId },
-    select: {
-      id: true,
-      name: true,
-      settings: { select: { companyDisplayName: true, operatingMode: true } },
-    },
-  });
+  const [org, userRecord] = await Promise.all([
+    prisma.organization.findFirst({
+      where: { id: req.user!.orgId },
+      select: {
+        id: true,
+        name: true,
+        settings: { select: { companyDisplayName: true, operatingMode: true } },
+      },
+    }),
+    prisma.user.findFirst({
+      where: { id: req.user!.id, orgId: req.user!.orgId },
+      select: { canSeeAllTeams: true },
+    }),
+  ]);
   res.json({
-    user: req.user,
+    user: { ...req.user, canSeeAllTeams: userRecord?.canSeeAllTeams ?? false },
     org: org
       ? {
           id: org.id,
@@ -1314,6 +1346,17 @@ app.get("/tasks/inbox", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING
     orgId: req.user!.orgId,
     status: { in: statusFilter },
   };
+
+  const taskScope = await getUserTeamScope(req.user!);
+  if (!taskScope.canSeeAllTeams) {
+    await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.LOAD, taskScope.defaultTeamId!);
+    const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, taskScope);
+    const scopeFilter: Prisma.TaskWhereInput = {
+      OR: [{ loadId: null }, { loadId: { in: scopedLoadIds ?? [] } }],
+    };
+    const existingAnd = baseWhere.AND ? (Array.isArray(baseWhere.AND) ? baseWhere.AND : [baseWhere.AND]) : [];
+    baseWhere.AND = [...existingAnd, scopeFilter];
+  }
 
   if (priorities.length > 0) {
     baseWhere.priority = { in: priorities as TaskPriority[] };
@@ -1495,6 +1538,7 @@ app.get("/today", requireAuth, async (req, res) => {
             orgId,
             deletedAt: null,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
+            loadType: LoadType.BROKERED,
             docs: { none: { type: DocType.RATECON } },
           },
         }),
@@ -1503,6 +1547,7 @@ app.get("/today", requireAuth, async (req, res) => {
             orgId,
             deletedAt: null,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
+            loadType: LoadType.BROKERED,
             docs: { none: { type: DocType.RATECON } },
           },
           select: { id: true },
@@ -1858,6 +1903,14 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
   try {
     const archived = parseBooleanParam(typeof req.query.archived === "string" ? req.query.archived : undefined);
     const { where } = buildLoadFilters(req, { archived });
+    const loadScope = await getUserTeamScope(req.user!);
+    const teamFilterId = typeof req.query.teamId === "string" ? req.query.teamId.trim() : "";
+    const effectiveScope = await applyTeamFilterOverride(req.user!.orgId, loadScope, teamFilterId || null);
+    if (!effectiveScope.canSeeAllTeams) {
+      await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.LOAD, effectiveScope.defaultTeamId!);
+      const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, effectiveScope);
+      where.id = { in: scopedLoadIds ?? [] };
+    }
     const chip = typeof req.query.chip === "string" ? req.query.chip : "";
     if (!req.query.status && chip) {
       if (chip === "active") {
@@ -2334,6 +2387,14 @@ app.get("/loads/export/preview", requireAuth, requireRole("ADMIN", "DISPATCHER",
       toOverride = now;
     }
     const { where } = buildLoadFilters(req, { archived, from: fromOverride, to: toOverride });
+    const exportScope = await getUserTeamScope(req.user!);
+    const teamFilterId = typeof req.query.teamId === "string" ? req.query.teamId.trim() : "";
+    const effectiveScope = await applyTeamFilterOverride(req.user!.orgId, exportScope, teamFilterId || null);
+    if (!effectiveScope.canSeeAllTeams) {
+      await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.LOAD, effectiveScope.defaultTeamId!);
+      const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, effectiveScope);
+      where.id = { in: scopedLoadIds ?? [] };
+    }
     const candidates = await fetchExportCandidates(where);
     const chip = typeof req.query.chip === "string" ? req.query.chip : "";
     const filtered = applyChipFilter(candidates, chip);
@@ -2359,6 +2420,14 @@ app.get("/loads/export", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLIN
       toOverride = now;
     }
     const { where } = buildLoadFilters(req, { archived, from: fromOverride, to: toOverride });
+    const exportScope = await getUserTeamScope(req.user!);
+    const teamFilterId = typeof req.query.teamId === "string" ? req.query.teamId.trim() : "";
+    const effectiveScope = await applyTeamFilterOverride(req.user!.orgId, exportScope, teamFilterId || null);
+    if (!effectiveScope.canSeeAllTeams) {
+      await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.LOAD, effectiveScope.defaultTeamId!);
+      const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, effectiveScope);
+      where.id = { in: scopedLoadIds ?? [] };
+    }
     const candidates = await fetchExportCandidates(where);
     const chip = typeof req.query.chip === "string" ? req.query.chip : "";
     const exportFormat = typeof req.query.format === "string" ? req.query.format : "";
@@ -2620,6 +2689,24 @@ app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING")
   if (!load) {
     res.status(404).json({ error: "Load not found" });
     return;
+  }
+  const loadScope = await getUserTeamScope(req.user!);
+  if (!loadScope.canSeeAllTeams) {
+    let assignment = await prisma.teamAssignment.findFirst({
+      where: { orgId: req.user!.orgId, entityType: TeamEntityType.LOAD, entityId: load.id },
+    });
+    if (!assignment) {
+      assignment = await ensureEntityAssignedToDefaultTeam(
+        req.user!.orgId,
+        TeamEntityType.LOAD,
+        load.id,
+        loadScope.defaultTeamId!
+      );
+    }
+    if (!loadScope.teamIds.includes(assignment.teamId)) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
   }
   res.json({ load, settings });
 });
@@ -2997,6 +3084,24 @@ app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.
     res.status(404).json({ error: "Load not found" });
     return;
   }
+  const loadScope = await getUserTeamScope(req.user!);
+  if (!loadScope.canSeeAllTeams) {
+    let assignment = await prisma.teamAssignment.findFirst({
+      where: { orgId: req.user!.orgId, entityType: TeamEntityType.LOAD, entityId: load.id },
+    });
+    if (!assignment) {
+      assignment = await ensureEntityAssignedToDefaultTeam(
+        req.user!.orgId,
+        TeamEntityType.LOAD,
+        load.id,
+        loadScope.defaultTeamId!
+      );
+    }
+    if (!loadScope.teamIds.includes(assignment.teamId)) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+  }
   res.json({ load, settings });
 });
 
@@ -3342,13 +3447,21 @@ app.post(
       return;
     }
 
-    const existing = await prisma.load.findFirst({
-      where: { orgId: req.user!.orgId, loadNumber: draft.loadNumber ?? "" },
-      select: { id: true },
-    });
-    if (existing) {
-      res.status(409).json({ error: "Load number already exists" });
-      return;
+    const manualLoadNumber = draft.loadNumber?.trim() || null;
+    if (manualLoadNumber) {
+      const existing = await prisma.load.findFirst({
+        where: { orgId: req.user!.orgId, loadNumber: manualLoadNumber },
+        select: { id: true },
+      });
+      if (existing) {
+        const sequence = await getOrgSequence(req.user!.orgId);
+        const suggestedLoadNumber = `${sequence.loadPrefix}${sequence.nextLoadNumber}`;
+        res.status(409).json({
+          error: `Load number already exists. Next available is ${suggestedLoadNumber}.`,
+          suggestedLoadNumber,
+        });
+        return;
+      }
     }
 
     const shipperName = draft.stops.find((stop) => stop.type === "PICKUP")?.name || "Unknown";
@@ -3403,11 +3516,20 @@ app.post(
       });
     }
 
+    let assignedLoadNumber = manualLoadNumber;
+    let assignedTripNumber: string | null = null;
+    if (!assignedLoadNumber) {
+      const allocated = await allocateLoadAndTripNumbers(req.user!.orgId);
+      assignedLoadNumber = allocated.loadNumber;
+      assignedTripNumber = allocated.tripNumber;
+    }
+
     const load = await prisma.$transaction(async (tx) => {
       const created = await tx.load.create({
         data: {
           orgId: req.user!.orgId,
-          loadNumber: draft.loadNumber!,
+          loadNumber: assignedLoadNumber!,
+          tripNumber: assignedTripNumber,
           status: statusMapped,
           loadType,
           businessType,
@@ -3587,7 +3709,7 @@ app.post("/loads/:id/legs", requireAuth, requireCsrf, requirePermission(Permissi
   }
   if (parsed.data.setActive && parsed.data.driverId) {
     const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
-    if (settings?.requireRateConBeforeDispatch) {
+    if (settings?.requireRateConBeforeDispatch && load.loadType === LoadType.BROKERED) {
       const hasRateCon = await prisma.document.findFirst({
         where: { orgId: req.user!.orgId, loadId: load.id, type: DocType.RATECON },
         select: { id: true },
@@ -3686,7 +3808,7 @@ app.post("/legs/:id/assign", requireAuth, requireCsrf, requirePermission(Permiss
   }
   if (parsed.data.setActive && parsed.data.driverId) {
     const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
-    if (settings?.requireRateConBeforeDispatch) {
+    if (settings?.requireRateConBeforeDispatch && leg.load?.loadType === LoadType.BROKERED) {
       const hasRateCon = await prisma.document.findFirst({
         where: { orgId: req.user!.orgId, loadId: leg.loadId, type: DocType.RATECON },
         select: { id: true },
@@ -3758,7 +3880,7 @@ app.post("/legs/:id/status", requireAuth, requireCsrf, requirePermission(Permiss
   }
   if (parsed.data.status === "IN_PROGRESS" && leg.driverId) {
     const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
-    if (settings?.requireRateConBeforeDispatch) {
+    if (settings?.requireRateConBeforeDispatch && leg.load?.loadType === LoadType.BROKERED) {
       const hasRateCon = await prisma.document.findFirst({
         where: { orgId: req.user!.orgId, loadId: leg.loadId, type: DocType.RATECON },
         select: { id: true },
@@ -4007,7 +4129,8 @@ app.delete("/manifests/:id/items/:loadId", requireAuth, requireCsrf, requireRole
 
 app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermission(Permission.LOAD_CREATE), async (req, res) => {
   const schema = z.object({
-    loadNumber: z.string().min(2),
+    loadNumber: z.string().trim().min(2).optional(),
+    tripNumber: z.string().trim().min(2).optional(),
     loadType: z.enum(["COMPANY", "BROKERED", "VAN", "REEFER", "FLATBED", "OTHER"]).optional(),
     businessType: z.enum(["COMPANY", "BROKER"]).optional(),
     status: z.string().optional(),
@@ -4109,6 +4232,32 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
     ? await prisma.trailer.findFirst({ where: { orgId: req.user!.orgId, unit: parsed.data.trailerUnit } })
     : null;
 
+  const manualLoadNumber = parsed.data.loadNumber?.trim() || null;
+  const manualTripNumber = parsed.data.tripNumber?.trim() || null;
+  if (manualLoadNumber) {
+    const existing = await prisma.load.findFirst({
+      where: { orgId: req.user!.orgId, loadNumber: manualLoadNumber },
+      select: { id: true },
+    });
+    if (existing) {
+      const sequence = await getOrgSequence(req.user!.orgId);
+      const suggestedLoadNumber = `${sequence.loadPrefix}${sequence.nextLoadNumber}`;
+      res.status(409).json({
+        error: `Load number already exists. Next available is ${suggestedLoadNumber}.`,
+        suggestedLoadNumber,
+      });
+      return;
+    }
+  }
+
+  let assignedLoadNumber = manualLoadNumber;
+  let assignedTripNumber = manualTripNumber;
+  if (!assignedLoadNumber) {
+    const allocated = await allocateLoadAndTripNumbers(req.user!.orgId);
+    assignedLoadNumber = allocated.loadNumber;
+    assignedTripNumber = allocated.tripNumber;
+  }
+
   let shipperReferenceNumber: string | null = null;
   let consigneeReferenceNumber: string | null = null;
   let palletCount: number | null = null;
@@ -4142,7 +4291,8 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
   const load = await prisma.load.create({
     data: {
       orgId: req.user!.orgId,
-      loadNumber: parsed.data.loadNumber,
+      loadNumber: assignedLoadNumber!,
+      tripNumber: assignedTripNumber,
       status: statusMapped,
       loadType,
       businessType,
@@ -4508,6 +4658,7 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     select: {
       id: true,
       loadNumber: true,
+      loadType: true,
       status: true,
       assignedDriverId: true,
       truckId: true,
@@ -4536,7 +4687,7 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     return;
   }
 
-  if (settings?.requireRateConBeforeDispatch) {
+  if (settings?.requireRateConBeforeDispatch && load.loadType === LoadType.BROKERED) {
     const hasRateCon = await prisma.document.findFirst({
       where: { orgId: req.user!.orgId, loadId: load.id, type: DocType.RATECON },
       select: { id: true },
@@ -4856,17 +5007,38 @@ app.post("/stops/:id/delay", requireAuth, requireCsrf, requirePermission(Permiss
 });
 
 app.get("/assets/drivers", requireAuth, requirePermission(Permission.LOAD_ASSIGN, Permission.SETTLEMENT_GENERATE), async (req, res) => {
-  const drivers = await prisma.driver.findMany({ where: { orgId: req.user!.orgId, archivedAt: null } });
+  const scope = await getUserTeamScope(req.user!);
+  const where: Prisma.DriverWhereInput = { orgId: req.user!.orgId, archivedAt: null };
+  if (!scope.canSeeAllTeams) {
+    await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.DRIVER, scope.defaultTeamId!);
+    const scopedIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.DRIVER, scope);
+    where.id = { in: scopedIds ?? [] };
+  }
+  const drivers = await prisma.driver.findMany({ where });
   res.json({ drivers });
 });
 
 app.get("/assets/trucks", requireAuth, requireRole("ADMIN", "DISPATCHER"), async (req, res) => {
-  const trucks = await prisma.truck.findMany({ where: { orgId: req.user!.orgId } });
+  const scope = await getUserTeamScope(req.user!);
+  const where: Prisma.TruckWhereInput = { orgId: req.user!.orgId };
+  if (!scope.canSeeAllTeams) {
+    await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.TRUCK, scope.defaultTeamId!);
+    const scopedIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.TRUCK, scope);
+    where.id = { in: scopedIds ?? [] };
+  }
+  const trucks = await prisma.truck.findMany({ where });
   res.json({ trucks });
 });
 
 app.get("/assets/trailers", requireAuth, requireRole("ADMIN", "DISPATCHER"), async (req, res) => {
-  const trailers = await prisma.trailer.findMany({ where: { orgId: req.user!.orgId } });
+  const scope = await getUserTeamScope(req.user!);
+  const where: Prisma.TrailerWhereInput = { orgId: req.user!.orgId };
+  if (!scope.canSeeAllTeams) {
+    await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.TRAILER, scope.defaultTeamId!);
+    const scopedIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.TRAILER, scope);
+    where.id = { in: scopedIds ?? [] };
+  }
+  const trailers = await prisma.trailer.findMany({ where });
   res.json({ trailers });
 });
 
@@ -4893,6 +5065,27 @@ app.get("/dispatch/availability", requireAuth, requirePermission(Permission.LOAD
     res.status(404).json({ error: "Load not found" });
     return;
   }
+  const dispatchScopeBase = await getUserTeamScope(req.user!);
+  const teamFilterId = typeof req.query.teamId === "string" ? req.query.teamId.trim() : "";
+  const dispatchScope = await applyTeamFilterOverride(req.user!.orgId, dispatchScopeBase, teamFilterId || null);
+  if (!dispatchScope.canSeeAllTeams) {
+    await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.LOAD, dispatchScope.defaultTeamId!);
+    let assignment = await prisma.teamAssignment.findFirst({
+      where: { orgId: req.user!.orgId, entityType: TeamEntityType.LOAD, entityId: load.id },
+    });
+    if (!assignment) {
+      assignment = await ensureEntityAssignedToDefaultTeam(
+        req.user!.orgId,
+        TeamEntityType.LOAD,
+        load.id,
+        dispatchScope.defaultTeamId!
+      );
+    }
+    if (!dispatchScope.teamIds.includes(assignment.teamId)) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+  }
 
   const deriveWindow = (stops: Array<{ appointmentStart: Date | null; appointmentEnd: Date | null }>) => {
     const dates = stops
@@ -4906,10 +5099,32 @@ app.get("/dispatch/availability", requireAuth, requirePermission(Permission.LOAD
 
   const targetWindow = deriveWindow(load.stops);
 
+  let scopedLoadIds: string[] | null = null;
+  let scopedDriverIds: string[] | null = null;
+  let scopedTruckIds: string[] | null = null;
+  let scopedTrailerIds: string[] | null = null;
+
+  if (!dispatchScope.canSeeAllTeams) {
+    await Promise.all([
+      ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.DRIVER, dispatchScope.defaultTeamId!),
+      ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.TRUCK, dispatchScope.defaultTeamId!),
+      ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.TRAILER, dispatchScope.defaultTeamId!),
+    ]);
+    [scopedLoadIds, scopedDriverIds, scopedTruckIds, scopedTrailerIds] = await Promise.all([
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, dispatchScope),
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.DRIVER, dispatchScope),
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.TRUCK, dispatchScope),
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.TRAILER, dispatchScope),
+    ]);
+  }
+
   const activeLoads = await prisma.load.findMany({
     where: {
       orgId: req.user!.orgId,
-      id: { not: loadId },
+      id: {
+        not: loadId,
+        in: scopedLoadIds ?? undefined,
+      },
       status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
       OR: [{ assignedDriverId: { not: null } }, { truckId: { not: null } }, { trailerId: { not: null } }],
     },
@@ -4973,9 +5188,9 @@ app.get("/dispatch/availability", requireAuth, requirePermission(Permission.LOAD
   }
 
   const [drivers, trucks, trailers] = await Promise.all([
-    prisma.driver.findMany({ where: { orgId: req.user!.orgId } }),
-    prisma.truck.findMany({ where: { orgId: req.user!.orgId } }),
-    prisma.trailer.findMany({ where: { orgId: req.user!.orgId } }),
+    prisma.driver.findMany({ where: { orgId: req.user!.orgId, id: { in: scopedDriverIds ?? undefined } } }),
+    prisma.truck.findMany({ where: { orgId: req.user!.orgId, id: { in: scopedTruckIds ?? undefined } } }),
+    prisma.trailer.findMany({ where: { orgId: req.user!.orgId, id: { in: scopedTrailerIds ?? undefined } } }),
   ]);
 
   const toAvailability = (
@@ -5965,6 +6180,7 @@ app.get("/tracking/load/:loadId/latest", requireAuth, requireRole("ADMIN", "DISP
   ]);
 
   let ping = latestPing;
+  let samsaraError: { code: string; message: string; retryAfter?: number | null } | null = null;
 
   if (!ping && load.truckId) {
     const mapping = await prisma.truckTelematicsMapping.findFirst({
@@ -5990,18 +6206,19 @@ app.get("/tracking/load/:loadId/latest", requireAuth, requireRole("ADMIN", "DISP
             capturedAt: loc.capturedAt,
           },
         });
-      } catch {
-        if (integration) {
-          await prisma.trackingIntegration.update({
-            where: { id: integration.id },
-            data: { status: TrackingIntegrationStatus.DISCONNECTED, errorMessage: "Samsara fetch failed" },
-          });
-        }
+      } catch (error) {
+        const info = formatSamsaraError(error);
+        console.error("Samsara fetch failed", info);
+        samsaraError = {
+          code: "SAMSARA_FETCH_FAILED",
+          message: info.message,
+          retryAfter: info.retryAfter ?? null,
+        };
       }
     }
   }
 
-  res.json({ session: activeSession, ping });
+  res.json({ session: activeSession, ping, error: samsaraError });
 });
 
 app.get("/tracking/load/:loadId/history", requireAuth, requireRole("ADMIN", "DISPATCHER", "DRIVER"), async (req, res) => {
@@ -7572,6 +7789,270 @@ app.get("/admin/settings", requireAuth, requireRole("ADMIN"), async (req, res) =
   res.json({ settings });
 });
 
+app.get("/teams", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
+  const scope = await getUserTeamScope(req.user!);
+  if (!scope.canSeeAllTeams) {
+    res.status(403).json({ error: "Not authorized" });
+    return;
+  }
+  const teams = await prisma.team.findMany({
+    where: { orgId: req.user!.orgId, active: true },
+    orderBy: { name: "asc" },
+  });
+  res.json({
+    teams: teams.map((team) => ({ id: team.id, name: team.name, active: team.active })),
+  });
+});
+
+app.get("/admin/teams", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  await ensureDefaultTeamForOrg(req.user!.orgId);
+  const teams = await prisma.team.findMany({
+    where: { orgId: req.user!.orgId },
+    orderBy: { name: "asc" },
+    include: {
+      members: {
+        include: {
+          user: {
+            select: { id: true, name: true, email: true, role: true },
+          },
+        },
+      },
+    },
+  });
+  res.json({
+    teams: teams.map((team) => ({
+      id: team.id,
+      name: team.name,
+      active: team.active,
+      members: team.members.map((member) => ({
+        id: member.user.id,
+        name: member.user.name,
+        email: member.user.email,
+        role: member.user.role,
+      })),
+    })),
+  });
+});
+
+app.post("/admin/teams", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({ name: z.string().trim().min(2).max(64) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const team = await prisma.team.create({
+    data: { orgId: req.user!.orgId, name: parsed.data.name, active: true },
+  });
+  res.json({ team: { id: team.id, name: team.name, active: team.active } });
+});
+
+app.patch("/admin/teams/:id", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    name: z.string().trim().min(2).max(64).optional(),
+    active: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const existing = await prisma.team.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Team not found" });
+    return;
+  }
+  const team = await prisma.team.update({
+    where: { id: existing.id },
+    data: {
+      name: parsed.data.name ?? existing.name,
+      active: parsed.data.active ?? existing.active,
+    },
+  });
+  res.json({ team: { id: team.id, name: team.name, active: team.active } });
+});
+
+app.post("/admin/teams/:id/members", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({ userId: z.string().min(1) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const team = await prisma.team.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!team) {
+    res.status(404).json({ error: "Team not found" });
+    return;
+  }
+  const user = await prisma.user.findFirst({
+    where: { id: parsed.data.userId, orgId: req.user!.orgId },
+    select: { id: true },
+  });
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+  await prisma.teamMember.createMany({
+    data: [{ orgId: req.user!.orgId, teamId: team.id, userId: user.id }],
+    skipDuplicates: true,
+  });
+  if (!team.active) {
+    await prisma.team.update({ where: { id: team.id }, data: { active: true } });
+  }
+  res.json({ ok: true });
+});
+
+app.delete("/admin/teams/:id/members/:userId", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const team = await prisma.team.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+    select: { id: true },
+  });
+  if (!team) {
+    res.status(404).json({ error: "Team not found" });
+    return;
+  }
+  await prisma.teamMember.deleteMany({
+    where: { orgId: req.user!.orgId, teamId: team.id, userId: req.params.userId },
+  });
+  res.json({ ok: true });
+});
+
+app.post("/admin/teams/assign", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    teamId: z.string().min(1),
+    entityType: z.nativeEnum(TeamEntityType),
+    entityIds: z.array(z.string().min(1)).min(1),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const team = await prisma.team.findFirst({
+    where: { id: parsed.data.teamId, orgId: req.user!.orgId },
+  });
+  if (!team) {
+    res.status(404).json({ error: "Team not found" });
+    return;
+  }
+
+  let validEntityIds: string[] = [];
+  if (parsed.data.entityType === TeamEntityType.LOAD) {
+    validEntityIds = (await prisma.load.findMany({
+      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
+      select: { id: true },
+    })).map((row) => row.id);
+  } else if (parsed.data.entityType === TeamEntityType.TRUCK) {
+    validEntityIds = (await prisma.truck.findMany({
+      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
+      select: { id: true },
+    })).map((row) => row.id);
+  } else if (parsed.data.entityType === TeamEntityType.TRAILER) {
+    validEntityIds = (await prisma.trailer.findMany({
+      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
+      select: { id: true },
+    })).map((row) => row.id);
+  } else if (parsed.data.entityType === TeamEntityType.DRIVER) {
+    validEntityIds = (await prisma.driver.findMany({
+      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
+      select: { id: true },
+    })).map((row) => row.id);
+  }
+
+  if (validEntityIds.length === 0) {
+    res.status(400).json({ error: "No valid entities provided" });
+    return;
+  }
+
+  await prisma.teamAssignment.deleteMany({
+    where: {
+      orgId: req.user!.orgId,
+      entityType: parsed.data.entityType,
+      entityId: { in: validEntityIds },
+    },
+  });
+  await prisma.teamAssignment.createMany({
+    data: validEntityIds.map((entityId) => ({
+      orgId: req.user!.orgId,
+      teamId: parsed.data.teamId,
+      entityType: parsed.data.entityType,
+      entityId,
+    })),
+    skipDuplicates: true,
+  });
+
+  res.json({ ok: true, count: validEntityIds.length });
+});
+
+app.get("/admin/sequences", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const sequence = await getOrgSequence(req.user!.orgId);
+  res.json({ sequence });
+});
+
+app.patch("/admin/sequences", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    loadPrefix: z.string().trim().min(1).max(10).optional(),
+    tripPrefix: z.string().trim().min(1).max(10).optional(),
+    nextLoadNumber: z.union([z.number(), z.string()]).optional(),
+    nextTripNumber: z.union([z.number(), z.string()]).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+
+  let nextLoadNumber: number | null = null;
+  let nextTripNumber: number | null = null;
+  try {
+    nextLoadNumber = parseOptionalNonNegativeInt(parsed.data.nextLoadNumber, "Next load number");
+    nextTripNumber = parseOptionalNonNegativeInt(parsed.data.nextTripNumber, "Next trip number");
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+    return;
+  }
+
+  if (nextLoadNumber !== null && nextLoadNumber < 1) {
+    res.status(400).json({ error: "Next load number must be at least 1." });
+    return;
+  }
+  if (nextTripNumber !== null && nextTripNumber < 1) {
+    res.status(400).json({ error: "Next trip number must be at least 1." });
+    return;
+  }
+
+  const updates: Prisma.OrgSequenceUpdateInput = {};
+  if (parsed.data.loadPrefix !== undefined) updates.loadPrefix = parsed.data.loadPrefix;
+  if (parsed.data.tripPrefix !== undefined) updates.tripPrefix = parsed.data.tripPrefix;
+  if (nextLoadNumber !== null) updates.nextLoadNumber = nextLoadNumber;
+  if (nextTripNumber !== null) updates.nextTripNumber = nextTripNumber;
+
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: "No updates provided." });
+    return;
+  }
+
+  await getOrgSequence(req.user!.orgId);
+  const sequence = await prisma.orgSequence.update({
+    where: { orgId: req.user!.orgId },
+    data: updates,
+  });
+
+  res.json({
+    sequence: {
+      orgId: sequence.orgId,
+      nextLoadNumber: sequence.nextLoadNumber,
+      nextTripNumber: sequence.nextTripNumber,
+      loadPrefix: sequence.loadPrefix,
+      tripPrefix: sequence.tripPrefix,
+    },
+  });
+});
+
 app.put("/admin/settings", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
     companyDisplayName: z.string(),
@@ -8161,7 +8642,7 @@ app.post("/api/integrations/samsara/connect", requireAuth, requireCsrf, requireR
   try {
     await validateSamsaraToken(parsed.data.apiToken);
   } catch (error) {
-    res.status(400).json({ error: "Invalid Samsara token" });
+    sendSamsaraError(res, error);
     return;
   }
 
@@ -8209,6 +8690,58 @@ app.post("/api/integrations/samsara/disconnect", requireAuth, requireCsrf, requi
   });
 
   res.json({ status: integration.status });
+});
+
+app.get("/api/integrations/samsara/vehicles", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit : "50";
+  const limit = Math.min(200, Math.max(1, parseInt(limitRaw, 10) || 50));
+  const integration = await prisma.trackingIntegration.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, status: TrackingIntegrationStatus.CONNECTED },
+  });
+  const token = extractSamsaraToken(integration?.configJson ?? null);
+  if (!token) {
+    res.status(400).json({ error: "Samsara is not connected.", code: "SAMSARA_NOT_CONNECTED" });
+    return;
+  }
+  try {
+    const vehicles = await fetchSamsaraVehicles(token, limit);
+    res.json({
+      vehicles: vehicles.filter((vehicle) => vehicle.id),
+      count: vehicles.length,
+    });
+  } catch (error) {
+    sendSamsaraError(res, error);
+  }
+});
+
+app.post("/api/integrations/samsara/test", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const integration = await prisma.trackingIntegration.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, status: TrackingIntegrationStatus.CONNECTED },
+  });
+  const token = extractSamsaraToken(integration?.configJson ?? null);
+  if (!token) {
+    res.status(400).json({ ok: false, error: "Samsara is not connected.", code: "SAMSARA_NOT_CONNECTED" });
+    return;
+  }
+  try {
+    await validateSamsaraToken(token);
+    const vehicles = await fetchSamsaraVehicles(token, 10);
+    const sampleIds = vehicles.map((vehicle) => vehicle.id).filter(Boolean);
+    res.json({
+      ok: true,
+      vehicleCountSampled: vehicles.length,
+      sampleVehicleIds: sampleIds,
+      message: "Samsara connection OK.",
+    });
+  } catch (error) {
+    const info = formatSamsaraError(error);
+    res.status(info.code === "UNAUTHORIZED" ? 400 : info.code === "RATE_LIMITED" ? 429 : info.code === "NETWORK_ERROR" ? 503 : 502).json({
+      ok: false,
+      error: info.message,
+      code: `SAMSARA_${info.code}`,
+      retryAfter: info.retryAfter ?? null,
+    });
+  }
 });
 
 app.get("/api/integrations/samsara/truck-mappings", requireAuth, requireRole("ADMIN"), async (req, res) => {
@@ -9811,8 +10344,9 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
 });
 
 const port = Number(process.env.API_PORT || 4000);
+const host = process.env.API_HOST || "0.0.0.0";
 ensureUploadDirs().then(() => {
-  app.listen(port, () => {
-    console.log(`API listening on ${port}`);
+  app.listen(port, host, () => {
+    console.log(`API listening on ${host}:${port}`);
   });
 });

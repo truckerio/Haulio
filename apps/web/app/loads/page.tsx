@@ -91,6 +91,8 @@ export default function LoadsPage() {
   const [loads, setLoads] = useState<any[]>([]);
   const [drivers, setDrivers] = useState<any[]>([]);
   const [operatingEntities, setOperatingEntities] = useState<any[]>([]);
+  const [teams, setTeams] = useState<Array<{ id: string; name: string; active?: boolean }>>([]);
+  const [teamFilterId, setTeamFilterId] = useState("");
   const [user, setUser] = useState<any | null>(null);
   const [orgOperatingMode, setOrgOperatingMode] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -156,9 +158,8 @@ export default function LoadsPage() {
   const [form, setForm] = useState({
     loadNumber: "",
     status: "PLANNED",
-    loadType: "VAN",
-    businessType: "COMPANY",
-    externalTripId: "",
+    loadType: "BROKERED",
+    tripNumber: "",
     operatingEntityId: "",
     customerId: "",
     customerName: "",
@@ -192,6 +193,7 @@ export default function LoadsPage() {
   });
 
   const canImport = user?.role === "ADMIN" || user?.role === "DISPATCHER";
+  const canSeeAllTeams = Boolean(user?.canSeeAllTeams);
   const archivedMode = activeChip === "archived";
 
   const buildParams = useCallback((options?: {
@@ -220,6 +222,7 @@ export default function LoadsPage() {
     if (options?.fromDate) params.set("fromDate", options.fromDate);
     if (options?.toDate) params.set("toDate", options.toDate);
     if (options?.format) params.set("format", options.format);
+    if (teamFilterId) params.set("teamId", teamFilterId);
     return params.toString();
   }, [
     searchTerm,
@@ -230,6 +233,7 @@ export default function LoadsPage() {
     refine.maxRate,
     archivedMode,
     activeChip,
+    teamFilterId,
   ]);
 
   const loadData = useCallback(async () => {
@@ -267,6 +271,16 @@ export default function LoadsPage() {
       });
   }, []);
 
+  useEffect(() => {
+    if (!canSeeAllTeams) {
+      setTeams([]);
+      setTeamFilterId("");
+      return;
+    }
+    apiFetch<{ teams: Array<{ id: string; name: string; active?: boolean }> }>("/teams")
+      .then((data) => setTeams(data.teams ?? []))
+      .catch(() => setTeams([]));
+  }, [canSeeAllTeams]);
   useEffect(() => {
     if (searchParams?.get("create") === "1") {
       setShowCreate(true);
@@ -362,13 +376,6 @@ export default function LoadsPage() {
   }, [operatingEntities]);
 
   useEffect(() => {
-    if (!orgOperatingMode) return;
-    if (orgOperatingMode === "BOTH") return;
-    const businessType = orgOperatingMode === "BROKER" ? "BROKER" : "COMPANY";
-    setForm((prev) => ({ ...prev, businessType }));
-  }, [orgOperatingMode]);
-
-  useEffect(() => {
     setPageIndex(0);
   }, [searchTerm, activeChip, refine]);
 
@@ -381,7 +388,6 @@ export default function LoadsPage() {
   const handleCreate = async () => {
     setFormError(null);
     if (
-      !form.loadNumber.trim() ||
       !form.customerName.trim() ||
       !form.pickupName.trim() ||
       !form.pickupCity.trim() ||
@@ -438,15 +444,16 @@ export default function LoadsPage() {
     ];
 
     try {
+      const resolvedBusinessType = form.loadType === "BROKERED" ? "BROKER" : "COMPANY";
       await apiFetch("/loads", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          loadNumber: form.loadNumber,
+          loadNumber: form.loadNumber.trim() ? form.loadNumber : undefined,
+          tripNumber: form.tripNumber.trim() ? form.tripNumber : undefined,
           status: form.status || undefined,
           loadType: form.loadType || undefined,
-          businessType: form.businessType || undefined,
-          externalTripId: form.externalTripId || undefined,
+          businessType: resolvedBusinessType,
           operatingEntityId: form.operatingEntityId || undefined,
           customerId: form.customerId || undefined,
           customerName: form.customerName,
@@ -465,9 +472,8 @@ export default function LoadsPage() {
       setForm({
         loadNumber: "",
         status: "PLANNED",
-        loadType: "VAN",
-        businessType: form.businessType || (orgOperatingMode === "BROKER" ? "BROKER" : "COMPANY"),
-        externalTripId: "",
+        loadType: form.loadType === "BROKERED" ? "BROKERED" : "COMPANY",
+        tripNumber: "",
         operatingEntityId: form.operatingEntityId,
         customerId: "",
         customerName: "",
@@ -796,6 +802,7 @@ export default function LoadsPage() {
     setSearchTerm("");
     setActiveChip("active");
     setRefine(defaultRefine);
+    setTeamFilterId("");
   };
 
   return (
@@ -996,18 +1003,18 @@ export default function LoadsPage() {
               </div>
             ) : null}
             <div className="grid gap-3 lg:grid-cols-3">
-              <FormField label="Load" htmlFor="loadNumber" required>
+              <FormField label="Load" htmlFor="loadNumber">
                 <Input
-                  placeholder="LD-1001"
+                  placeholder="Auto"
                   value={form.loadNumber}
                   onChange={(e) => setForm({ ...form, loadNumber: e.target.value })}
                 />
               </FormField>
-              <FormField label="Trip" htmlFor="trip">
+              <FormField label="Trip number" htmlFor="tripNumber">
                 <Input
-                  placeholder="TRIP-2002"
-                  value={form.externalTripId}
-                  onChange={(e) => setForm({ ...form, externalTripId: e.target.value })}
+                  placeholder="Auto"
+                  value={form.tripNumber}
+                  onChange={(e) => setForm({ ...form, tripNumber: e.target.value })}
                 />
               </FormField>
               <FormField label="Status" htmlFor="status">
@@ -1024,23 +1031,10 @@ export default function LoadsPage() {
                   <option value="CANCELLED">Cancelled</option>
                 </Select>
               </FormField>
-              {orgOperatingMode === "BOTH" ? (
-                <FormField label="Load mode" htmlFor="businessType">
-                  <Select
-                    value={form.businessType}
-                    onChange={(e) => setForm({ ...form, businessType: e.target.value })}
-                  >
-                    <option value="COMPANY">Company</option>
-                    <option value="BROKER">Brokered</option>
-                  </Select>
-                </FormField>
-              ) : null}
-              <FormField label="Type" htmlFor="loadType">
+              <FormField label="Load type" htmlFor="loadType">
                 <Select value={form.loadType} onChange={(e) => setForm({ ...form, loadType: e.target.value })}>
-                  <option value="VAN">Van</option>
-                  <option value="REEFER">Reefer</option>
-                  <option value="FLATBED">Flatbed</option>
-                  <option value="OTHER">Other</option>
+                  <option value="COMPANY">Company load</option>
+                  <option value="BROKERED">Brokered load</option>
                 </Select>
               </FormField>
               <FormField label="Operating entity" htmlFor="operatingEntity">
@@ -1059,9 +1053,9 @@ export default function LoadsPage() {
                   <Input disabled placeholder="Default operating entity" value="Default operating entity" />
                 )}
               </FormField>
-              <FormField label="Customer" htmlFor="customerName" required>
+              <FormField label={form.loadType === "BROKERED" ? "Broker" : "Customer"} htmlFor="customerName" required>
                 <Input
-                  placeholder="Acme Logistics"
+                  placeholder={form.loadType === "BROKERED" ? "Acme Brokerage" : "Acme Logistics"}
                   value={form.customerName}
                   onChange={(e) => {
                     setForm({ ...form, customerName: e.target.value, customerId: "" });
@@ -1545,6 +1539,20 @@ export default function LoadsPage() {
                 </Select>
               </FormField>
             </div>
+            {canSeeAllTeams ? (
+              <div className="space-y-2">
+                <FormField label="Team" htmlFor="refineTeam">
+                  <Select value={teamFilterId} onChange={(event) => setTeamFilterId(event.target.value)}>
+                    <option value="">All teams</option>
+                    {teams.map((team) => (
+                      <option key={team.id} value={team.id}>
+                        {team.name}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+              </div>
+            ) : null}
           </div>
           <div className="mt-4 grid gap-4 lg:grid-cols-3">
             <div className="space-y-2">

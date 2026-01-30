@@ -874,7 +874,6 @@ function extractDraftFromText(text: string, fallbackLoadNumber: string, synonyms
 }
 
 function isDraftReady(draft: any) {
-  if (!draft?.loadNumber || String(draft.loadNumber).trim().length < 2) return false;
   if (!draft?.customerName || String(draft.customerName).trim().length < 2) return false;
   if (!Array.isArray(draft.stops) || draft.stops.length < 2) return false;
   const hasPickupDate = draft.stops.some((stop: any) => stop.type === "PICKUP" && stop.apptStart);

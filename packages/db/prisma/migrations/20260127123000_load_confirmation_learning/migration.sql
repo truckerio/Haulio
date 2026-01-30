@@ -1,6 +1,13 @@
--- AlterTable
-ALTER TABLE "LoadConfirmationDocument" ADD COLUMN "extractedText" TEXT;
-ALTER TABLE "LoadConfirmationDocument" ADD COLUMN "extractedDraft" JSONB;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'LoadConfirmationDocument'
+  ) THEN
+    ALTER TABLE "LoadConfirmationDocument" ADD COLUMN IF NOT EXISTS "extractedText" TEXT;
+    ALTER TABLE "LoadConfirmationDocument" ADD COLUMN IF NOT EXISTS "extractedDraft" JSONB;
+  END IF;
+END $$;
 
 -- CreateTable
 CREATE TABLE "LoadConfirmationLearningExample" (
@@ -29,6 +36,3 @@ CREATE INDEX "LoadConfirmationLearningExample_orgId_brokerName_idx" ON "LoadConf
 
 -- AddForeignKey
 ALTER TABLE "LoadConfirmationLearningExample" ADD CONSTRAINT "LoadConfirmationLearningExample_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "LoadConfirmationLearningExample" ADD CONSTRAINT "LoadConfirmationLearningExample_docId_fkey" FOREIGN KEY ("docId") REFERENCES "LoadConfirmationDocument"("id") ON DELETE SET NULL ON UPDATE CASCADE;

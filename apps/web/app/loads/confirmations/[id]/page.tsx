@@ -86,7 +86,6 @@ export default function LoadConfirmationDetailPage() {
 
   const ready = useMemo(() => {
     if (!draft) return false;
-    if (!draft.loadNumber || draft.loadNumber.trim().length < 2) return false;
     if (!draft.customerName || draft.customerName.trim().length < 2) return false;
     if (!draft.stops || draft.stops.length < 2) return false;
     const hasPickupDate = draft.stops.some((stop) => stop.type === "PICKUP" && stop.apptStart);
@@ -332,7 +331,7 @@ export default function LoadConfirmationDetailPage() {
             <div className="space-y-4">
               <div className="grid gap-3 lg:grid-cols-3">
                 <FormField label="Load" htmlFor="draftLoadNumber">
-                  <Input placeholder="LD-1001" value={draft.loadNumber} onChange={(e) => setDraft({ ...draft, loadNumber: e.target.value })} />
+                  <Input placeholder="Auto" value={draft.loadNumber} onChange={(e) => setDraft({ ...draft, loadNumber: e.target.value })} />
                 </FormField>
                 <FormField label="Trip" htmlFor="draftTrip">
                   <Input placeholder="TRIP-9001" value={draft.externalTripId} onChange={(e) => setDraft({ ...draft, externalTripId: e.target.value })} />

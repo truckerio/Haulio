@@ -59,3 +59,5 @@ COPY packages/shared/package.json packages/shared/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY . .
+
+RUN pnpm --filter @truckerio/db exec prisma generate
