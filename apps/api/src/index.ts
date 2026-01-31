@@ -8525,7 +8525,7 @@ app.post("/onboarding/tracking", requireAuth, requireCsrf, requireRole("ADMIN"),
 
 app.post("/onboarding/finance", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
-    settlementSchedule: z.enum(["WEEKLY", "BIWEEKLY", "SEMI_MONTHLY", "MONTHLY"]).optional(),
+    settlementSchedule: z.string().optional(),
     settlementTemplate: z
       .object({
         includeLinehaul: z.boolean().optional(),
@@ -8540,11 +8540,20 @@ app.post("/onboarding/finance", requireAuth, requireCsrf, requireRole("ADMIN"), 
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
+  const normalizeSchedule = (value?: string | null) => {
+    if (!value) return undefined;
+    return value.trim().toUpperCase().replace(/-/g, "_");
+  };
+  const schedule = normalizeSchedule(parsed.data.settlementSchedule);
+  if (schedule && !["WEEKLY", "BIWEEKLY", "SEMI_MONTHLY", "MONTHLY"].includes(schedule)) {
+    res.status(400).json({ error: "Invalid settlement schedule" });
+    return;
+  }
   const existingSettings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
   const settings = await prisma.orgSettings.update({
     where: { orgId: req.user!.orgId },
     data: {
-      settlementSchedule: parsed.data.settlementSchedule as any,
+      settlementSchedule: schedule as any,
       settlementTemplate: parsed.data.settlementTemplate ?? undefined,
     },
   });
