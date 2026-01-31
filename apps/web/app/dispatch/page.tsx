@@ -18,6 +18,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { BlockerCard } from "@/components/ui/blocker-card";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { NoAccess } from "@/components/rbac/no-access";
+import { SuggestedAssignments, type AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
 import { apiFetch } from "@/lib/api";
 import { ManifestPanel } from "./manifest-panel";
 import { LegsPanel } from "./legs-panel";
@@ -151,6 +152,12 @@ export default function DispatchPage() {
   const [availability, setAvailability] = useState<AvailabilityData | null>(null);
   const [showUnavailable, setShowUnavailable] = useState(false);
   const [assignForm, setAssignForm] = useState({ driverId: "", truckId: "", trailerId: "" });
+  const [assignmentSuggestions, setAssignmentSuggestions] = useState<AssignmentSuggestion[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
+  const [suggestionLogId, setSuggestionLogId] = useState<string | null>(null);
+  const [suggestionMeta, setSuggestionMeta] = useState<{ modelVersion: string; weightsVersion?: string } | null>(null);
+  const [assistOverrideReason, setAssistOverrideReason] = useState("");
   const [driverInfo, setDriverInfo] = useState<{ open: boolean; driver: DriverRecord | null }>({ open: false, driver: null });
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
@@ -359,10 +366,68 @@ export default function DispatchPage() {
   }, [selectedLoadId, canDispatch, refreshSelectedLoad, filters.teamId, canSeeAllTeams]);
 
   useEffect(() => {
+    if (!selectedLoadId || !canDispatch) {
+      setAssignmentSuggestions([]);
+      setSuggestionsError(null);
+      setSuggestionLogId(null);
+      setSuggestionMeta(null);
+      return;
+    }
+    let active = true;
+    setSuggestionsLoading(true);
+    setSuggestionsError(null);
+    (async () => {
+      try {
+        const data = await apiFetch<any>(`/loads/${selectedLoadId}/assignment-suggestions?limit=5`);
+        if (!active) return;
+        setAssignmentSuggestions(data.suggestions ?? []);
+        setSuggestionMeta({ modelVersion: data.modelVersion, weightsVersion: data.weightsVersion });
+        try {
+          const log = await apiFetch<{ logId?: string }>(`/loads/${selectedLoadId}/assignment-suggestions/log`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              modelVersion: data.modelVersion,
+              weightsVersion: data.weightsVersion,
+              suggestions: data.suggestions ?? [],
+            }),
+          });
+          if (active) {
+            setSuggestionLogId(log.logId ?? null);
+          }
+        } catch (error) {
+          if (active) {
+            setSuggestionLogId(null);
+          }
+        }
+      } catch (error) {
+        if (!active) return;
+        setAssignmentSuggestions([]);
+        setSuggestionMeta(null);
+        setSuggestionLogId(null);
+        setSuggestionsError((error as Error).message);
+      } finally {
+        if (active) {
+          setSuggestionsLoading(false);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedLoadId, canDispatch]);
+
+  useEffect(() => {
     setConfirmReassign(false);
     setAssignError(null);
     setOverrideReason("");
   }, [assignForm.driverId, assignForm.truckId, assignForm.trailerId, selectedLoadId, showUnavailable]);
+
+  useEffect(() => {
+    if (!assignmentNotSuggested) {
+      setAssistOverrideReason("");
+    }
+  }, [assignmentNotSuggested]);
 
   useEffect(() => {
     const shouldAutoExpand = Boolean(selectedLoad?.riskFlags?.atRisk || selectedLoad?.riskFlags?.overdueStopWindow);
@@ -421,10 +486,55 @@ export default function DispatchPage() {
     );
   };
 
-  const assign = async () => {
+  const buildConflictMessages = (driverId?: string, truckId?: string, trailerId?: string) => {
+    const conflicts: string[] = [];
+    if (driverId) {
+      const driver = unavailableDrivers.find((item) => item.id === driverId);
+      if (driver) {
+        conflicts.push(`Driver: Assigning this driver will move them from ${driver.reason ?? "another load"}.`);
+      }
+    }
+    if (truckId) {
+      const truck = unavailableTrucks.find((item) => item.id === truckId);
+      if (truck) {
+        conflicts.push(`Truck: Assigning this truck will move it from ${truck.reason ?? "another load"}.`);
+      }
+    }
+    if (trailerId) {
+      const trailer = unavailableTrailers.find((item) => item.id === trailerId);
+      if (trailer) {
+        conflicts.push(`Trailer: Assigning this trailer will move it from ${trailer.reason ?? "another load"}.`);
+      }
+    }
+    return conflicts;
+  };
+
+  const logSuggestionChoice = async (params: { driverId: string; truckId?: string | null; overrideReason?: string | null }) => {
+    if (!selectedLoad || !suggestionMeta) return;
+    try {
+      await apiFetch(`/loads/${selectedLoad.id}/assignment-suggestions/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          logId: suggestionLogId ?? undefined,
+          modelVersion: suggestionMeta.modelVersion,
+          weightsVersion: suggestionMeta.weightsVersion,
+          suggestions: suggestionLogId ? undefined : assignmentSuggestions,
+          chosenDriverId: params.driverId,
+          chosenTruckId: params.truckId ?? undefined,
+          overrideReason: params.overrideReason ?? undefined,
+        }),
+      });
+    } catch (error) {
+      // non-blocking
+    }
+  };
+
+  const performAssign = async (params: { driverId: string; truckId?: string; trailerId?: string }) => {
     if (!selectedLoad) return;
-    if (!assignForm.driverId) return;
-    if (hasConflicts && !confirmReassign) {
+    if (!params.driverId) return;
+    const conflicts = buildConflictMessages(params.driverId, params.truckId, params.trailerId);
+    if (conflicts.length > 0 && !confirmReassign) {
       setConfirmReassign(true);
       return;
     }
@@ -434,9 +544,9 @@ export default function DispatchPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          driverId: assignForm.driverId,
-          truckId: assignForm.truckId || undefined,
-          trailerId: assignForm.trailerId || undefined,
+          driverId: params.driverId,
+          truckId: params.truckId || undefined,
+          trailerId: params.trailerId || undefined,
           overrideReason: overrideReason || undefined,
         }),
       });
@@ -444,8 +554,16 @@ export default function DispatchPage() {
       if (updated) {
         patchLoadSummary(updated);
       }
+      const suggestionDriverIds = new Set(assignmentSuggestions.map((suggestion) => suggestion.driverId));
+      const needsOverride = assignmentSuggestions.length > 0 && !suggestionDriverIds.has(params.driverId);
+      await logSuggestionChoice({
+        driverId: params.driverId,
+        truckId: params.truckId ?? null,
+        overrideReason: needsOverride ? assistOverrideReason || null : null,
+      });
       setConfirmReassign(false);
       setOverrideReason("");
+      setAssistOverrideReason("");
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (code === "ORG_NOT_OPERATIONAL") {
@@ -457,6 +575,24 @@ export default function DispatchPage() {
       }
       setAssignError((err as Error).message);
     }
+  };
+
+  const assign = async () => {
+    await performAssign({
+      driverId: assignForm.driverId,
+      truckId: assignForm.truckId || undefined,
+      trailerId: assignForm.trailerId || undefined,
+    });
+  };
+
+  const assignFromSuggestion = async (driverId: string, truckId?: string | null) => {
+    setAssignForm((prev) => ({ ...prev, driverId, truckId: truckId ?? prev.truckId }));
+    setAssistOverrideReason(\"\");
+    await performAssign({
+      driverId,
+      truckId: truckId ?? assignForm.truckId || undefined,
+      trailerId: assignForm.trailerId || undefined,
+    });
   };
 
   const unassign = async () => {
@@ -525,6 +661,12 @@ export default function DispatchPage() {
     Boolean(assignForm.truckId) && !availableTrucks.find((truck: any) => truck.id === assignForm.truckId);
   const trailerUnavailableSelected =
     Boolean(assignForm.trailerId) && !availableTrailers.find((trailer: any) => trailer.id === assignForm.trailerId);
+  const suggestionDriverIds = useMemo(
+    () => new Set(assignmentSuggestions.map((suggestion) => suggestion.driverId)),
+    [assignmentSuggestions]
+  );
+  const assignmentNotSuggested =
+    Boolean(assignForm.driverId) && assignmentSuggestions.length > 0 && !suggestionDriverIds.has(assignForm.driverId);
 
   const buildOptions = <T extends { id: string; name?: string | null; unit?: string | null; reason?: string | null }>(
     available: T[],
@@ -675,6 +817,17 @@ export default function DispatchPage() {
                 />
               </div>
             ) : null}
+            <div className="lg:col-span-4 space-y-2">
+              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
+                Suggested
+              </div>
+              <SuggestedAssignments
+                suggestions={assignmentSuggestions}
+                loading={suggestionsLoading}
+                error={suggestionsError}
+                onAssign={assignFromSuggestion}
+              />
+            </div>
             <div className="relative">
               <button
                 type="button"
@@ -768,6 +921,21 @@ export default function DispatchPage() {
                 ))}
               </Select>
             </FormField>
+            {assignmentNotSuggested ? (
+              <FormField label="Suggestion override" htmlFor="assistOverrideReason" hint="Optional: why not using a suggestion">
+                <Select
+                  id="assistOverrideReason"
+                  value={assistOverrideReason}
+                  onChange={(event) => setAssistOverrideReason(event.target.value)}
+                >
+                  <option value="">Select reason (optional)</option>
+                  <option value="Driver requested">Driver requested</option>
+                  <option value="Equipment mismatch">Equipment mismatch</option>
+                  <option value="Better lane fit">Better lane fit</option>
+                  <option value="Other">Other</option>
+                </Select>
+              </FormField>
+            ) : null}
             {canOverride && (rateConMissing || hasConflicts) ? (
               <FormField label="Override reason" htmlFor="assignOverrideReason" hint="Required for admin overrides">
                 <Input

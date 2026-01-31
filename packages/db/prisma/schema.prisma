@@ -350,6 +350,8 @@ model Organization {
   teams      Team[]
   teamMembers TeamMember[]
   teamAssignments TeamAssignment[]
+  assignmentSuggestionLogs AssignmentSuggestionLog[]
+  driverStats DriverStats[]
 }
 
 model SetupCode {
@@ -460,6 +462,7 @@ model User {
   invites           UserInvite[]
   passwordResets    PasswordReset[]
   teamMemberships   TeamMember[]
+  assignmentSuggestionLogs AssignmentSuggestionLog[] @relation("AssignmentSuggestionDispatcher")
 
   @@unique([orgId, email])
 }
@@ -538,6 +541,7 @@ model Driver {
   Task       Task[]
   Settlement Settlement[]
   locationPings LocationPing[]
+  stats      DriverStats[]
 }
 
 model Truck {
@@ -632,6 +636,7 @@ model Load {
   stops          Stop[]
   docs           Document[]
   events         Event[]
+  assignmentSuggestionLogs AssignmentSuggestionLog[]
   tasks          Task[]
   invoices       Invoice[]
   storage        StorageRecord[]
@@ -1023,6 +1028,47 @@ model Event {
   @@index([orgId, createdAt])
   @@index([loadId, createdAt])
   @@index([stopId, createdAt])
+}
+
+model AssignmentSuggestionLog {
+  id              String   @id @default(cuid())
+  orgId           String
+  loadId          String
+  dispatcherUserId String
+  createdAt       DateTime @default(now())
+  modelVersion    String
+  weightsVersion  String?
+  suggestionsJson Json
+  chosenDriverId  String?
+  chosenTruckId   String?
+  overrideReason  String?
+  overrideNotes   String?
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  load       Load         @relation(fields: [loadId], references: [id])
+  dispatcher User         @relation("AssignmentSuggestionDispatcher", fields: [dispatcherUserId], references: [id])
+
+  @@index([orgId, createdAt])
+  @@index([orgId, loadId, createdAt])
+  @@index([orgId, dispatcherUserId, createdAt])
+}
+
+model DriverStats {
+  id               String   @id @default(cuid())
+  orgId            String
+  driverId         String
+  windowDays       Int
+  onTimeRate       Float?
+  cancellationRate Float?
+  issueRate        Float?
+  avgDwellMinutes  Float?
+  updatedAt        DateTime @updatedAt
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  driver Driver       @relation(fields: [driverId], references: [id])
+
+  @@unique([orgId, driverId, windowDays])
+  @@index([orgId, updatedAt])
 }
 
 model Task {

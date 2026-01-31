@@ -83,6 +83,9 @@ import {
   getScopedEntityIds,
   getUserTeamScope,
 } from "./lib/team-scope";
+import { buildAssignmentSuggestions } from "./modules/assignmentAssist/data";
+import { ASSIST_MODEL_VERSION, ASSIST_WEIGHTS_VERSION } from "./modules/assignmentAssist/scoring";
+import { parseSuggestionLogPayload } from "./modules/assignmentAssist/validation";
 import {
   applyLearned,
   buildLearningKeyForAddress,
@@ -4767,6 +4770,108 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
   }
   res.json({ load });
 });
+
+app.get("/loads/:id/assignment-suggestions", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 20) : 5;
+  const includeTrucks = req.query.includeTrucks !== "false";
+  const explain = req.query.explain !== "false";
+
+  const suggestions = await buildAssignmentSuggestions({
+    user: req.user,
+    loadId: req.params.id,
+    limit,
+    includeTrucks,
+    explain,
+  });
+
+  if (!suggestions) {
+    res.status(404).json({ error: "Load not found" });
+    return;
+  }
+
+  res.json(suggestions);
+});
+
+app.post(
+  "/loads/:id/assignment-suggestions/log",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const parsed = parseSuggestionLogPayload(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: { id: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+
+    const scope = await getUserTeamScope(req.user);
+    if (!scope.canSeeAllTeams) {
+      let assignment = await prisma.teamAssignment.findFirst({
+        where: { orgId: req.user!.orgId, entityType: TeamEntityType.LOAD, entityId: load.id },
+      });
+      if (!assignment && scope.defaultTeamId) {
+        assignment = await ensureEntityAssignedToDefaultTeam(
+          req.user!.orgId,
+          TeamEntityType.LOAD,
+          load.id,
+          scope.defaultTeamId
+        );
+      }
+      if (assignment && !scope.teamIds.includes(assignment.teamId)) {
+        res.status(404).json({ error: "Load not found" });
+        return;
+      }
+    }
+
+    if (parsed.data.logId) {
+      const existing = await prisma.assignmentSuggestionLog.findFirst({
+        where: { id: parsed.data.logId, orgId: req.user!.orgId },
+        select: { id: true },
+      });
+      if (!existing) {
+        res.status(404).json({ error: "Suggestion log not found" });
+        return;
+      }
+      await prisma.assignmentSuggestionLog.update({
+        where: { id: existing.id },
+        data: {
+          chosenDriverId: parsed.data.chosenDriverId ?? undefined,
+          chosenTruckId: parsed.data.chosenTruckId ?? undefined,
+          overrideReason: parsed.data.overrideReason ?? undefined,
+          overrideNotes: parsed.data.overrideNotes ?? undefined,
+        },
+      });
+      res.json({ logId: existing.id });
+      return;
+    }
+
+    const created = await prisma.assignmentSuggestionLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        dispatcherUserId: req.user!.id,
+        modelVersion: parsed.data.modelVersion ?? ASSIST_MODEL_VERSION,
+        weightsVersion: parsed.data.weightsVersion ?? ASSIST_WEIGHTS_VERSION,
+        suggestionsJson: parsed.data.suggestions ?? [],
+        chosenDriverId: parsed.data.chosenDriverId ?? null,
+        chosenTruckId: parsed.data.chosenTruckId ?? null,
+        overrideReason: parsed.data.overrideReason ?? null,
+        overrideNotes: parsed.data.overrideNotes ?? null,
+      },
+    });
+    res.json({ logId: created.id });
+  }
+);
 
 app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
   const schema = z.object({
