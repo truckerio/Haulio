@@ -51,11 +51,35 @@ export function SuggestedAssignments({ suggestions, loading, error, onAssign }: 
     );
   }
 
+  const confidenceRank: Record<string, number> = { high: 2, medium: 1, low: 0 };
+  const topSuggestion = suggestions[0];
+
+  const buildWhyNot = (suggestion: AssignmentSuggestion) => {
+    if (suggestion.warnings?.length) return suggestion.warnings[0];
+    const currentConf = confidenceRank[suggestion.fields?.locationConfidence ?? "low"] ?? 0;
+    const topConf = confidenceRank[topSuggestion?.fields?.locationConfidence ?? "low"] ?? 0;
+    if (currentConf < topConf) return "Lower confidence";
+    const currentDeadhead = suggestion.fields?.deadheadMiles ?? null;
+    const topDeadhead = topSuggestion?.fields?.deadheadMiles ?? null;
+    if (currentDeadhead !== null && topDeadhead !== null && currentDeadhead > topDeadhead) {
+      return "Longer deadhead";
+    }
+    return "Lower score";
+  };
+
+  const buildConfidenceTitle = (suggestion: AssignmentSuggestion) => {
+    if (suggestion.warnings?.length) {
+      return `Confidence reduced: ${suggestion.warnings.join(" · ")}`;
+    }
+    return "Confidence based on location freshness and data availability";
+  };
+
   return (
     <div className="space-y-3">
-      {suggestions.map((suggestion) => {
+      {suggestions.map((suggestion, index) => {
         const deadhead = formatDeadhead(suggestion.fields?.deadheadMiles ?? null);
-        const locationConfidence = suggestion.fields?.locationConfidence;
+        const locationConfidence = suggestion.fields?.locationConfidence ?? "low";
+        const confidenceLabel = locationConfidence.charAt(0).toUpperCase() + locationConfidence.slice(1);
         return (
           <div key={`${suggestion.driverId}-${suggestion.truckId ?? "none"}`} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3 shadow-[var(--shadow-subtle)]">
             <div className="flex items-center justify-between gap-2">
@@ -69,7 +93,12 @@ export function SuggestedAssignments({ suggestions, loading, error, onAssign }: 
             </div>
             <div className="mt-1 flex flex-wrap gap-2 text-xs text-[color:var(--color-text-muted)]">
               {deadhead ? <span>{deadhead}</span> : null}
-              {locationConfidence ? <span className="capitalize">{locationConfidence} location confidence</span> : null}
+              <span title={buildConfidenceTitle(suggestion)}>Confidence: {confidenceLabel}</span>
+              {index > 0 ? (
+                <span title={buildWhyNot(suggestion)} className="underline decoration-dotted">
+                  Why not #1?
+                </span>
+              ) : null}
             </div>
             {suggestion.reasons.length ? (
               <div className="mt-2 flex flex-wrap gap-2">

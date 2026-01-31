@@ -281,8 +281,16 @@ export async function buildAssignmentSuggestions(params: {
     });
   }
 
+  const confidenceRank: Record<string, number> = { high: 2, medium: 1, low: 0 };
+  const deadheadValue = (value?: number | null) => (value === null || value === undefined ? Number.MAX_SAFE_INTEGER : value);
+
   suggestions.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
+    const confA = confidenceRank[a.fields.locationConfidence ?? \"low\"] ?? 0;
+    const confB = confidenceRank[b.fields.locationConfidence ?? \"low\"] ?? 0;
+    if (confB !== confA) return confB - confA;
+    const deadheadDiff = deadheadValue(a.fields.deadheadMiles) - deadheadValue(b.fields.deadheadMiles);
+    if (deadheadDiff !== 0) return deadheadDiff;
     return a.driverId.localeCompare(b.driverId);
   });
 
