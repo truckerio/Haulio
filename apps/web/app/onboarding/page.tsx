@@ -306,7 +306,7 @@ function OnboardingWizard() {
               includeFuelSurcharge: financeForm.includeFuelSurcharge,
               includeAccessorials: financeForm.includeAccessorials,
             },
-            currentStep: currentStep + 1,
+            currentStep: currentStep < STEPS.length ? currentStep + 1 : undefined,
           }),
         });
         setState(data.state);
