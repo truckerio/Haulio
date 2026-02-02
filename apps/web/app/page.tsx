@@ -55,6 +55,8 @@ export default function HomePage() {
       setCsrfToken(data.csrfToken);
       if (data.user.role === "DRIVER") {
         router.push("/driver");
+      } else if (data.user.role === "DISPATCHER" || data.user.role === "HEAD_DISPATCHER") {
+        router.push("/dispatch");
       } else {
         router.push("/today");
       }

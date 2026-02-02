@@ -118,6 +118,7 @@ export default function DashboardPage() {
       const allowAssign =
         userData.user.role === "ADMIN" ||
         userData.user.role === "DISPATCHER" ||
+        userData.user.role === "HEAD_DISPATCHER" ||
         userData.user.permissions?.includes("TASK_ASSIGN");
       setCanAssign(Boolean(allowAssign));
       if (allowAssign) {
@@ -285,7 +286,7 @@ export default function DashboardPage() {
             return (
               <div
                 key={task.taskKey}
-                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3"
+                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white py-3 pl-6 pr-4"
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>

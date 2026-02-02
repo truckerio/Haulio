@@ -146,6 +146,7 @@ export async function generateInvoicePdf(params: {
   const browser = await puppeteer.launch({
     headless: "new",
     args: launchArgs,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
   });
   const page = await browser.newPage();
   await page.setContent(html, { waitUntil: "networkidle0" });

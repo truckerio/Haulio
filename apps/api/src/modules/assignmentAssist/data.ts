@@ -286,8 +286,8 @@ export async function buildAssignmentSuggestions(params: {
 
   suggestions.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
-    const confA = confidenceRank[a.fields.locationConfidence ?? \"low\"] ?? 0;
-    const confB = confidenceRank[b.fields.locationConfidence ?? \"low\"] ?? 0;
+    const confA = confidenceRank[a.fields.locationConfidence ?? "low"] ?? 0;
+    const confB = confidenceRank[b.fields.locationConfidence ?? "low"] ?? 0;
     if (confB !== confA) return confB - confA;
     const deadheadDiff = deadheadValue(a.fields.deadheadMiles) - deadheadValue(b.fields.deadheadMiles);
     if (deadheadDiff !== 0) return deadheadDiff;

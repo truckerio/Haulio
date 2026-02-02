@@ -87,6 +87,15 @@ import { buildAssignmentSuggestions } from "./modules/assignmentAssist/data";
 import { ASSIST_MODEL_VERSION, ASSIST_WEIGHTS_VERSION } from "./modules/assignmentAssist/scoring";
 import { parseSuggestionLogPayload } from "./modules/assignmentAssist/validation";
 import {
+  buildDispatchQueueFilters,
+  isCompletedStatus,
+  normalizeDispatchQueueView,
+} from "./modules/dispatch/queue-view";
+import { assignTeamEntities } from "./modules/teams/assign";
+import { canAssignTeams } from "./modules/teams/access";
+import { getTodayScope } from "./modules/today/scope";
+import { isWarningType, WARNING_TYPE_MAP } from "./modules/today/warnings";
+import {
   applyLearned,
   buildLearningKeyForAddress,
   buildLearningKeyForCharge,
@@ -109,8 +118,10 @@ import { normalizeSetupCode } from "./lib/setup-codes";
 import path from "path";
 
 const app = express();
+app.set("etag", false);
 const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 const DEV_ERRORS = process.env.NODE_ENV !== "production";
+const DEFAULT_TEAM_NAME = "Default";
 
 function sendServerError(res: Response, message: string, error?: unknown) {
   const detail = error instanceof Error ? error.message : error ? String(error) : null;
@@ -271,7 +282,20 @@ function normalizePlateState(value?: string | null) {
   return trimmed;
 }
 
-type LoadStatusRecord = { id: string; loadNumber: string; status: LoadStatus };
+type LoadStatusRecord = { id: string; loadNumber: string; status: LoadStatus; completedAt?: Date | null };
+
+const resolveCompletedAtUpdate = (params: { current: LoadStatus; next: LoadStatus; existing?: Date | null }) => {
+  if (params.current === params.next) return undefined;
+  const currentCompleted = isCompletedStatus(params.current);
+  const nextCompleted = isCompletedStatus(params.next);
+  if (nextCompleted && !currentCompleted) {
+    return params.existing ?? new Date();
+  }
+  if (currentCompleted && !nextCompleted) {
+    return null;
+  }
+  return undefined;
+};
 
 async function transitionLoadStatus(params: {
   load: LoadStatusRecord;
@@ -292,11 +316,17 @@ async function transitionLoadStatus(params: {
     isAdmin: params.role === "ADMIN",
     overrideReason: params.overrideReason,
   });
+  const completedAt = resolveCompletedAtUpdate({
+    current: params.load.status,
+    next: params.nextStatus,
+    existing: params.load.completedAt ?? null,
+  });
   const updated = await prisma.load.update({
     where: { id: params.load.id },
     data: {
       status: params.nextStatus,
       ...(params.data ?? {}),
+      completedAt: completedAt !== undefined ? completedAt : undefined,
     },
   });
   await createEvent({
@@ -1552,7 +1582,7 @@ app.get("/tasks/assignees", requireAuth, requirePermission(Permission.TASK_ASSIG
 app.post("/tasks/:id/assign", requireAuth, requireCsrf, requirePermission(Permission.TASK_ASSIGN), async (req, res) => {
   const schema = z.object({
     assignedToId: z.string().nullable().optional(),
-    assignedRole: z.enum(["ADMIN", "DISPATCHER", "BILLING", "DRIVER"]).nullable().optional(),
+    assignedRole: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]).nullable().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -1637,12 +1667,32 @@ app.get("/today", requireAuth, async (req, res) => {
   const blocks: TodayItem[] = [];
   const warnings: TodayItem[] = [];
   const info: TodayItem[] = [];
+  const warningSummary: Record<string, number> = {
+    dispatch_unassigned_loads: 0,
+    dispatch_stuck_in_transit: 0,
+  };
+  let teamBreakdown:
+    | Array<{ teamId: string; teamName: string; warnings: Record<string, number> }>
+    | undefined;
+
+  const teamsEnabled = Boolean(
+    await prisma.team.findFirst({ where: { orgId, name: { not: DEFAULT_TEAM_NAME } }, select: { id: true } })
+  );
+  const teamScope = teamsEnabled ? await getUserTeamScope(req.user) : null;
+  const canSeeAllTeams = Boolean(teamScope?.canSeeAllTeams);
+  const scopeInfo = getTodayScope({ teamsEnabled, role, canSeeAllTeams });
+  const { teamScoped, includeTeamBreakdown, isHeadDispatcher } = scopeInfo;
+  const scopedLoadIds = teamScoped ? await getScopedEntityIds(orgId, TeamEntityType.LOAD, teamScope!) : null;
+  if (scopedLoadIds && scopedLoadIds.length > 2000) {
+    console.warn(`[today] Large scopedLoadIds (${scopedLoadIds.length}) for org ${orgId}.`);
+  }
+  const loadScopeFilter = teamScoped ? { id: { in: scopedLoadIds ?? [] } } : {};
 
   const addBlock = (item: Omit<TodayItem, "severity">) => blocks.push({ severity: "block", ...item });
   const addWarning = (item: Omit<TodayItem, "severity">) => warnings.push({ severity: "warning", ...item });
   const addInfo = (item: Omit<TodayItem, "severity">) => info.push({ severity: "info", ...item });
 
-  if (role === "ADMIN" || role === "DISPATCHER") {
+  if (role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER") {
     const [settings, unassignedCount, unassignedSample, rateConCount, rateConSample, activeAssignments, transitLoads] =
       await Promise.all([
         prisma.orgSettings.findFirst({ where: { orgId }, select: { requireRateConBeforeDispatch: true } }),
@@ -1650,6 +1700,7 @@ app.get("/today", requireAuth, async (req, res) => {
           where: {
             orgId,
             deletedAt: null,
+            ...loadScopeFilter,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
             OR: [{ assignedDriverId: null }, { truckId: null }, { trailerId: null }],
           },
@@ -1658,6 +1709,7 @@ app.get("/today", requireAuth, async (req, res) => {
           where: {
             orgId,
             deletedAt: null,
+            ...loadScopeFilter,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
             OR: [{ assignedDriverId: null }, { truckId: null }, { trailerId: null }],
           },
@@ -1667,6 +1719,7 @@ app.get("/today", requireAuth, async (req, res) => {
           where: {
             orgId,
             deletedAt: null,
+            ...loadScopeFilter,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
             loadType: LoadType.BROKERED,
             docs: { none: { type: DocType.RATECON } },
@@ -1676,6 +1729,7 @@ app.get("/today", requireAuth, async (req, res) => {
           where: {
             orgId,
             deletedAt: null,
+            ...loadScopeFilter,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
             loadType: LoadType.BROKERED,
             docs: { none: { type: DocType.RATECON } },
@@ -1686,6 +1740,7 @@ app.get("/today", requireAuth, async (req, res) => {
           where: {
             orgId,
             deletedAt: null,
+            ...loadScopeFilter,
             status: { in: [LoadStatus.ASSIGNED, LoadStatus.IN_TRANSIT] },
             OR: [{ assignedDriverId: { not: null } }, { truckId: { not: null } }, { trailerId: { not: null } }],
           },
@@ -1698,7 +1753,7 @@ app.get("/today", requireAuth, async (req, res) => {
           },
         }),
         prisma.load.findMany({
-          where: { orgId, deletedAt: null, status: LoadStatus.IN_TRANSIT },
+          where: { orgId, deletedAt: null, ...loadScopeFilter, status: LoadStatus.IN_TRANSIT },
           select: {
             id: true,
             loadNumber: true,
@@ -1709,6 +1764,7 @@ app.get("/today", requireAuth, async (req, res) => {
       ]);
 
     if (unassignedCount > 0) {
+      warningSummary.dispatch_unassigned_loads = unassignedCount;
       addWarning({
         ruleId: "dispatch_unassigned_loads",
         title: "Unassigned loads need coverage",
@@ -1773,6 +1829,7 @@ app.get("/today", requireAuth, async (req, res) => {
       return now.getTime() - lastEvent.getTime() > stuckThresholdMs;
     });
     if (stuckLoads.length > 0) {
+      warningSummary.dispatch_stuck_in_transit = stuckLoads.length;
       addWarning({
         ruleId: "dispatch_stuck_in_transit",
         title: "Loads stuck in transit",
@@ -1781,6 +1838,64 @@ app.get("/today", requireAuth, async (req, res) => {
         entityType: "load",
         entityId: stuckLoads[0]?.id ?? null,
       });
+    }
+
+    if (includeTeamBreakdown) {
+      const [teams, unassignedLoadsForBreakdown] = await Promise.all([
+        prisma.team.findMany({ where: { orgId, active: true }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
+        unassignedCount > 0
+          ? prisma.load.findMany({
+              where: {
+                orgId,
+                deletedAt: null,
+                status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
+                OR: [{ assignedDriverId: null }, { truckId: null }, { trailerId: null }],
+              },
+              select: { id: true },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      if (teams.length > 0) {
+        if (teamScope?.defaultTeamId) {
+          await ensureTeamAssignmentsForEntityType(orgId, TeamEntityType.LOAD, teamScope.defaultTeamId);
+        }
+        const stuckIds = stuckLoads.map((load) => load.id);
+        const unassignedIds = unassignedLoadsForBreakdown.map((load) => load.id);
+        const relevantIds = Array.from(new Set([...stuckIds, ...unassignedIds]));
+        const assignments = relevantIds.length
+          ? await prisma.teamAssignment.findMany({
+              where: { orgId, entityType: TeamEntityType.LOAD, entityId: { in: relevantIds } },
+              select: { entityId: true, teamId: true },
+            })
+          : [];
+        const assignmentMap = new Map(assignments.map((assignment) => [assignment.entityId, assignment.teamId]));
+
+        const breakdownMap = new Map<string, Record<string, number>>();
+        for (const team of teams) {
+          breakdownMap.set(team.id, { dispatch_unassigned_loads: 0, dispatch_stuck_in_transit: 0 });
+        }
+        const fallbackTeamId = teamScope?.defaultTeamId ?? teams[0]?.id ?? null;
+
+        for (const loadId of unassignedIds) {
+          const teamId = assignmentMap.get(loadId) ?? fallbackTeamId;
+          if (!teamId) continue;
+          const entry = breakdownMap.get(teamId);
+          if (entry) entry.dispatch_unassigned_loads += 1;
+        }
+        for (const loadId of stuckIds) {
+          const teamId = assignmentMap.get(loadId) ?? fallbackTeamId;
+          if (!teamId) continue;
+          const entry = breakdownMap.get(teamId);
+          if (entry) entry.dispatch_stuck_in_transit += 1;
+        }
+
+        teamBreakdown = teams.map((team) => ({
+          teamId: team.id,
+          teamName: team.name,
+          warnings: breakdownMap.get(team.id) ?? { dispatch_unassigned_loads: 0, dispatch_stuck_in_transit: 0 },
+        }));
+      }
     }
   }
 
@@ -1905,7 +2020,193 @@ app.get("/today", requireAuth, async (req, res) => {
     }
   }
 
-  res.json({ blocks, warnings, info });
+  res.json({
+    blocks,
+    warnings,
+    info,
+    teamsEnabled,
+    scope: scopeInfo.scope,
+    warningSummary,
+    teamBreakdown,
+  });
+});
+
+app.get("/today/warnings/details", requireAuth, async (req, res) => {
+  const orgId = req.user!.orgId;
+  const role = req.user!.role as Role;
+  const typeParam = typeof req.query.type === "string" ? req.query.type : "";
+  if (!typeParam || !isWarningType(typeParam)) {
+    res.status(400).json({ error: "Invalid warning type" });
+    return;
+  }
+
+  const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 25;
+  const cursor = typeof req.query.cursor === "string" ? req.query.cursor : null;
+  const teamIdParam = typeof req.query.teamId === "string" ? req.query.teamId : null;
+
+  const teamsEnabled = Boolean(
+    await prisma.team.findFirst({ where: { orgId, name: { not: DEFAULT_TEAM_NAME } }, select: { id: true } })
+  );
+  const teamScope = teamsEnabled ? await getUserTeamScope(req.user) : null;
+  const canSeeAllTeams = Boolean(teamScope?.canSeeAllTeams);
+  const baseScope = getTodayScope({ teamsEnabled, role, canSeeAllTeams });
+
+  let effectiveScope = teamScope;
+  let teamScoped = baseScope.teamScoped;
+  let scopeMode = baseScope.scope;
+  let teamInfo: { teamId: string; teamName: string } | undefined;
+
+  if (teamsEnabled && teamIdParam && (role === Role.ADMIN || baseScope.isHeadDispatcher)) {
+    const team = await prisma.team.findFirst({ where: { id: teamIdParam, orgId }, select: { id: true, name: true } });
+    if (!team) {
+      res.status(404).json({ error: "Team not found" });
+      return;
+    }
+    teamInfo = { teamId: team.id, teamName: team.name };
+    effectiveScope = await applyTeamFilterOverride(orgId, teamScope!, team.id);
+    teamScoped = true;
+    scopeMode = "team";
+  }
+
+  const scopedLoadIds = teamScoped ? await getScopedEntityIds(orgId, TeamEntityType.LOAD, effectiveScope!) : null;
+  if (scopedLoadIds && scopedLoadIds.length > 2000) {
+    console.warn(`[today] Large scopedLoadIds (${scopedLoadIds.length}) for org ${orgId}.`);
+  }
+  const loadScopeFilter = teamScoped ? { id: { in: scopedLoadIds ?? [] } } : {};
+
+  const now = Date.now();
+  let loads: Array<{
+    id: string;
+    loadNumber?: string | null;
+    customerName?: string | null;
+    status?: string | null;
+    warningReason: string;
+    ageMinutes?: number | null;
+    assignedDriverName?: string | null;
+    stopSummary?: string | null;
+  }> = [];
+  let nextCursor: string | null = null;
+
+  if (typeParam === "dispatch_unassigned_loads") {
+    const rows = await prisma.load.findMany({
+      where: {
+        orgId,
+        deletedAt: null,
+        ...loadScopeFilter,
+        status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
+        OR: [{ assignedDriverId: null }, { truckId: null }, { trailerId: null }],
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit + 1,
+      skip: cursor ? 1 : 0,
+      cursor: cursor ? { id: cursor } : undefined,
+      select: {
+        id: true,
+        loadNumber: true,
+        customerName: true,
+        status: true,
+        assignedDriverId: true,
+        truckId: true,
+        trailerId: true,
+        createdAt: true,
+        driver: { select: { name: true } },
+        stops: { select: { type: true, city: true, state: true, arrivedAt: true, departedAt: true, sequence: true } },
+      },
+    });
+
+    const pageRows = rows.slice(0, limit);
+    if (rows.length > limit) {
+      nextCursor = rows[limit - 1]?.id ?? null;
+    }
+
+    loads = pageRows.map((load) => {
+      const missing: string[] = [];
+      if (!load.assignedDriverId) missing.push("driver");
+      if (!load.truckId) missing.push("truck");
+      if (!load.trailerId) missing.push("trailer");
+      const nextStop =
+        load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ??
+        load.stops.slice().sort((a, b) => a.sequence - b.sequence)[0];
+      const stopSummary = nextStop ? `${nextStop.type} · ${nextStop.city}, ${nextStop.state}` : null;
+      return {
+        id: load.id,
+        loadNumber: load.loadNumber ?? null,
+        customerName: load.customerName ?? null,
+        status: load.status ?? null,
+        warningReason: missing.length ? `Missing ${missing.join(", ")}` : WARNING_TYPE_MAP.dispatch_unassigned_loads.reason,
+        ageMinutes: Math.round((now - load.createdAt.getTime()) / (1000 * 60)),
+        assignedDriverName: load.driver?.name ?? null,
+        stopSummary,
+      };
+    });
+  }
+
+  if (typeParam === "dispatch_stuck_in_transit") {
+    const fetchLimit = Math.min(limit * 3, 150);
+    const rows = await prisma.load.findMany({
+      where: {
+        orgId,
+        deletedAt: null,
+        ...loadScopeFilter,
+        status: LoadStatus.IN_TRANSIT,
+      },
+      orderBy: { createdAt: "desc" },
+      take: fetchLimit,
+      select: {
+        id: true,
+        loadNumber: true,
+        customerName: true,
+        status: true,
+        createdAt: true,
+        driver: { select: { name: true } },
+        stops: { select: { type: true, city: true, state: true, arrivedAt: true, departedAt: true, sequence: true } },
+      },
+    });
+
+    const stuckThresholdMs = 24 * 60 * 60 * 1000;
+    const stuckRows = rows.filter((load) => {
+      const stopTimes = load.stops
+        .flatMap((stop) => [stop.arrivedAt, stop.departedAt])
+        .filter((value): value is Date => Boolean(value));
+      const lastEvent = stopTimes.length > 0 ? new Date(Math.max(...stopTimes.map((date) => date.getTime()))) : load.createdAt;
+      return now - lastEvent.getTime() > stuckThresholdMs;
+    });
+
+    loads = stuckRows.slice(0, limit).map((load) => {
+      const stopTimes = load.stops
+        .flatMap((stop) => [stop.arrivedAt, stop.departedAt])
+        .filter((value): value is Date => Boolean(value));
+      const lastEvent = stopTimes.length > 0 ? new Date(Math.max(...stopTimes.map((date) => date.getTime()))) : load.createdAt;
+      const nextStop =
+        load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ??
+        load.stops.slice().sort((a, b) => a.sequence - b.sequence)[0];
+      const stopSummary = nextStop ? `${nextStop.type} · ${nextStop.city}, ${nextStop.state}` : null;
+      return {
+        id: load.id,
+        loadNumber: load.loadNumber ?? null,
+        customerName: load.customerName ?? null,
+        status: load.status ?? null,
+        warningReason: WARNING_TYPE_MAP.dispatch_stuck_in_transit.reason,
+        ageMinutes: Math.round((now - lastEvent.getTime()) / (1000 * 60)),
+        assignedDriverName: load.driver?.name ?? null,
+        stopSummary,
+      };
+    });
+
+    if (stuckRows.length >= limit && rows.length === fetchLimit) {
+      nextCursor = rows[rows.length - 1]?.id ?? null;
+    }
+  }
+
+  res.json({
+    teamsEnabled,
+    scope: scopeMode,
+    type: typeParam,
+    team: teamInfo,
+    loads,
+    pageInfo: { nextCursor },
+  });
 });
 
 app.post("/learning/suggest", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
@@ -2076,6 +2377,11 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
         typeof req.query.needsAssignment === "string" ? req.query.needsAssignment : undefined
       );
       const atRisk = parseBooleanParam(typeof req.query.atRisk === "string" ? req.query.atRisk : undefined);
+      const requestedQueueView = normalizeDispatchQueueView(
+        typeof req.query.queueView === "string" ? req.query.queueView : null
+      );
+      const effectiveQueueView = needsAssignment ? "active" : requestedQueueView;
+      const queueFilters = buildDispatchQueueFilters(effectiveQueueView);
       const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
       if (needsAssignment) {
         andConditions.push({
@@ -2095,6 +2401,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
           ],
         });
       }
+      andConditions.push(queueFilters.where);
       if (andConditions.length > 0) {
         where.AND = andConditions;
       }
@@ -2149,7 +2456,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
             },
             createdAt: true,
           },
-          orderBy: [{ assignedDriverId: "asc" }, { createdAt: "desc" }, { id: "desc" }],
+          orderBy: queueFilters.orderBy,
           skip,
           take: limit,
         }),
@@ -2242,7 +2549,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
       });
 
       res.json({
-        items: ordered,
+        items: queueFilters.useRiskSort ? ordered : items,
         page,
         totalPages: Math.max(1, Math.ceil(total / limit)),
         total,
@@ -4424,6 +4731,7 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
       loadNumber: assignedLoadNumber!,
       tripNumber: assignedTripNumber,
       status: statusMapped,
+      completedAt: isCompletedStatus(statusMapped) ? new Date() : null,
       loadType,
       businessType,
       operatingEntityId: operatingEntity.id,
@@ -4697,6 +5005,14 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       return;
     }
   }
+  const completedAtUpdate =
+    statusChanged && statusRequested
+      ? resolveCompletedAtUpdate({
+          current: existing.status,
+          next: statusRequested as LoadStatus,
+          existing: existing.completedAt ?? null,
+        })
+      : undefined;
 
   const load = await prisma.load.update({
     where: { id: existing.id },
@@ -4716,6 +5032,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       rate: parsed.data.rate !== undefined ? toDecimal(parsed.data.rate) : undefined,
       miles: parsed.data.miles,
       status: statusRequested,
+      completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
     },
   });
   await logLoadFieldAudit({
@@ -4971,6 +5288,12 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     parsed.data.truckId !== load.truckId ? (parsed.data.truckId ? now : null) : load.assignedTruckAt ?? null;
   const assignedTrailerAt =
     parsed.data.trailerId !== load.trailerId ? (parsed.data.trailerId ? now : null) : load.assignedTrailerAt ?? null;
+  const nextStatus = load.status === LoadStatus.ASSIGNED ? load.status : LoadStatus.ASSIGNED;
+  const completedAtUpdate = resolveCompletedAtUpdate({
+    current: load.status,
+    next: nextStatus,
+    existing: load.completedAt ?? null,
+  });
 
   const updated = await prisma.load.update({
     where: { id: load.id },
@@ -4982,6 +5305,7 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
       assignedTruckAt,
       assignedTrailerAt,
       status: load.status === LoadStatus.ASSIGNED ? undefined : LoadStatus.ASSIGNED,
+      completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
     },
   });
 
@@ -5109,6 +5433,12 @@ app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Perm
       return;
     }
   }
+  const nextStatus = load.status === LoadStatus.ASSIGNED ? LoadStatus.PLANNED : load.status;
+  const completedAtUpdate = resolveCompletedAtUpdate({
+    current: load.status,
+    next: nextStatus,
+    existing: load.completedAt ?? null,
+  });
   const updated = await prisma.load.update({
     where: { id: load.id },
     data: {
@@ -5119,6 +5449,7 @@ app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Perm
       assignedTruckAt: null,
       assignedTrailerAt: null,
       status: load.status === LoadStatus.ASSIGNED ? LoadStatus.PLANNED : load.status,
+      completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
     },
   });
   const activeLeg = await prisma.loadLeg.findFirst({
@@ -6196,7 +6527,7 @@ app.post(
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
-  if (!["ADMIN", "DISPATCHER", "DRIVER"].includes(req.user!.role)) {
+  if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "DRIVER"].includes(req.user!.role)) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -6256,7 +6587,7 @@ app.post(
   requireRole("ADMIN", "DISPATCHER", "DRIVER"),
   requireCsrf,
   async (req, res) => {
-  if (!["ADMIN", "DISPATCHER", "DRIVER"].includes(req.user!.role)) {
+  if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "DRIVER"].includes(req.user!.role)) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -6306,7 +6637,7 @@ app.post(
   requireRole("ADMIN", "DISPATCHER", "DRIVER"),
   requireCsrf,
   async (req, res) => {
-  if (!["ADMIN", "DISPATCHER", "DRIVER"].includes(req.user!.role)) {
+  if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "DRIVER"].includes(req.user!.role)) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -8164,60 +8495,76 @@ app.post("/admin/teams/assign", requireAuth, requireCsrf, requireRole("ADMIN"), 
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
-  const team = await prisma.team.findFirst({
-    where: { id: parsed.data.teamId, orgId: req.user!.orgId },
-  });
-  if (!team) {
-    res.status(404).json({ error: "Team not found" });
-    return;
-  }
-
-  let validEntityIds: string[] = [];
-  if (parsed.data.entityType === TeamEntityType.LOAD) {
-    validEntityIds = (await prisma.load.findMany({
-      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
-      select: { id: true },
-    })).map((row) => row.id);
-  } else if (parsed.data.entityType === TeamEntityType.TRUCK) {
-    validEntityIds = (await prisma.truck.findMany({
-      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
-      select: { id: true },
-    })).map((row) => row.id);
-  } else if (parsed.data.entityType === TeamEntityType.TRAILER) {
-    validEntityIds = (await prisma.trailer.findMany({
-      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
-      select: { id: true },
-    })).map((row) => row.id);
-  } else if (parsed.data.entityType === TeamEntityType.DRIVER) {
-    validEntityIds = (await prisma.driver.findMany({
-      where: { orgId: req.user!.orgId, id: { in: parsed.data.entityIds } },
-      select: { id: true },
-    })).map((row) => row.id);
-  }
-
-  if (validEntityIds.length === 0) {
-    res.status(400).json({ error: "No valid entities provided" });
-    return;
-  }
-
-  await prisma.teamAssignment.deleteMany({
-    where: {
-      orgId: req.user!.orgId,
-      entityType: parsed.data.entityType,
-      entityId: { in: validEntityIds },
-    },
-  });
-  await prisma.teamAssignment.createMany({
-    data: validEntityIds.map((entityId) => ({
+  try {
+    const result = await assignTeamEntities({
+      prisma,
       orgId: req.user!.orgId,
       teamId: parsed.data.teamId,
       entityType: parsed.data.entityType,
-      entityId,
-    })),
-    skipDuplicates: true,
-  });
+      entityIds: parsed.data.entityIds,
+    });
+    if (result.count === 0) {
+      res.status(400).json({ error: "No valid entities provided" });
+      return;
+    }
+    res.json({ ok: true, count: result.count });
+  } catch (error) {
+    const message = (error as Error).message;
+    if (message === "Team not found") {
+      res.status(404).json({ error: message });
+      return;
+    }
+    res.status(400).json({ error: message || "Invalid payload" });
+  }
+});
 
-  res.json({ ok: true, count: validEntityIds.length });
+app.post("/teams/assign-loads", requireAuth, requireCsrf, requireRole("ADMIN", "HEAD_DISPATCHER"), async (req, res) => {
+  if (!canAssignTeams(req.user!.role as Role)) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  const schema = z.object({
+    teamId: z.string().min(1).nullable(),
+    loadIds: z.array(z.string().min(1)).min(1),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  try {
+    const result = await assignTeamEntities({
+      prisma,
+      orgId: req.user!.orgId,
+      teamId: parsed.data.teamId,
+      entityType: TeamEntityType.LOAD,
+      entityIds: parsed.data.loadIds,
+    });
+    if (result.count === 0) {
+      res.status(400).json({ error: "No valid loads provided" });
+      return;
+    }
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TEAM_LOADS_ASSIGNED",
+      entity: "TeamAssignment",
+      summary: `Assigned ${result.count} load(s) to ${parsed.data.teamId ?? "unassigned"}`,
+      meta: {
+        loadCount: result.count,
+        teamId: parsed.data.teamId,
+        loadIds: result.validEntityIds,
+      },
+    });
+    res.json({ ok: true, count: result.count });
+  } catch (error) {
+    const message = (error as Error).message;
+    if (message === "Team not found") {
+      res.status(404).json({ error: message });
+      return;
+    }
+    res.status(400).json({ error: message || "Invalid payload" });
+  }
 });
 
 app.get("/admin/sequences", requireAuth, requireRole("ADMIN"), async (req, res) => {
@@ -9047,6 +9394,41 @@ app.get("/admin/users", requireAuth, requireRole("ADMIN"), async (req, res) => {
   res.json({ users });
 });
 
+app.patch("/admin/members/:memberId/role", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    role: z.enum(["DISPATCHER", "HEAD_DISPATCHER", "BILLING"]),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  if (req.params.memberId === req.user!.id) {
+    res.status(400).json({ error: "You cannot change your own role." });
+    return;
+  }
+  const member = await prisma.user.findFirst({
+    where: { id: req.params.memberId, orgId: req.user!.orgId },
+  });
+  if (!member) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+  const updated = await prisma.user.update({
+    where: { id: member.id },
+    data: { role: parsed.data.role },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "USER_ROLE_UPDATED",
+    entity: "User",
+    entityId: updated.id,
+    summary: `Updated role for ${updated.email} to ${updated.role}`,
+  });
+  res.json({ user: updated });
+});
+
 app.post("/admin/users/:id/deactivate", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   if (req.params.id === req.user!.id) {
     res.status(400).json({ error: "You cannot deactivate your own account." });
@@ -9517,7 +9899,7 @@ app.post("/imports/preview", requireAuth, async (req, res) => {
   }
 
   if (parsed.data.type === "tms_load_sheet") {
-    if (!req.user || !["ADMIN", "DISPATCHER"].includes(req.user.role)) {
+    if (!req.user || !["ADMIN", "DISPATCHER", "HEAD_DISPATCHER"].includes(req.user.role)) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
@@ -9609,8 +9991,8 @@ app.post("/imports/preview", requireAuth, async (req, res) => {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         errors.push("Invalid email");
       }
-      if (!["ADMIN", "DISPATCHER", "BILLING"].includes(role)) {
-        errors.push("Role must be ADMIN, DISPATCHER, or BILLING");
+      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(role)) {
+        errors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, or BILLING");
       }
       return { rowNumber, data: { email, role, name, phone, timezone }, warnings, errors };
     }
@@ -9713,7 +10095,7 @@ app.post("/imports/commit", requireAuth, async (req, res) => {
   }
 
   if (parsed.data.type === "tms_load_sheet") {
-    if (!req.user || !["ADMIN", "DISPATCHER"].includes(req.user.role)) {
+    if (!req.user || !["ADMIN", "DISPATCHER", "HEAD_DISPATCHER"].includes(req.user.role)) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
@@ -9914,8 +10296,8 @@ app.post("/imports/commit", requireAuth, async (req, res) => {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         rowErrors.push("Invalid email");
       }
-      if (!["ADMIN", "DISPATCHER", "BILLING"].includes(role)) {
-        rowErrors.push("Role must be ADMIN, DISPATCHER, or BILLING");
+      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(role)) {
+        rowErrors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, or BILLING");
       }
       if (rowErrors.length > 0) {
         errors.push({ rowNumber, errors: rowErrors });
@@ -10450,6 +10832,7 @@ app.post(
           truckId: truckId ?? null,
           trailerId: trailerId ?? null,
           status: status as any,
+          completedAt: isCompletedStatus(status as LoadStatus) ? new Date() : null,
         },
       });
       loadMap.set(loadNumber, load);
@@ -10561,7 +10944,7 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
   const schema = z.object({
     email: z.string().email(),
     name: z.string().optional(),
-    role: z.enum(["ADMIN", "DISPATCHER", "BILLING", "DRIVER"]),
+    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]),
     password: z.string().min(6),
   });
   const parsed = schema.safeParse(req.body);

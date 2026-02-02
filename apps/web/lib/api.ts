@@ -5,13 +5,19 @@ const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
 function getLocalApiBase() {
   if (typeof window === "undefined") return null;
   const host = window.location.hostname;
-  if (host === "localhost" || host === "127.0.0.1") {
+  if (host === "localhost") {
+    return `${window.location.protocol}//127.0.0.1:4000`;
+  }
+  if (host === "127.0.0.1") {
     return `${window.location.protocol}//${host}:4000`;
   }
   return null;
 }
 
 export function getApiBase() {
+  if (ENV_API_BASE.startsWith("/")) {
+    return ENV_API_BASE.replace(/\/$/, "");
+  }
   const localBase = getLocalApiBase();
   const base = localBase ?? ENV_API_BASE;
   return base.replace(/\/$/, "");
@@ -47,7 +53,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}, retry
   if (typeof window !== "undefined") {
     try {
       const uiHost = window.location.hostname;
-      const apiHost = new URL(API_BASE).hostname;
+      const apiHost = new URL(getApiBase()).hostname;
       const isLocal = (host: string) => host === "localhost" || host === "127.0.0.1";
       if (isLocal(uiHost) && isLocal(apiHost) && uiHost !== apiHost) {
         const url = new URL(window.location.href);
@@ -72,6 +78,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}, retry
       ...options,
       headers,
       credentials: "include",
+      cache: "no-store",
     });
   } catch (error) {
     if (DEV_ERRORS) {

@@ -36,6 +36,7 @@ const navSections: NavSection[] = [
     items: [
       { href: "/loads", label: "Loads" },
       { href: "/dispatch", label: "Dispatch" },
+      { href: "/teams", label: "Teams (Ops)" },
       { href: "/billing", label: "Billing" },
       { href: "/settlements", label: "Settlements" },
     ],
@@ -52,7 +53,19 @@ const navSections: NavSection[] = [
 const defaultRoutes = ["/today", "/dashboard", "/loads", "/profile"];
 
 const roleRoutes: Record<string, string[]> = {
-  ADMIN: ["/today", "/dashboard", "/loads", "/dispatch", "/billing", "/settlements", "/audit", "/admin", "/profile"],
+  ADMIN: [
+    "/today",
+    "/dashboard",
+    "/loads",
+    "/dispatch",
+    "/teams",
+    "/billing",
+    "/settlements",
+    "/audit",
+    "/admin",
+    "/profile",
+  ],
+  HEAD_DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/teams", "/profile"],
   DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/profile"],
   BILLING: ["/today", "/dashboard", "/loads", "/billing", "/settlements", "/profile"],
   DRIVER: ["/driver"],
@@ -65,15 +78,21 @@ const driverSections: NavSection[] = [
   },
 ];
 
-function getVisibleSections(role?: string) {
+function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean }) {
   if (role === "DRIVER") return driverSections;
   const allowed = roleRoutes[role ?? ""] ?? defaultRoutes;
-  return navSections
+  const sections = navSections
     .map((section) => ({
       ...section,
-      items: section.items.filter((item) => allowed.includes(item.href)),
+      items: section.items.filter((item) => {
+        if (item.href === "/teams") {
+          return Boolean(options?.showTeamsOps);
+        }
+        return allowed.includes(item.href);
+      }),
     }))
     .filter((section) => section.items.length > 0);
+  return sections;
 }
 
 function AppShellInner({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
@@ -82,7 +101,12 @@ function AppShellInner({ title, subtitle, children }: { title: string; subtitle?
   const navRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const { user, org } = useUser();
-  const sections = useMemo(() => getVisibleSections(user?.role), [user?.role]);
+  const [teamsEnabled, setTeamsEnabled] = useState(false);
+  const canSeeTeamsOps = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
+  const sections = useMemo(
+    () => getVisibleSections(user?.role, { showTeamsOps: canSeeTeamsOps && teamsEnabled }),
+    [user?.role, canSeeTeamsOps, teamsEnabled]
+  );
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
 
   useEffect(() => {
@@ -138,6 +162,30 @@ function AppShellInner({ title, subtitle, children }: { title: string; subtitle?
       .then((data) => setOnboarding(data.state))
       .catch(() => setOnboarding(null));
   }, [user, pathname]);
+
+  useEffect(() => {
+    if (!user) {
+      setTeamsEnabled(false);
+      return;
+    }
+    if (!canSeeTeamsOps) {
+      setTeamsEnabled(false);
+      return;
+    }
+    let active = true;
+    apiFetch<{ teams: Array<{ id: string; name?: string | null }> }>("/teams")
+      .then((data) => {
+        if (!active) return;
+        setTeamsEnabled((data.teams ?? []).some((team) => team.name && team.name !== "Default"));
+      })
+      .catch(() => {
+        if (!active) return;
+        setTeamsEnabled(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [user, canSeeTeamsOps]);
 
   const NavContent = () => (
     <div className="space-y-4">

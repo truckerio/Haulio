@@ -27,7 +27,7 @@ export function SettlementPreviewList({ settlements }: SettlementPreviewListProp
       {settlements.map((settlement) => (
         <div
           key={settlement.id}
-          className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3 text-sm"
+          className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 py-3 pl-6 pr-4 text-sm"
         >
           <div>
             <div className="font-semibold text-ink">{settlement.weekLabel ?? "Pay period"}</div>

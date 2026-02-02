@@ -192,8 +192,10 @@ export default function LoadsPage() {
     desiredInvoiceDate: "",
   });
 
-  const canImport = user?.role === "ADMIN" || user?.role === "DISPATCHER";
-  const canSeeAllTeams = Boolean(user?.canSeeAllTeams);
+  const canImport = user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+  const canSeeAllTeams = Boolean(
+    user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER" || user?.canSeeAllTeams
+  );
   const archivedMode = activeChip === "archived";
 
   const buildParams = useCallback((options?: {
@@ -270,6 +272,13 @@ export default function LoadsPage() {
         setOrgOperatingMode(null);
       });
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    if (user.role === "DRIVER") {
+      router.replace("/driver");
+    }
+  }, [router, user]);
 
   useEffect(() => {
     if (!canSeeAllTeams) {
@@ -1700,14 +1709,6 @@ export default function LoadsPage() {
             const trackingText = trackingBadge.state === "ON"
               ? `Tracking ON${trackingBadge.lastPingAge ? ` · last ping ${trackingBadge.lastPingAge}` : ""}`
               : `Tracking OFF${trackingBadge.lastPingAge ? ` · last ping ${trackingBadge.lastPingAge}` : ""}`;
-            const blockerTone =
-              blocker?.severity === "danger"
-                ? "border-l-[color:var(--color-danger)]"
-                : blocker?.severity === "warning"
-                  ? "border-l-[color:var(--color-warning)]"
-                  : blocker?.severity === "info"
-                    ? "border-l-[color:var(--color-info)]"
-                    : "";
             const bannerTone =
               blocker?.severity === "danger"
                 ? "border-[color:var(--color-danger)] bg-[color:var(--color-danger-soft)] text-[color:var(--color-danger)]"
@@ -1728,7 +1729,7 @@ export default function LoadsPage() {
                     router.push(`/loads/${load.id}`);
                   }
                 }}
-                className={`rounded-[var(--radius-card)] border border-[color:var(--color-divider)] border-l-4 ${blockerTone} bg-white px-4 py-4 shadow-[var(--shadow-subtle)] transition hover:translate-y-[-1px] hover:shadow-[var(--shadow-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]`}
+                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-4 shadow-[var(--shadow-subtle)] transition hover:translate-y-[-1px] hover:shadow-[var(--shadow-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="text-sm font-semibold text-ink">LOAD {load.loadNumber}</div>

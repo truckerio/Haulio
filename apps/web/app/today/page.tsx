@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { SectionHeader } from "@/components/ui/section-header";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
@@ -25,12 +26,36 @@ type TodayData = {
   blocks: TodayItem[];
   warnings: TodayItem[];
   info: TodayItem[];
+  teamsEnabled?: boolean;
+  scope?: "org" | "team";
+  warningSummary?: Record<string, number>;
+  teamBreakdown?: Array<{ teamId: string; teamName: string; warnings: Record<string, number> }>;
 };
 
 type OnboardingState = {
   status?: "NOT_ACTIVATED" | "OPERATIONAL";
   percentComplete?: number;
   completedSteps?: string[];
+};
+
+type WarningDetailLoad = {
+  id: string;
+  loadNumber?: string | null;
+  customerName?: string | null;
+  status?: string | null;
+  warningReason: string;
+  ageMinutes?: number | null;
+  assignedDriverName?: string | null;
+  stopSummary?: string | null;
+};
+
+type WarningDetails = {
+  teamsEnabled: boolean;
+  scope: "org" | "team";
+  type: string;
+  team?: { teamId: string; teamName: string };
+  loads: WarningDetailLoad[];
+  pageInfo?: { nextCursor?: string | null };
 };
 
 const SECTION_META = [
@@ -52,6 +77,11 @@ const SECTION_META = [
     subtitle: "Nice to close out today",
     tone: "info",
   },
+] as const;
+
+const WARNING_META = [
+  { key: "dispatch_unassigned_loads", label: "Unassigned", title: "Unassigned loads need coverage" },
+  { key: "dispatch_stuck_in_transit", label: "Stuck in transit", title: "Loads stuck in transit" },
 ] as const;
 
 const TONE_CLASS: Record<(typeof SECTION_META)[number]["tone"], string> = {
@@ -79,6 +109,14 @@ function TodayContent() {
   const [loading, setLoading] = useState(true);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"company" | "teams">("company");
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [detailsData, setDetailsData] = useState<WarningDetails | null>(null);
+  const [detailsLoads, setDetailsLoads] = useState<WarningDetailLoad[]>([]);
+  const [detailsNextCursor, setDetailsNextCursor] = useState<string | null>(null);
+  const [detailsQuery, setDetailsQuery] = useState<{ type: string; teamId?: string | null } | null>(null);
 
   const loadToday = async () => {
     setLoading(true);
@@ -96,6 +134,14 @@ function TodayContent() {
   useEffect(() => {
     loadToday();
   }, []);
+
+  const canSeeTeamsView = Boolean(data?.teamsEnabled && (user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER"));
+
+  useEffect(() => {
+    if (!canSeeTeamsView) {
+      setViewMode("company");
+    }
+  }, [canSeeTeamsView]);
 
   useEffect(() => {
     if (!user || user.role !== "ADMIN") {
@@ -118,11 +164,26 @@ function TodayContent() {
     return data.blocks.length + data.warnings.length + data.info.length;
   }, [data]);
 
-  const subtitle = user?.role ? `${user.role.toLowerCase()} focus` : "Your attention stack";
+  const baseSubtitle = user?.role ? `${user.role.toLowerCase()} focus` : "Your attention stack";
+  const subtitle = data?.teamsEnabled && data.scope === "team" ? "Your team focus" : baseSubtitle;
   const showSetup = onboarding?.status === "NOT_ACTIVATED";
   const completedSteps = new Set(onboarding?.completedSteps ?? []);
   const remainingSteps = SETUP_STEPS.filter((step) => !completedSteps.has(step.key));
   const setupPreview = remainingSteps.slice(0, 3);
+  const isDispatcherRole = user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+
+  const resolveItemHref = (item: TodayItem) => {
+    if (!item.href) return null;
+    if (isDispatcherRole) {
+      if (item.entityType === "load" && item.entityId) {
+        return `/dispatch?loadId=${item.entityId}`;
+      }
+      if (item.href.startsWith("/loads")) {
+        return "/dispatch";
+      }
+    }
+    return item.href;
+  };
 
   const handleFixNow = async (item: TodayItem) => {
     if (item.ruleId) {
@@ -137,8 +198,56 @@ function TodayContent() {
         }),
       }).catch(() => null);
     }
-    if (item.href) {
-      router.push(item.href);
+    const href = resolveItemHref(item);
+    if (href) {
+      router.push(href);
+    }
+  };
+
+  const fetchWarningDetails = async (params: { type: string; teamId?: string | null; cursor?: string | null; append?: boolean }) => {
+    const query = new URLSearchParams();
+    query.set("type", params.type);
+    query.set("limit", "25");
+    if (params.teamId) query.set("teamId", params.teamId);
+    if (params.cursor) query.set("cursor", params.cursor);
+    const payload = await apiFetch<WarningDetails>(`/today/warnings/details?${query.toString()}`);
+    setDetailsData(payload);
+    setDetailsNextCursor(payload.pageInfo?.nextCursor ?? null);
+    if (params.append) {
+      setDetailsLoads((prev) => [...prev, ...(payload.loads ?? [])]);
+    } else {
+      setDetailsLoads(payload.loads ?? []);
+    }
+  };
+
+  const openWarningDetails = async (type: string, teamId?: string | null) => {
+    setDetailsOpen(true);
+    setDetailsLoading(true);
+    setDetailsError(null);
+    setDetailsQuery({ type, teamId });
+    try {
+      await fetchWarningDetails({ type, teamId });
+    } catch (err) {
+      setDetailsError((err as Error).message);
+    } finally {
+      setDetailsLoading(false);
+    }
+  };
+
+  const loadMoreDetails = async () => {
+    if (!detailsQuery || !detailsNextCursor) return;
+    setDetailsLoading(true);
+    try {
+      await fetchWarningDetails({
+        type: detailsQuery.type,
+        teamId: detailsQuery.teamId ?? null,
+        cursor: detailsNextCursor,
+        append: true,
+      });
+    } catch (err) {
+      setDetailsError((err as Error).message);
+    } finally {
+      setDetailsLoading(false);
     }
   };
 
@@ -197,11 +306,58 @@ function TodayContent() {
       <div className="grid gap-6 lg:grid-cols-3">
         {SECTION_META.map((section) => {
           const items = data ? data[section.key] : [];
+          const isWarnings = section.key === "warnings";
+          const warningSubtitle =
+            isWarnings && data?.teamsEnabled && data.scope === "team" ? "Your team" : section.subtitle;
+          const showTeamToggle = Boolean(isWarnings && canSeeTeamsView && data?.teamsEnabled);
+          const teamBreakdown = data?.teamBreakdown ?? [];
           return (
             <div key={section.key} className="space-y-3">
-              <SectionHeader title={section.label} subtitle={section.subtitle} />
+              <div className="flex items-start justify-between gap-3">
+                <SectionHeader title={section.label} subtitle={warningSubtitle} />
+                {showTeamToggle ? (
+                  <SegmentedControl
+                    value={viewMode}
+                    options={[
+                      { label: "Company", value: "company" },
+                      { label: "Teams", value: "teams" },
+                    ]}
+                    onChange={(value) => setViewMode(value as "company" | "teams")}
+                  />
+                ) : null}
+              </div>
               {loading ? (
                 <Card className="text-sm text-[color:var(--color-text-muted)]">Loading…</Card>
+              ) : isWarnings && showTeamToggle && viewMode === "teams" ? (
+                teamBreakdown.length === 0 ? (
+                  <Card className="text-sm text-[color:var(--color-text-muted)]">Nothing here right now.</Card>
+                ) : (
+                  teamBreakdown.map((team) => (
+                    <Card key={team.teamId} className="space-y-3 border border-[color:var(--color-divider)]">
+                      <div className="text-sm font-semibold">{team.teamName}</div>
+                      <div className="flex flex-wrap gap-2">
+                        {WARNING_META.map((warning) => {
+                          const count = team.warnings?.[warning.key] ?? 0;
+                          return (
+                            <button
+                              key={warning.key}
+                              type="button"
+                              disabled={count === 0}
+                              className={`rounded-full border px-3 py-1 text-xs ${
+                                count === 0
+                                  ? "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"
+                                  : "border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] text-ink"
+                              }`}
+                              onClick={() => openWarningDetails(warning.key, team.teamId)}
+                            >
+                              {warning.label} · {count}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </Card>
+                  ))
+                )
               ) : items.length === 0 ? (
                 <Card className="text-sm text-[color:var(--color-text-muted)]">Nothing here right now.</Card>
               ) : (
@@ -210,7 +366,17 @@ function TodayContent() {
                     <div className="text-sm font-semibold">{item.title}</div>
                     {item.detail ? <div className="text-xs text-[color:var(--color-text-muted)]">{item.detail}</div> : null}
                     {item.href ? (
-                      <Button size="sm" variant="secondary" onClick={() => handleFixNow(item)}>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          if (isWarnings && item.ruleId) {
+                            openWarningDetails(item.ruleId);
+                          } else {
+                            handleFixNow(item);
+                          }
+                        }}
+                      >
                         Fix now
                       </Button>
                     ) : null}
@@ -221,6 +387,75 @@ function TodayContent() {
           );
         })}
       </div>
+      {detailsOpen ? (
+        <div className="fixed inset-0 z-40">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/20"
+            onClick={() => setDetailsOpen(false)}
+            aria-label="Close details"
+          />
+          <div className="absolute right-0 top-0 h-full w-full max-w-md overflow-y-auto bg-white p-6 shadow-[var(--shadow-subtle)]">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Warnings</div>
+                <div className="text-lg font-semibold">
+                  {WARNING_META.find((warning) => warning.key === detailsData?.type)?.title ?? "Details"}
+                </div>
+                {detailsData?.team?.teamName ? (
+                  <div className="text-xs text-[color:var(--color-text-muted)]">Team {detailsData.team.teamName}</div>
+                ) : null}
+              </div>
+              <Button variant="secondary" onClick={() => setDetailsOpen(false)}>
+                Close
+              </Button>
+            </div>
+            <div className="mt-4 space-y-3">
+              {detailsLoading ? (
+                <Card className="text-sm text-[color:var(--color-text-muted)]">Loading details…</Card>
+              ) : detailsError ? (
+                <ErrorBanner message={detailsError} />
+              ) : detailsLoads.length === 0 ? (
+                <Card className="text-sm text-[color:var(--color-text-muted)]">No matching loads.</Card>
+              ) : (
+                detailsLoads.map((load) => (
+                  <Card
+                    key={load.id}
+                    className="space-y-1 border border-[color:var(--color-divider)] pl-5 pr-4"
+                  >
+                    <div className="text-sm font-semibold">{load.loadNumber ?? "Load"}</div>
+                    {load.customerName ? <div className="text-xs text-[color:var(--color-text-muted)]">{load.customerName}</div> : null}
+                    <div className="text-xs text-[color:var(--color-text-muted)]">{load.warningReason}</div>
+                    {load.stopSummary ? (
+                      <div className="text-xs text-[color:var(--color-text-muted)]">{load.stopSummary}</div>
+                    ) : null}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 text-xs text-[color:var(--color-text-muted)]">
+                      <span>{load.assignedDriverName ? `Driver ${load.assignedDriverName}` : "Unassigned driver"}</span>
+                      {load.ageMinutes !== null && load.ageMinutes !== undefined ? (
+                        <span>{load.ageMinutes} min</span>
+                      ) : null}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() =>
+                        router.push(isDispatcherRole ? `/dispatch?loadId=${load.id}` : `/loads/${load.id}`)
+                      }
+                    >
+                      Open load
+                    </Button>
+                  </Card>
+                ))
+              )}
+              {detailsNextCursor ? (
+                <Button variant="secondary" onClick={loadMoreDetails} disabled={detailsLoading}>
+                  Load more
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

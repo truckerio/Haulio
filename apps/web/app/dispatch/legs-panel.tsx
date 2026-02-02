@@ -20,6 +20,7 @@ export function LegsPanel({
   canOverride,
   overrideReason,
   onUpdated,
+  onCreated,
 }: {
   load: any;
   drivers: Asset[];
@@ -29,6 +30,7 @@ export function LegsPanel({
   canOverride: boolean;
   overrideReason: string;
   onUpdated: () => void;
+  onCreated?: () => void;
 }) {
   const [form, setForm] = useState({
     type: "LINEHAUL",
@@ -74,6 +76,7 @@ export function LegsPanel({
         setActive: false,
       });
       onUpdated();
+      onCreated?.();
     } catch (err) {
       setError((err as Error).message);
     }

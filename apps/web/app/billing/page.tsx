@@ -288,7 +288,10 @@ function BillingQueueContent() {
                 const shipper = load.stops?.find((stop: any) => stop.type === "PICKUP");
                 const consignee = load.stops?.find((stop: any) => stop.type === "DELIVERY");
                 return (
-                  <div key={load.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-4 shadow-[var(--shadow-subtle)]">
+                  <div
+                    key={load.id}
+                    className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white py-4 pl-6 pr-4 shadow-[var(--shadow-subtle)]"
+                  >
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div>
                         <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-subtle)]">{load.status}</div>
@@ -422,7 +425,10 @@ function BillingQueueContent() {
           <SectionHeader title="Paid / Complete" subtitle="Invoices that have progressed beyond readiness" />
           <div className="grid gap-3">
             {queue.invoiced.map((load: any) => (
-              <div key={load.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-4">
+              <div
+                key={load.id}
+                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white py-4 pl-6 pr-4"
+              >
                 <div className="text-sm font-semibold text-ink">{load.loadNumber}</div>
                 <div className="text-xs text-[color:var(--color-text-muted)]">{load.customer?.name ?? load.customerName}</div>
                 {load.invoices?.map((invoice: any) => (

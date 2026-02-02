@@ -178,9 +178,9 @@ export function derivePrimaryAction(
   role?: string | null
 ): PrimaryAction {
   const canBilling = role === "ADMIN" || role === "BILLING";
-  const canDispatch = role === "ADMIN" || role === "DISPATCHER";
-  const canUpload = role === "ADMIN" || role === "DISPATCHER";
-  const canTrack = role === "ADMIN" || role === "DISPATCHER" || role === "DRIVER";
+  const canDispatch = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER";
+  const canUpload = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER";
+  const canTrack = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER" || role === "DRIVER";
   const podLink = `/loads/${load.id}?tab=documents&docType=POD#pod`;
   const rateconLink = `/loads/${load.id}?tab=documents&docType=RATECON#ratecon`;
 

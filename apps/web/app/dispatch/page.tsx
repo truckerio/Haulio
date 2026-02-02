@@ -1,24 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FormField } from "@/components/ui/form-field";
 import { Select } from "@/components/ui/select";
-import { CheckboxField } from "@/components/ui/checkbox";
-import { Textarea } from "@/components/ui/textarea";
 import { SectionHeader } from "@/components/ui/section-header";
 import { RefinePanel } from "@/components/ui/refine-panel";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusChip } from "@/components/ui/status-chip";
 import { EmptyState } from "@/components/ui/empty-state";
-import { BlockerCard } from "@/components/ui/blocker-card";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { NoAccess } from "@/components/rbac/no-access";
-import { SuggestedAssignments, type AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
+import type { AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
+import { DispatchBrowse } from "@/components/dispatch/DispatchBrowse";
+import { WorkbenchRightPane } from "@/components/dispatch/WorkbenchRightPane";
 import { apiFetch } from "@/lib/api";
 import { ManifestPanel } from "./manifest-panel";
 import { LegsPanel } from "./legs-panel";
@@ -115,19 +113,12 @@ const defaultFilters = {
 };
 
 type Filters = typeof defaultFilters;
-
-type DriverIdentity = {
-  terminal: string;
-  reliability: string;
-  docs: string;
-  tracking: string;
-  lastKnown: string;
-  summary: string;
-  detail: string;
-};
+type QueueView = "active" | "recent" | "history";
 
 export default function DispatchPage() {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [user, setUser] = useState<any | null>(null);
   const [hasAccess, setHasAccess] = useState<boolean | null>(null);
   const [loads, setLoads] = useState<DispatchItem[]>([]);
@@ -139,10 +130,9 @@ export default function DispatchPage() {
   );
   const [teams, setTeams] = useState<Array<{ id: string; name: string; active?: boolean }>>([]);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
-  const [view, setView] = useState<"cards" | "board" | "compact">("board");
+  const [browseLens, setBrowseLens] = useState<"board" | "list">("board");
   const [showFilters, setShowFilters] = useState(false);
   const [showManifest, setShowManifest] = useState(false);
-  const [showLegs, setShowLegs] = useState(true);
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -158,16 +148,88 @@ export default function DispatchPage() {
   const [suggestionLogId, setSuggestionLogId] = useState<string | null>(null);
   const [suggestionMeta, setSuggestionMeta] = useState<{ modelVersion: string; weightsVersion?: string } | null>(null);
   const [assistOverrideReason, setAssistOverrideReason] = useState("");
-  const [driverInfo, setDriverInfo] = useState<{ open: boolean; driver: DriverRecord | null }>({ open: false, driver: null });
+  const [legDrawerOpen, setLegDrawerOpen] = useState(false);
+  const [legAddedNote, setLegAddedNote] = useState(false);
+  const [workbenchTeamId, setWorkbenchTeamId] = useState("");
+  const [teamAssigning, setTeamAssigning] = useState(false);
+  const [teamAssignError, setTeamAssignError] = useState<string | null>(null);
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
   const [overrideReason, setOverrideReason] = useState("");
-  const [driverMenuOpen, setDriverMenuOpen] = useState(false);
   const [showStopActions, setShowStopActions] = useState(false);
   const [blocked, setBlocked] = useState<{ message?: string; ctaHref?: string } | null>(null);
+  const pendingLoadIdRef = useRef<string | null>(null);
 
-  const canDispatch = Boolean(user && (user.role === "ADMIN" || user.role === "DISPATCHER"));
-  const canSeeAllTeams = Boolean(user?.canSeeAllTeams);
+  const loadIdParam = searchParams.get("loadId");
+  const queueView = useMemo<QueueView>(() => {
+    const value = searchParams.get("queueView");
+    if (value === "recent" || value === "history") return value;
+    return "active";
+  }, [searchParams]);
+
+  const updateLoadIdParam = useCallback(
+    (loadId: string | null) => {
+      pendingLoadIdRef.current = loadId;
+      const params = new URLSearchParams(searchParams.toString());
+      if (loadId) {
+        params.set("loadId", loadId);
+      } else {
+        params.delete("loadId");
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+    },
+    [pathname, router, searchParams]
+  );
+
+  const updateQueueViewParam = useCallback(
+    (nextView: QueueView) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (nextView === "active") {
+        params.delete("queueView");
+      } else {
+        params.set("queueView", nextView);
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+      setPageIndex(0);
+    },
+    [pathname, router, searchParams]
+  );
+
+  const selectLoad = useCallback(
+    (loadId: string) => {
+      setSelectedLoadId(loadId);
+      updateLoadIdParam(loadId);
+    },
+    [updateLoadIdParam]
+  );
+
+  const clearSelectedLoad = useCallback(() => {
+    setSelectedLoadId(null);
+    setSelectedLoad(null);
+    setLegDrawerOpen(false);
+    setLegAddedNote(false);
+    updateLoadIdParam(null);
+  }, [updateLoadIdParam]);
+
+  const handleLegCreated = useCallback(() => {
+    setLegDrawerOpen(false);
+    setLegAddedNote(true);
+    window.setTimeout(() => setLegAddedNote(false), 2000);
+  }, []);
+
+  const canDispatch = Boolean(
+    user && (user.role === "ADMIN" || user.role === "DISPATCHER" || user.role === "HEAD_DISPATCHER")
+  );
+  const isQueueReadOnly = queueView !== "active";
+  const canStartTracking = Boolean(
+    user && (user.role === "ADMIN" || user.role === "DISPATCHER" || user.role === "HEAD_DISPATCHER")
+  );
+  const canSeeAllTeams = Boolean(
+    user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER" || user?.canSeeAllTeams
+  );
+  const canAssignTeamsOps = Boolean(user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER");
   const canOverride = user?.role === "ADMIN";
   const dispatchStage =
     selectedLoad?.status && ["DRAFT", "PLANNED", "ASSIGNED"].includes(selectedLoad.status);
@@ -175,48 +237,17 @@ export default function DispatchPage() {
   const hasRateCon = (selectedLoad?.docs ?? []).some((doc: any) => doc.type === "RATECON");
   const rateConMissing = Boolean(dispatchStage && rateConRequired && !hasRateCon);
   const assignDisabled =
+    isQueueReadOnly ||
     !assignForm.driverId ||
     (rateConMissing && !canOverride) ||
     (rateConMissing && canOverride && !overrideReason.trim());
-
-  const formatReliability = (value?: string | null) => {
-    const normalized = value?.toUpperCase();
-    if (normalized === "HIGH") return "High";
-    if (normalized === "MED" || normalized === "MEDIUM") return "Med";
-    if (normalized === "LOW") return "Low";
-    return "—";
-  };
-
-  const formatDocs = (value?: string | null) => {
-    const normalized = value?.toUpperCase();
-    if (normalized === "OK") return "OK";
-    if (normalized === "MISSING") return "Missing";
-    return "—";
-  };
-
-  const formatTracking = (value?: string | null) => {
-    const normalized = value?.toUpperCase();
-    if (normalized === "ON") return "ON";
-    if (normalized === "OFF") return "OFF";
-    return "—";
-  };
-
-  const buildDriverIdentity = useCallback((driver?: DriverRecord | null): DriverIdentity => {
-    const terminal = driver?.terminal ?? driver?.homeTerminal ?? driver?.region ?? "—";
-    const reliability = formatReliability(driver?.reliability);
-    const docs = formatDocs(driver?.docsStatus);
-    const tracking = formatTracking(driver?.trackingStatus);
-    const lastKnown = driver?.lastKnownCity ?? (driver?.nearPickup ? "Near pickup" : "—");
-    const summary = [terminal, reliability, `Docs ${docs}`, `Tracking ${tracking}`, lastKnown].join(" · ");
-    const detail = `Terminal: ${terminal} · Reliability ${reliability} · Docs ${docs} · Tracking ${tracking} · ${lastKnown}`;
-    return { terminal, reliability, docs, tracking, lastKnown, summary, detail };
-  }, []);
 
   useEffect(() => {
     apiFetch<{ user: any }>("/auth/me")
       .then((data) => {
         setUser(data.user);
-        const allowed = data.user?.role === "ADMIN" || data.user?.role === "DISPATCHER";
+        const allowed =
+          data.user?.role === "ADMIN" || data.user?.role === "DISPATCHER" || data.user?.role === "HEAD_DISPATCHER";
         setHasAccess(Boolean(allowed));
       })
       .catch(() => setHasAccess(false));
@@ -270,6 +301,24 @@ export default function DispatchPage() {
     router.replace(query ? `/dispatch?${query}` : "/dispatch");
   }, [filters.operatingEntityId, filters.teamId, hasAccess, router, canSeeAllTeams]);
 
+  useEffect(() => {
+    if (!loadIdParam) {
+      if (pendingLoadIdRef.current) {
+        return;
+      }
+      if (selectedLoadId) {
+        clearSelectedLoad();
+      }
+      return;
+    }
+    if (pendingLoadIdRef.current === loadIdParam) {
+      pendingLoadIdRef.current = null;
+    }
+    if (loadIdParam !== selectedLoadId) {
+      setSelectedLoadId(loadIdParam);
+    }
+  }, [loadIdParam, selectedLoadId, clearSelectedLoad]);
+
   const loadAssets = useCallback(async () => {
     if (!canDispatch) return;
     const [driversData, trucksData, trailersData, entitiesData] = await Promise.all([
@@ -303,6 +352,7 @@ export default function DispatchPage() {
   const buildParams = useCallback((nextFilters = filters, page = pageIndex) => {
     const params = new URLSearchParams();
     params.set("view", "dispatch");
+    params.set("queueView", queueView);
     params.set("page", String(page + 1));
     params.set("limit", String(PAGE_SIZE));
     if (nextFilters.search) params.set("search", nextFilters.search);
@@ -321,7 +371,7 @@ export default function DispatchPage() {
     if (nextFilters.operatingEntityId) params.set("operatingEntityId", nextFilters.operatingEntityId);
     if (canSeeAllTeams && nextFilters.teamId) params.set("teamId", nextFilters.teamId);
     return params.toString();
-  }, [filters, pageIndex, canSeeAllTeams]);
+  }, [filters, pageIndex, canSeeAllTeams, queueView]);
 
   const loadDispatchLoads = useCallback(async (nextFilters = filters, page = pageIndex) => {
     if (!canDispatch) return;
@@ -331,16 +381,35 @@ export default function DispatchPage() {
     setLoads(data.items ?? []);
     setTotalPages(data.totalPages ?? 1);
     setTotalCount(data.total ?? 0);
-    const first = data.items?.[0];
-    if (first && !selectedLoadId) {
-      setSelectedLoadId(first.id);
-    }
-  }, [canDispatch, buildParams, selectedLoadId, filters, pageIndex]);
+  }, [canDispatch, buildParams, filters, pageIndex]);
 
   useEffect(() => {
     if (!canDispatch) return;
     loadDispatchLoads(filters, pageIndex);
   }, [canDispatch, pageIndex, filters, loadDispatchLoads]);
+
+  useEffect(() => {
+    if (selectedLoadId) return;
+    setSelectedLoad(null);
+  }, [selectedLoadId]);
+
+  useEffect(() => {
+    setLegDrawerOpen(false);
+    setLegAddedNote(false);
+  }, [selectedLoadId]);
+
+  useEffect(() => {
+    if (!selectedLoadId) {
+      setWorkbenchTeamId("");
+      setTeamAssignError(null);
+      return;
+    }
+    if (canSeeAllTeams && filters.teamId) {
+      setWorkbenchTeamId(filters.teamId);
+      return;
+    }
+    setWorkbenchTeamId("");
+  }, [selectedLoadId, filters.teamId, canSeeAllTeams]);
 
   const refreshSelectedLoad = useCallback(async (loadId: string) => {
     if (!canDispatch) return;
@@ -366,7 +435,7 @@ export default function DispatchPage() {
   }, [selectedLoadId, canDispatch, refreshSelectedLoad, filters.teamId, canSeeAllTeams]);
 
   useEffect(() => {
-    if (!selectedLoadId || !canDispatch) {
+    if (!selectedLoadId || !canDispatch || isQueueReadOnly) {
       setAssignmentSuggestions([]);
       setSuggestionsError(null);
       setSuggestionLogId(null);
@@ -415,19 +484,13 @@ export default function DispatchPage() {
     return () => {
       active = false;
     };
-  }, [selectedLoadId, canDispatch]);
+  }, [selectedLoadId, canDispatch, isQueueReadOnly]);
 
   useEffect(() => {
     setConfirmReassign(false);
     setAssignError(null);
     setOverrideReason("");
   }, [assignForm.driverId, assignForm.truckId, assignForm.trailerId, selectedLoadId, showUnavailable]);
-
-  useEffect(() => {
-    if (!assignmentNotSuggested) {
-      setAssistOverrideReason("");
-    }
-  }, [assignmentNotSuggested]);
 
   useEffect(() => {
     const shouldAutoExpand = Boolean(selectedLoad?.riskFlags?.atRisk || selectedLoad?.riskFlags?.overdueStopWindow);
@@ -531,6 +594,7 @@ export default function DispatchPage() {
   };
 
   const performAssign = async (params: { driverId: string; truckId?: string; trailerId?: string }) => {
+    if (isQueueReadOnly) return;
     if (!selectedLoad) return;
     if (!params.driverId) return;
     const conflicts = buildConflictMessages(params.driverId, params.truckId, params.trailerId);
@@ -586,16 +650,18 @@ export default function DispatchPage() {
   };
 
   const assignFromSuggestion = async (driverId: string, truckId?: string | null) => {
+    if (isQueueReadOnly) return;
     setAssignForm((prev) => ({ ...prev, driverId, truckId: truckId ?? prev.truckId }));
-    setAssistOverrideReason(\"\");
+    setAssistOverrideReason("");
     await performAssign({
       driverId,
-      truckId: truckId ?? assignForm.truckId || undefined,
+      truckId: (truckId ?? assignForm.truckId) || undefined,
       trailerId: assignForm.trailerId || undefined,
     });
   };
 
   const unassign = async () => {
+    if (isQueueReadOnly) return;
     if (!selectedLoad) return;
     await apiFetch(`/loads/${selectedLoad.id}/unassign`, { method: "POST" });
     const updated = await refreshSelectedLoad(selectedLoad.id);
@@ -604,7 +670,35 @@ export default function DispatchPage() {
     }
   };
 
+  const assignTeamForLoad = async (teamId: string) => {
+    if (isQueueReadOnly) return;
+    if (!selectedLoad || !teamId) return;
+    setTeamAssignError(null);
+    setTeamAssigning(true);
+    try {
+      await apiFetch("/teams/assign-loads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          teamId,
+          loadIds: [selectedLoad.id],
+        }),
+      });
+      setWorkbenchTeamId(teamId);
+    } catch (err) {
+      const message = (err as Error).message || "Failed to update team.";
+      if (message.toLowerCase().includes("forbidden") || message.toLowerCase().includes("not authorized")) {
+        setTeamAssignError("You don’t have permission to reassign loads. Ask an admin.");
+      } else {
+        setTeamAssignError(message);
+      }
+    } finally {
+      setTeamAssigning(false);
+    }
+  };
+
   const markArrive = async (loadId: string, stopId: string) => {
+    if (isQueueReadOnly) return;
     await apiFetch(`/loads/${loadId}/stops/${stopId}/arrive`, { method: "POST" });
     const updated = await refreshSelectedLoad(loadId);
     if (updated) {
@@ -613,6 +707,7 @@ export default function DispatchPage() {
   };
 
   const markDepart = async (loadId: string, stopId: string) => {
+    if (isQueueReadOnly) return;
     await apiFetch(`/loads/${loadId}/stops/${stopId}/depart`, { method: "POST" });
     const updated = await refreshSelectedLoad(loadId);
     if (updated) {
@@ -621,6 +716,7 @@ export default function DispatchPage() {
   };
 
   const updateDelay = async (stopId: string, delayReason?: string | null, delayNotes?: string | null) => {
+    if (isQueueReadOnly) return;
     await apiFetch(`/stops/${stopId}/delay`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -643,24 +739,8 @@ export default function DispatchPage() {
   const unavailableTrucks = useMemo(() => availability?.unavailableTrucks ?? [], [availability]);
   const availableTrailers = useMemo(() => availability?.availableTrailers ?? trailers, [availability, trailers]);
   const unavailableTrailers = useMemo(() => availability?.unavailableTrailers ?? [], [availability]);
+  const teamsEnabled = useMemo(() => teams.some((team) => team.name && team.name !== "Default"), [teams]);
 
-  const selectedDriver = useMemo(() => {
-    const allDrivers = [...availableDrivers, ...unavailableDrivers];
-    return allDrivers.find((driver) => driver.id === assignForm.driverId) ?? null;
-  }, [availableDrivers, unavailableDrivers, assignForm.driverId]);
-
-  const selectedDriverIdentity = useMemo(() => buildDriverIdentity(selectedDriver), [selectedDriver, buildDriverIdentity]);
-  const driverInfoIdentity = useMemo(
-    () => (driverInfo.driver ? buildDriverIdentity(driverInfo.driver) : null),
-    [driverInfo.driver, buildDriverIdentity]
-  );
-
-  const driverUnavailableSelected =
-    Boolean(assignForm.driverId) && !availableDrivers.find((driver: any) => driver.id === assignForm.driverId);
-  const truckUnavailableSelected =
-    Boolean(assignForm.truckId) && !availableTrucks.find((truck: any) => truck.id === assignForm.truckId);
-  const trailerUnavailableSelected =
-    Boolean(assignForm.trailerId) && !availableTrailers.find((trailer: any) => trailer.id === assignForm.trailerId);
   const suggestionDriverIds = useMemo(
     () => new Set(assignmentSuggestions.map((suggestion) => suggestion.driverId)),
     [assignmentSuggestions]
@@ -668,14 +748,11 @@ export default function DispatchPage() {
   const assignmentNotSuggested =
     Boolean(assignForm.driverId) && assignmentSuggestions.length > 0 && !suggestionDriverIds.has(assignForm.driverId);
 
-  const buildOptions = <T extends { id: string; name?: string | null; unit?: string | null; reason?: string | null }>(
-    available: T[],
-    unavailable: T[],
-    showAll: boolean
-  ) => {
-    if (showAll) return [...available, ...unavailable];
-    return available;
-  };
+  useEffect(() => {
+    if (!assignmentNotSuggested) {
+      setAssistOverrideReason("");
+    }
+  }, [assignmentNotSuggested]);
 
   const conflictMessages = useMemo(() => {
     const conflicts: string[] = [];
@@ -710,7 +787,9 @@ export default function DispatchPage() {
     return "neutral";
   };
 
+
   const sortedLoads = useMemo(() => {
+    if (queueView !== "active") return loads;
     return [...loads].sort((a, b) => {
       const aPriority = a.riskFlags?.needsAssignment ? 0 : a.riskFlags?.atRisk ? 1 : 2;
       const bPriority = b.riskFlags?.needsAssignment ? 0 : b.riskFlags?.atRisk ? 1 : 2;
@@ -719,24 +798,116 @@ export default function DispatchPage() {
       const bTime = b.riskFlags?.nextStopTime ? new Date(b.riskFlags.nextStopTime).getTime() : Number.MAX_SAFE_INTEGER;
       return aTime - bTime;
     });
-  }, [loads]);
+  }, [loads, queueView]);
 
-  const focusLoadSummary = useMemo(() => {
-    if (selectedLoadId) return sortedLoads.find((load) => load.id === selectedLoadId) ?? null;
-    return sortedLoads[0] ?? null;
+  const selectedLoadSummary = useMemo(() => {
+    if (!selectedLoadId) return null;
+    return sortedLoads.find((load) => load.id === selectedLoadId) ?? null;
   }, [sortedLoads, selectedLoadId]);
 
   useEffect(() => {
+    if (!selectedLoadId) return;
     if (!sortedLoads.length) return;
-    if (!selectedLoadId) {
-      setSelectedLoadId(sortedLoads[0].id);
-      return;
-    }
     const exists = sortedLoads.some((load) => load.id === selectedLoadId);
     if (!exists) {
-      setSelectedLoadId(sortedLoads[0].id);
+      clearSelectedLoad();
     }
-  }, [sortedLoads, selectedLoadId]);
+  }, [sortedLoads, selectedLoadId, clearSelectedLoad]);
+
+  const workbenchAssignment = {
+    form: assignForm,
+    setForm: setAssignForm,
+    availableDrivers,
+    unavailableDrivers,
+    availableTrucks,
+    unavailableTrucks,
+    availableTrailers,
+    unavailableTrailers,
+    showUnavailable,
+    setShowUnavailable,
+    assignDisabled,
+    assignError,
+    assign,
+    unassign,
+    assignFromSuggestion,
+    suggestions: assignmentSuggestions,
+    suggestionsLoading,
+    suggestionsError,
+    assignmentNotSuggested,
+    assistOverrideReason,
+    setAssistOverrideReason,
+    canOverride,
+    overrideReason,
+    setOverrideReason,
+    rateConMissing,
+    hasConflicts,
+    conflictMessages,
+    confirmReassign,
+    assignedSummary: {
+      driverName: selectedLoadSummary?.assignment?.driver?.name ?? selectedLoad?.driver?.name ?? null,
+      truckUnit: selectedLoadSummary?.assignment?.truck?.unit ?? selectedLoad?.truck?.unit ?? null,
+      trailerUnit: selectedLoadSummary?.assignment?.trailer?.unit ?? selectedLoad?.trailer?.unit ?? null,
+    },
+  };
+
+  const legDrawerContent = selectedLoad ? (
+    <LegsPanel
+      load={selectedLoad}
+      drivers={showUnavailable ? [...availableDrivers, ...unavailableDrivers] : availableDrivers}
+      trucks={showUnavailable ? [...availableTrucks, ...unavailableTrucks] : availableTrucks}
+      trailers={showUnavailable ? [...availableTrailers, ...unavailableTrailers] : availableTrailers}
+      rateConMissing={rateConMissing}
+      canOverride={canOverride}
+      overrideReason={overrideReason}
+      onUpdated={() => {
+        if (selectedLoad) refreshSelectedLoad(selectedLoad.id);
+      }}
+      onCreated={handleLegCreated}
+    />
+  ) : null;
+
+  const workbenchRightPane = selectedLoad ? (
+    <WorkbenchRightPane
+      load={selectedLoad}
+      loadSummary={selectedLoadSummary}
+      statusTone={statusTone}
+      readOnly={isQueueReadOnly}
+      onClose={clearSelectedLoad}
+      onRefresh={() => {
+        if (selectedLoad) refreshSelectedLoad(selectedLoad.id);
+      }}
+      assignment={workbenchAssignment}
+      showStopActions={showStopActions}
+      onToggleStopActions={() => {
+        if (isQueueReadOnly) return;
+        setShowStopActions((prev) => !prev);
+      }}
+      onMarkArrive={markArrive}
+      onMarkDepart={markDepart}
+      onUpdateDelay={updateDelay}
+      legDrawerOpen={legDrawerOpen}
+      onOpenLegDrawer={() => {
+        if (isQueueReadOnly) return;
+        setLegDrawerOpen(true);
+      }}
+      onCloseLegDrawer={() => setLegDrawerOpen(false)}
+      legDrawerContent={legDrawerContent ?? undefined}
+      legAddedNote={legAddedNote ? "✓ Added" : null}
+      canStartTracking={canStartTracking}
+      teamAssignment={
+        canAssignTeamsOps && teamsEnabled && !isQueueReadOnly
+          ? {
+              enabled: true,
+              teams,
+              value: workbenchTeamId,
+              onChange: assignTeamForLoad,
+              loading: teamAssigning,
+              error: teamAssignError,
+            }
+          : undefined
+      }
+    />
+  ) : undefined;
 
   if (hasAccess === false) {
     return (
@@ -767,246 +938,6 @@ export default function DispatchPage() {
 
   return (
     <AppShell title="Dispatch" subtitle="Assign assets and monitor driver updates">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <SectionHeader title="Assignment focus" subtitle="Prioritize and assign the next load" />
-        <SegmentedControl
-          value={view}
-          options={[
-            { label: "Board", value: "board" },
-            { label: "Cards", value: "cards" },
-            { label: "Compact", value: "compact" },
-          ]}
-          onChange={(value) => setView(value as "cards" | "board" | "compact")}
-        />
-      </div>
-
-      {focusLoadSummary ? (
-        <Card className="space-y-4">
-          <SectionHeader
-            title={`Load ${focusLoadSummary.loadNumber}`}
-            subtitle={`${focusLoadSummary.customerName ?? "Customer"} - ${
-              focusLoadSummary.assignment?.driver?.name ?? "Unassigned"
-            }`}
-          />
-          <div className="flex flex-wrap items-center gap-3 text-xs text-[color:var(--color-text-muted)]">
-            <StatusChip label={focusLoadSummary.status} tone={statusTone(focusLoadSummary.status)} />
-            <div>Truck {focusLoadSummary.assignment?.truck?.unit ?? "-"}</div>
-            <div>Trailer {focusLoadSummary.assignment?.trailer?.unit ?? "-"}</div>
-            {focusLoadSummary.operatingEntity?.name ? <div>OE {focusLoadSummary.operatingEntity.name}</div> : null}
-          </div>
-          <div className="grid gap-3 lg:grid-cols-4">
-            {hasConflicts ? (
-              <div className="lg:col-span-4 rounded-[var(--radius-card)] border border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
-                <div className="text-sm font-semibold text-ink">Reassignment required</div>
-                <div className="mt-1 grid gap-1">
-                  {conflictMessages.map((message) => (
-                    <div key={message}>{message}</div>
-                  ))}
-                </div>
-                <div className="mt-1">{confirmReassign ? "Click confirm to proceed." : "Click Assign to confirm reassignment."}</div>
-              </div>
-            ) : null}
-            {rateConMissing ? (
-              <div className="lg:col-span-4">
-                <BlockerCard
-                  title="Cannot dispatch: Rate Confirmation missing"
-                  subtitle="Upload the RateCon to continue assignment."
-                  ctaLabel="Fix now"
-                  tone="danger"
-                  onClick={() => router.push(`/loads/${selectedLoad?.id}?tab=documents&docType=RATECON`)}
-                />
-              </div>
-            ) : null}
-            <div className="lg:col-span-4 space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
-                Suggested
-              </div>
-              <SuggestedAssignments
-                suggestions={assignmentSuggestions}
-                loading={suggestionsLoading}
-                error={suggestionsError}
-                onAssign={assignFromSuggestion}
-              />
-            </div>
-            <div className="relative">
-              <button
-                type="button"
-                aria-haspopup="listbox"
-                aria-expanded={driverMenuOpen}
-                onClick={() => setDriverMenuOpen((prev) => !prev)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    setDriverMenuOpen(false);
-                  }
-                }}
-                className="w-full rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-white px-3 py-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
-              >
-                <div className="font-medium text-ink">{selectedDriver?.name ?? "Driver"}</div>
-                <div className="text-xs text-[color:var(--color-text-muted)]">{selectedDriverIdentity.summary}</div>
-              </button>
-              {driverMenuOpen ? (
-                <div className="absolute z-10 mt-2 w-full rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-2 shadow-[var(--shadow-subtle)]">
-                  <button
-                    type="button"
-                    className="w-full rounded-[var(--radius-card)] px-3 py-2 text-left text-sm hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
-                    onClick={() => {
-                      setAssignForm((prev) => ({ ...prev, driverId: "" }));
-                      setDriverMenuOpen(false);
-                    }}
-                  >
-                    <div className="font-medium text-ink">Unassigned</div>
-                    <div className="text-xs text-[color:var(--color-text-muted)]">Select a driver to assign.</div>
-                  </button>
-                  <div className="mt-1 max-h-56 overflow-y-auto">
-                    {buildOptions(availableDrivers, unavailableDrivers, showUnavailable || driverUnavailableSelected).map((driver) => {
-                      const identity = buildDriverIdentity(driver);
-                      const isUnavailable = Boolean(driver.reason);
-                      const isDisabled = isUnavailable && !showUnavailable && driver.id !== assignForm.driverId;
-                      return (
-                        <button
-                          key={driver.id}
-                          type="button"
-                          className={`w-full rounded-[var(--radius-card)] px-3 py-2 text-left hover:bg-[color:var(--color-bg-muted)] ${
-                            isUnavailable ? "opacity-70" : ""
-                          } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]`}
-                          onClick={() => {
-                            if (isDisabled) return;
-                            setAssignForm((prev) => ({ ...prev, driverId: driver.id }));
-                            setDriverMenuOpen(false);
-                          }}
-                          aria-disabled={isDisabled}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="font-medium text-ink">{driver.name ?? "Driver"}</div>
-                            {driver.reason ? (
-                              <span className="text-xs text-[color:var(--color-warning)]">Unavailable</span>
-                            ) : null}
-                          </div>
-                          <div className="text-xs text-[color:var(--color-text-muted)]">{identity.detail}</div>
-                          {driver.reason ? (
-                            <div className="text-xs text-[color:var(--color-text-muted)]">Reason: {driver.reason}</div>
-                          ) : null}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-            <FormField label="Truck" htmlFor="assignTruck">
-              <Select
-                value={assignForm.truckId}
-                onChange={(event) => setAssignForm({ ...assignForm, truckId: event.target.value })}
-              >
-                <option value="">Select truck</option>
-                {buildOptions(availableTrucks, unavailableTrucks, showUnavailable || truckUnavailableSelected).map((truck) => (
-                  <option key={truck.id} value={truck.id} disabled={Boolean(truck.reason) && !showUnavailable && truck.id !== assignForm.truckId}>
-                    {truck.unit}
-                    {truck.reason ? ` (Unavailable: ${truck.reason})` : ""}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            <FormField label="Trailer" htmlFor="assignTrailer">
-              <Select
-                value={assignForm.trailerId}
-                onChange={(event) => setAssignForm({ ...assignForm, trailerId: event.target.value })}
-              >
-                <option value="">Select trailer</option>
-                {buildOptions(availableTrailers, unavailableTrailers, showUnavailable || trailerUnavailableSelected).map((trailer) => (
-                  <option key={trailer.id} value={trailer.id} disabled={Boolean(trailer.reason) && !showUnavailable && trailer.id !== assignForm.trailerId}>
-                    {trailer.unit}
-                    {trailer.reason ? ` (Unavailable: ${trailer.reason})` : ""}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            {assignmentNotSuggested ? (
-              <FormField label="Suggestion override" htmlFor="assistOverrideReason" hint="Optional: why not using a suggestion">
-                <Select
-                  id="assistOverrideReason"
-                  value={assistOverrideReason}
-                  onChange={(event) => setAssistOverrideReason(event.target.value)}
-                >
-                  <option value="">Select reason (optional)</option>
-                  <option value="Driver requested">Driver requested</option>
-                  <option value="Equipment mismatch">Equipment mismatch</option>
-                  <option value="Better lane fit">Better lane fit</option>
-                  <option value="Other">Other</option>
-                </Select>
-              </FormField>
-            ) : null}
-            {canOverride && (rateConMissing || hasConflicts) ? (
-              <FormField label="Override reason" htmlFor="assignOverrideReason" hint="Required for admin overrides">
-                <Input
-                  value={overrideReason}
-                  onChange={(event) => setOverrideReason(event.target.value)}
-                  placeholder="Document why this override is needed"
-                />
-              </FormField>
-            ) : null}
-            <Button onClick={assign} disabled={assignDisabled}>
-              {hasConflicts && confirmReassign ? "Confirm reassignment" : "Assign"}
-            </Button>
-            {selectedLoad?.assignedDriverId ? (
-              <Button variant="secondary" onClick={unassign}>
-                Unassign
-              </Button>
-            ) : null}
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
-            <CheckboxField
-              id="showUnavailable"
-              label="Show unavailable"
-              checked={showUnavailable}
-              onChange={(event) => setShowUnavailable(event.target.checked)}
-            />
-            {selectedDriver ? (
-              <button
-                type="button"
-                className="rounded-full border border-[color:var(--color-divider)] px-3 py-1 text-xs text-ink"
-                onClick={() => setDriverInfo({ open: true, driver: selectedDriver })}
-              >
-                {selectedDriver.name ?? "Driver"} · {selectedDriverIdentity.summary}
-              </button>
-            ) : null}
-          </div>
-          {assignError ? <div className="text-sm text-[color:var(--color-danger)]">{assignError}</div> : null}
-        </Card>
-      ) : (
-        <EmptyState
-          title="No loads ready for dispatch."
-          description="Assignments will appear once loads are planned or need attention."
-          action={
-            <Button variant="secondary" onClick={() => router.push("/loads")}>
-              Open loads
-            </Button>
-          }
-        />
-      )}
-
-      {selectedLoad && driverInfo.open ? (
-        <Card>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold">Driver info</div>
-            <Button size="sm" variant="secondary" onClick={() => setDriverInfo({ open: false, driver: null })}>
-              Close
-            </Button>
-          </div>
-          <div className="mt-3 text-sm text-[color:var(--color-text-muted)]">
-            {driverInfo.driver && driverInfoIdentity ? (
-              <>
-                <div>Name: {driverInfo.driver.name ?? "Driver"}</div>
-                <div>Terminal: {driverInfoIdentity.terminal}</div>
-                <div>Reliability: {driverInfoIdentity.reliability}</div>
-                <div>Docs: {driverInfoIdentity.docs}</div>
-                <div>Tracking: {driverInfoIdentity.tracking}</div>
-                <div>Last known: {driverInfoIdentity.lastKnown}</div>
-              </>
-            ) : null}
-          </div>
-        </Card>
-      ) : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SectionHeader title="Refine" subtitle="Filter down to what you need" />
@@ -1016,9 +947,6 @@ export default function DispatchPage() {
           </Button>
           <Button variant="secondary" size="sm" onClick={() => setShowManifest((prev) => !prev)}>
             {showManifest ? "Hide manifests" : "Manifests"}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => setShowLegs((prev) => !prev)}>
-            {showLegs ? "Hide legs" : "Legs"}
           </Button>
         </div>
       </div>
@@ -1172,109 +1100,53 @@ export default function DispatchPage() {
 
       {showManifest ? <ManifestPanel trailers={trailers} trucks={trucks} drivers={drivers} /> : null}
 
-      {view === "compact" ? (
-        <Card>
-          <div className="grid gap-3">
-            <div className="hidden grid-cols-7 gap-2 text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)] lg:grid">
-              <div>Status</div>
-              <div>Load</div>
-              <div>Customer</div>
-              <div>Driver</div>
-              <div>Trailer</div>
-              <div>Miles</div>
-              <div>Rate</div>
-            </div>
-            {sortedLoads.map((load) => (
-              <button
-                key={load.id}
-                type="button"
-                onClick={() => setSelectedLoadId(load.id)}
-                className="grid grid-cols-1 gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2 text-left text-sm lg:grid-cols-7"
-              >
-                <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">{load.status}</div>
-                <div className="space-y-1">
-                  <div className="font-semibold">{load.loadNumber}</div>
-                  {load.riskFlags?.needsAssignment ? (
-                    <div className="text-xs text-[color:var(--color-danger)]">Needs assignment</div>
-                  ) : load.riskFlags?.atRisk ? (
-                    <div className="text-xs text-[color:var(--color-warning)]">At risk</div>
-                  ) : null}
-                </div>
-                <div>{load.customerName ?? "-"}</div>
-                <div>{load.assignment?.driver?.name ?? "Unassigned"}</div>
-                <div>{load.assignment?.trailer?.unit ?? "-"}</div>
-                <div>{load.miles ?? "-"}</div>
-                <div>{load.rate ?? "-"}</div>
-              </button>
-            ))}
-          </div>
-        </Card>
-      ) : (
-        <div className={view === "board" ? "grid gap-4 lg:grid-cols-3" : "grid gap-4"}>
-          {(view === "board"
-            ? [
-                { status: "PLANNED", title: "Planned" },
-                { status: "ASSIGNED", title: "Assigned" },
-                { status: "IN_TRANSIT", title: "In transit" },
-                { status: "DELIVERED", title: "Delivered" },
-                { status: "READY_TO_INVOICE", title: "Ready to invoice" },
-                { status: "INVOICED", title: "Invoiced" },
-              ]
-            : [{ status: "ALL", title: "All loads" }]
-          ).map((bucket) => {
-            const bucketLoads = bucket.status === "ALL" ? sortedLoads : sortedLoads.filter((load) => load.status === bucket.status);
-            if (view === "board" && bucketLoads.length === 0) {
-              return null;
-            }
-            return (
-              <div key={bucket.status} className="grid gap-4">
-                {view === "board" ? (
-                  <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">{bucket.title}</div>
-                ) : null}
-                {bucketLoads.map((load) => (
-                  <Card key={load.id} className={`space-y-3 ${selectedLoadId === load.id ? "ring-2 ring-[color:var(--color-accent-soft)]" : ""}`}>
-                    <button type="button" className="text-left" onClick={() => setSelectedLoadId(load.id)}>
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">{load.status}</div>
-                          <div className="text-xl font-semibold">{load.loadNumber}</div>
-                          <div className="text-sm text-[color:var(--color-text-muted)]">{load.customerName ?? "Customer"}</div>
-                          {load.route?.shipperCity || load.route?.consigneeCity ? (
-                            <div className="text-xs text-[color:var(--color-text-muted)]">
-                              {load.route?.shipperCity ?? "-"}, {load.route?.shipperState ?? "-"} {"->"}{" "}
-                              {load.route?.consigneeCity ?? "-"}, {load.route?.consigneeState ?? "-"}
-                            </div>
-                          ) : null}
-                        </div>
-                        <div className="flex flex-col gap-1 text-xs text-[color:var(--color-text-muted)]">
-                          {load.riskFlags?.needsAssignment ? (
-                            <span className="text-[color:var(--color-danger)]">Needs assignment</span>
-                          ) : null}
-                          {load.riskFlags?.trackingOffInTransit ? (
-                            <span className="text-[color:var(--color-warning)]">Tracking off</span>
-                          ) : null}
-                          {load.riskFlags?.overdueStopWindow ? (
-                            <span className="text-[color:var(--color-warning)]">Overdue stop window</span>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="text-sm text-[color:var(--color-text-muted)]">
-                        Assigned: {load.assignment?.driver?.name ?? "Unassigned"} - Truck {load.assignment?.truck?.unit ?? "-"} - Trailer{" "}
-                        {load.assignment?.trailer?.unit ?? "-"} - Miles {load.miles ?? "-"} - Rate {load.rate ?? "-"}
-                      </div>
-                      {load.nextStop ? (
-                        <div className="text-xs text-[color:var(--color-text-muted)]">
-                          Next stop: {load.nextStop.name} - {load.nextStop.city}, {load.nextStop.state}
-                        </div>
-                      ) : null}
-                    </button>
-                  </Card>
-                ))}
-              </div>
-            );
-          })}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <SectionHeader title="Browse" subtitle="Board or list view of dispatch-ready loads" />
+        <div className="flex flex-wrap items-center gap-2">
+          <SegmentedControl
+            value={queueView}
+            options={[
+              { label: "Active", value: "active" },
+              { label: "Recent", value: "recent" },
+              { label: "History", value: "history" },
+            ]}
+            onChange={(value) => updateQueueViewParam(value as QueueView)}
+          />
+          <SegmentedControl
+            value={browseLens}
+            options={[
+              { label: "Board", value: "board" },
+              { label: "List", value: "list" },
+            ]}
+            onChange={(value) => setBrowseLens(value as "board" | "list")}
+          />
         </div>
-      )}
+      </div>
+
+      <div
+        className={`grid gap-4 ${
+          selectedLoadId ? "lg:grid-cols-[minmax(420px,590px)_minmax(0,1fr)]" : ""
+        }`}
+      >
+        <div className={selectedLoadId ? "min-h-0 max-h-[calc(100vh-24rem)] overflow-y-auto" : ""}>
+          <DispatchBrowse
+            loads={sortedLoads}
+            selectedLoadId={selectedLoadId}
+            onSelectLoad={selectLoad}
+            lens={browseLens}
+            queueView={queueView}
+          />
+        </div>
+        {selectedLoadId ? (
+          <div className="min-h-0 max-h-[calc(100vh-24rem)] overflow-y-auto">
+            {workbenchRightPane ?? (
+              <Card>
+                <EmptyState title="Loading load..." description="Fetching assignment and stop details." />
+              </Card>
+            )}
+          </div>
+        ) : null}
+      </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs text-[color:var(--color-text-muted)]">
@@ -1295,91 +1167,6 @@ export default function DispatchPage() {
         </div>
       </div>
 
-      {selectedLoad && showLegs ? (
-        <Card className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <SectionHeader title="Selected load details" subtitle="Stops, legs, and operational updates" />
-            <Button size="sm" variant="secondary" onClick={() => setShowStopActions((prev) => !prev)}>
-              {showStopActions ? "Hide stop actions" : "Update stop"}
-            </Button>
-          </div>
-          <div className="grid gap-3">
-            {selectedLoad.stops?.map((stop: any) => (
-              <div
-                key={stop.id}
-                className="flex flex-wrap items-start justify-between gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-2"
-              >
-                <div>
-                  <div className="text-sm font-semibold">
-                    {stop.type} - {stop.name}
-                  </div>
-                  <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Status: {stop.status ?? "PLANNED"}</div>
-                  <div className="text-xs text-[color:var(--color-text-muted)]">
-                    Arrived: {stop.arrivedAt ? new Date(stop.arrivedAt).toLocaleTimeString() : "-"} - Departed:{" "}
-                    {stop.departedAt ? new Date(stop.departedAt).toLocaleTimeString() : "-"}
-                  </div>
-                  <div className="text-xs text-[color:var(--color-text-muted)]">
-                    Delay: {stop.delayReason ?? "None"} - Detention: {stop.detentionMinutes ?? 0} min
-                  </div>
-                </div>
-                {showStopActions ? (
-                  <div className="flex flex-col gap-2">
-                    <Button variant="secondary" onClick={() => markArrive(selectedLoad.id, stop.id)}>
-                      Mark arrived
-                    </Button>
-                    <Button variant="secondary" onClick={() => markDepart(selectedLoad.id, stop.id)}>
-                      Mark departed
-                    </Button>
-                    <FormField label="Delay reason" htmlFor={`delayReason-${stop.id}`}>
-                      <Select defaultValue={stop.delayReason ?? ""}>
-                        <option value="">Delay reason</option>
-                        <option value="SHIPPER_DELAY">Shipper delay</option>
-                        <option value="RECEIVER_DELAY">Receiver delay</option>
-                        <option value="TRAFFIC">Traffic</option>
-                        <option value="WEATHER">Weather</option>
-                        <option value="BREAKDOWN">Breakdown</option>
-                        <option value="OTHER">Other</option>
-                      </Select>
-                    </FormField>
-                    <FormField label="Delay notes" htmlFor={`delayNotes-${stop.id}`}>
-                      <Textarea
-                        className="min-h-[60px]"
-                        defaultValue={stop.delayNotes ?? ""}
-                        placeholder="Add context if needed"
-                      />
-                    </FormField>
-                    <Button
-                      variant="ghost"
-                      onClick={(event) => {
-                        const parent = event.currentTarget.parentElement;
-                        const select = parent?.querySelector("select") as HTMLSelectElement | null;
-                        const notes = parent?.querySelector("textarea") as HTMLTextAreaElement | null;
-                        updateDelay(stop.id, select?.value || null, notes?.value || null);
-                      }}
-                    >
-                      Save delay
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="text-xs text-[color:var(--color-text-muted)]">Use “Update stop” to make changes.</div>
-                )}
-              </div>
-            ))}
-          </div>
-          <LegsPanel
-            load={selectedLoad}
-            drivers={showUnavailable ? [...availableDrivers, ...unavailableDrivers] : availableDrivers}
-            trucks={showUnavailable ? [...availableTrucks, ...unavailableTrucks] : availableTrucks}
-            trailers={showUnavailable ? [...availableTrailers, ...unavailableTrailers] : availableTrailers}
-            rateConMissing={rateConMissing}
-            canOverride={canOverride}
-            overrideReason={overrideReason}
-            onUpdated={() => {
-              if (selectedLoad) refreshSelectedLoad(selectedLoad.id);
-            }}
-          />
-        </Card>
-      ) : null}
     </AppShell>
   );
 }

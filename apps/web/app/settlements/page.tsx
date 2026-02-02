@@ -78,7 +78,7 @@ function SettlementsContent() {
       setGroups(settlementData.groups ?? []);
       setTotals(settlementData.totals ?? null);
       setWeeks(settlementData.weeks ?? []);
-      if (["ADMIN", "DISPATCHER", "BILLING"].includes(meData.user.role)) {
+      if (["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(meData.user.role)) {
         const driverData = await apiFetch<{ drivers: any[] }>("/assets/drivers");
         setDrivers(driverData.drivers);
       } else {
@@ -205,7 +205,7 @@ function SettlementsContent() {
                 <option value="none">Flat list</option>
               </Select>
             </FormField>
-            {userRole && ["ADMIN", "DISPATCHER", "BILLING"].includes(userRole) ? (
+            {userRole && ["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(userRole) ? (
               <FormField label="Driver" htmlFor="filterDriver">
                 <Select value={filters.driverId} onChange={(e) => setFilters({ ...filters, driverId: e.target.value })}>
                   <option value="">Driver</option>
@@ -241,7 +241,7 @@ function SettlementsContent() {
                   {groupItems.map((settlement: any) => (
                     <div
                       key={settlement.id}
-                      className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-white p-3"
+                      className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-white py-3 pl-5 pr-4"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
@@ -276,7 +276,10 @@ function SettlementsContent() {
             );})
           ) : settlements.length > 0 ? (
             settlements.map((settlement) => (
-              <div key={settlement.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-4">
+              <div
+                key={settlement.id}
+                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white py-4 pl-6 pr-4"
+              >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <div className="text-sm font-semibold text-ink">{settlement.periodLabel}</div>

@@ -10,6 +10,15 @@ const roleDefaults: Record<Role, Permission[]> = {
     Permission.LOAD_ASSIGN,
     Permission.STOP_EDIT,
     Permission.TASK_ASSIGN,
+    Permission.DOC_VERIFY,
+  ],
+  HEAD_DISPATCHER: [
+    Permission.LOAD_CREATE,
+    Permission.LOAD_EDIT,
+    Permission.LOAD_ASSIGN,
+    Permission.STOP_EDIT,
+    Permission.TASK_ASSIGN,
+    Permission.DOC_VERIFY,
   ],
   BILLING: [
     Permission.DOC_VERIFY,

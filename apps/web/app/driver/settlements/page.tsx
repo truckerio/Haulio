@@ -163,7 +163,7 @@ function DriverSettlementsContent() {
               key={settlement.id}
               type="button"
               onClick={() => openSettlement(settlement.id)}
-              className="w-full rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3 text-left text-sm transition hover:border-[color:var(--color-divider-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] focus-visible:ring-offset-2"
+              className="w-full rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 py-3 pl-6 pr-4 text-left text-sm transition hover:border-[color:var(--color-divider-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] focus-visible:ring-offset-2"
             >
               <div className="flex items-start justify-between gap-3">
                 <div>

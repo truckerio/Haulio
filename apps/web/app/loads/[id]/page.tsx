@@ -95,6 +95,13 @@ export default function LoadDetailsPage() {
   const tabParam = searchParams?.get("tab");
   const docTypeParam = searchParams?.get("docType");
 
+  useEffect(() => {
+    if (!user) return;
+    if (user.role === "DRIVER") {
+      router.replace("/driver");
+    }
+  }, [loadId, router, user]);
+
   const loadData = useCallback(async () => {
     if (!loadId) return;
     try {
@@ -351,8 +358,13 @@ export default function LoadDetailsPage() {
     }
   };
 
-  const canEditCharges = user?.role === "ADMIN" || user?.role === "DISPATCHER";
-  const canViewCharges = user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "BILLING";
+  const canEditCharges =
+    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+  const canViewCharges =
+    user?.role === "ADMIN" ||
+    user?.role === "DISPATCHER" ||
+    user?.role === "HEAD_DISPATCHER" ||
+    user?.role === "BILLING";
 
   const formatAmount = (cents: number) => (cents / 100).toFixed(2);
   const parseAmountToCents = (value: string) => {
@@ -476,9 +488,11 @@ export default function LoadDetailsPage() {
   const pingLng = latestPing?.lng ? Number(latestPing.lng) : null;
   const mapLink = pingLat !== null && pingLng !== null ? `https://www.google.com/maps?q=${pingLat},${pingLng}` : null;
 
-  const canVerify = user?.role === "ADMIN" || user?.role === "BILLING";
-  const canUpload = user?.role === "ADMIN" || user?.role === "DISPATCHER";
-  const canEditLoad = user?.role === "ADMIN" || user?.role === "DISPATCHER";
+  const canVerify = user?.role === "ADMIN" || user?.role === "BILLING" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+  const canUpload =
+    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+  const canEditLoad =
+    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
 
   const timelineItems = timeline.map((item) => ({
     id: item.id,
@@ -594,7 +608,11 @@ export default function LoadDetailsPage() {
   const pingStale = lastPingAt ? Date.now() - new Date(lastPingAt).getTime() > 15 * 60 * 1000 : true;
   const trackingState =
     tracking?.session?.status === "ON" || (lastPingAt && !pingStale) ? "ON" : tracking?.session?.status ?? "OFF";
-  const canStartTracking = user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "DRIVER";
+  const canStartTracking =
+    user?.role === "ADMIN" ||
+    user?.role === "DISPATCHER" ||
+    user?.role === "HEAD_DISPATCHER" ||
+    user?.role === "DRIVER";
 
   const formatStopLocation = (stop: any) => {
     if (!stop) return "-";
@@ -692,6 +710,17 @@ export default function LoadDetailsPage() {
     assignmentMissing,
   ]);
 
+  const resolvedNextAction = useMemo(() => {
+    if (!nextAction) return null;
+    if (
+      load?.id &&
+      (nextAction.label.toLowerCase().includes("dispatch") || nextAction.reason?.toLowerCase().includes("assign driver"))
+    ) {
+      return { ...nextAction, href: `/dispatch?loadId=${load.id}` };
+    }
+    return nextAction;
+  }, [nextAction, load?.id]);
+
   const dispatchBlockers = useMemo(() => {
     const items: Array<{ title: string; subtitle: string; ctaLabel: string; href: string; tone?: "warning" | "danger" | "info" }> = [];
     if (rateConMissing) {
@@ -786,8 +815,8 @@ export default function LoadDetailsPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {nextAction ? (
-              <Button onClick={() => router.push(nextAction.href)}>{nextAction.label}</Button>
+            {resolvedNextAction ? (
+              <Button onClick={() => router.push(resolvedNextAction.href)}>{resolvedNextAction.label}</Button>
             ) : null}
             <details className="relative">
               <summary className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-sm text-[color:var(--color-text-muted)]">
@@ -1208,12 +1237,12 @@ export default function LoadDetailsPage() {
           <div className="sticky top-6 space-y-4">
             <Card className="space-y-3">
               <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Next action</div>
-              {nextAction ? (
+              {resolvedNextAction ? (
                 <div className="space-y-2">
-                  <div className="text-sm font-semibold text-ink">{nextAction.label}</div>
-                  <div className="text-xs text-[color:var(--color-text-muted)]">{nextAction.reason}</div>
-                  <Button size="sm" onClick={() => router.push(nextAction.href)}>
-                    {nextAction.label}
+                  <div className="text-sm font-semibold text-ink">{resolvedNextAction.label}</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">{resolvedNextAction.reason}</div>
+                  <Button size="sm" onClick={() => router.push(resolvedNextAction.href)}>
+                    {resolvedNextAction.label}
                   </Button>
                 </div>
               ) : (

@@ -19,6 +19,7 @@ type Props = {
   loading: boolean;
   error?: string | null;
   onAssign: (driverId: string, truckId?: string | null) => void;
+  readOnly?: boolean;
 };
 
 const formatDeadhead = (miles?: number | null) => {
@@ -26,7 +27,7 @@ const formatDeadhead = (miles?: number | null) => {
   return `${Math.round(miles)} mi deadhead`;
 };
 
-export function SuggestedAssignments({ suggestions, loading, error, onAssign }: Props) {
+export function SuggestedAssignments({ suggestions, loading, error, onAssign, readOnly }: Props) {
   if (loading) {
     return (
       <div className="rounded-[var(--radius-card)] border border-dashed border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] p-3 text-xs text-[color:var(--color-text-muted)]">
@@ -51,22 +52,6 @@ export function SuggestedAssignments({ suggestions, loading, error, onAssign }: 
     );
   }
 
-  const confidenceRank: Record<string, number> = { high: 2, medium: 1, low: 0 };
-  const topSuggestion = suggestions[0];
-
-  const buildWhyNot = (suggestion: AssignmentSuggestion) => {
-    if (suggestion.warnings?.length) return suggestion.warnings[0];
-    const currentConf = confidenceRank[suggestion.fields?.locationConfidence ?? "low"] ?? 0;
-    const topConf = confidenceRank[topSuggestion?.fields?.locationConfidence ?? "low"] ?? 0;
-    if (currentConf < topConf) return "Lower confidence";
-    const currentDeadhead = suggestion.fields?.deadheadMiles ?? null;
-    const topDeadhead = topSuggestion?.fields?.deadheadMiles ?? null;
-    if (currentDeadhead !== null && topDeadhead !== null && currentDeadhead > topDeadhead) {
-      return "Longer deadhead";
-    }
-    return "Lower score";
-  };
-
   const buildConfidenceTitle = (suggestion: AssignmentSuggestion) => {
     if (suggestion.warnings?.length) {
       return `Confidence reduced: ${suggestion.warnings.join(" · ")}`;
@@ -74,58 +59,70 @@ export function SuggestedAssignments({ suggestions, loading, error, onAssign }: 
     return "Confidence based on location freshness and data availability";
   };
 
+  const fitLabel = (score: number) => {
+    if (score >= 75) return "Good fit";
+    if (score >= 40) return "Okay";
+    return "Low";
+  };
+
+  const fitTone = (score: number) => {
+    if (score >= 75) return "bg-[color:var(--color-success-soft)] text-[color:var(--color-success)]";
+    if (score >= 40) return "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]";
+    return "bg-[color:var(--color-danger-soft)] text-[color:var(--color-danger)]";
+  };
+
+  const confidenceDots = (confidence?: "high" | "medium" | "low") => {
+    if (confidence === "high") return "●●●";
+    if (confidence === "medium") return "●●○";
+    return "●○○";
+  };
+
+  const warningSummary = (warnings: string[]) => {
+    if (!warnings.length) return "Clear";
+    const parts: string[] = [];
+    if (warnings.some((warning) => warning.toLowerCase().includes("location"))) parts.push("location");
+    if (warnings.some((warning) => warning.toLowerCase().includes("hos"))) parts.push("HOS");
+    if (warnings.some((warning) => warning.toLowerCase().includes("deadhead"))) parts.push("distance");
+    const label = parts.length > 0 ? parts.join(", ") : "details";
+    return `Limited data (${label})`;
+  };
+
   return (
     <div className="space-y-3">
       {suggestions.map((suggestion, index) => {
         const deadhead = formatDeadhead(suggestion.fields?.deadheadMiles ?? null);
         const locationConfidence = suggestion.fields?.locationConfidence ?? "low";
-        const confidenceLabel = locationConfidence.charAt(0).toUpperCase() + locationConfidence.slice(1);
         return (
-          <div key={`${suggestion.driverId}-${suggestion.truckId ?? "none"}`} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3 shadow-[var(--shadow-subtle)]">
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-sm font-semibold text-ink">
+          <div
+            key={`${suggestion.driverId}-${suggestion.truckId ?? "none"}`}
+            className={`rounded-[var(--radius-card)] border bg-white px-3 py-2 shadow-[var(--shadow-subtle)] ${
+              index === 0 ? "border-[color:var(--color-accent-soft)] bg-[color:var(--color-bg-muted)]/60" : "border-[color:var(--color-divider)]"
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+              <div className="min-w-[140px] font-semibold text-ink">
                 {suggestion.driverName ?? "Driver"}
                 {suggestion.truckUnit ? ` · Truck ${suggestion.truckUnit}` : ""}
               </div>
-              <span className="rounded-full bg-[color:var(--color-bg-muted)] px-2 py-1 text-[11px] font-semibold text-[color:var(--color-text-muted)]">
-                Score {suggestion.score}
-              </span>
-            </div>
-            <div className="mt-1 flex flex-wrap gap-2 text-xs text-[color:var(--color-text-muted)]">
-              {deadhead ? <span>{deadhead}</span> : null}
-              <span title={buildConfidenceTitle(suggestion)}>Confidence: {confidenceLabel}</span>
-              {index > 0 ? (
-                <span title={buildWhyNot(suggestion)} className="underline decoration-dotted">
-                  Why not #1?
+              <div className="flex items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
+                <span className={`rounded-full px-2 py-1 font-semibold ${fitTone(suggestion.score)}`}>{fitLabel(suggestion.score)}</span>
+                <span title={buildConfidenceTitle(suggestion)} className="tracking-[0.2em] text-[10px]">
+                  {confidenceDots(locationConfidence)}
                 </span>
-              ) : null}
-            </div>
-            {suggestion.reasons.length ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {suggestion.reasons.map((reason) => (
-                  <span
-                    key={reason}
-                    className="rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-1 text-[11px] text-[color:var(--color-text-muted)]"
-                  >
-                    {reason}
-                  </span>
-                ))}
+                {deadhead ? <span>{deadhead}</span> : null}
               </div>
-            ) : null}
-            {suggestion.warnings.length ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {suggestion.warnings.map((warning) => (
-                  <span
-                    key={warning}
-                    className="rounded-full border border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] px-2 py-1 text-[11px] text-[color:var(--color-text-muted)]"
-                  >
-                    {warning}
-                  </span>
-                ))}
+              <div
+                className="flex-1 text-right text-xs text-[color:var(--color-text-muted)]"
+                title={suggestion.warnings?.length ? suggestion.warnings.join(" · ") : undefined}
+              >
+                {warningSummary(suggestion.warnings ?? [])}
               </div>
-            ) : null}
-            <div className="mt-3 flex justify-end">
-              <Button size="sm" onClick={() => onAssign(suggestion.driverId, suggestion.truckId ?? null)}>
+              <Button
+                size="sm"
+                onClick={() => onAssign(suggestion.driverId, suggestion.truckId ?? null)}
+                disabled={readOnly}
+                title={readOnly ? "Read-only in History view" : undefined}
+              >
                 Assign
               </Button>
             </div>

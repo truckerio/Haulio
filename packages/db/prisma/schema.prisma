@@ -10,6 +10,7 @@ datasource db {
 enum Role {
   ADMIN
   DISPATCHER
+  HEAD_DISPATCHER
   BILLING
   DRIVER
 }
@@ -618,6 +619,7 @@ model Load {
   plannedAt        DateTime?
   deliveredAt      DateTime?
   podVerifiedAt    DateTime?
+  completedAt      DateTime?  @db.Timestamptz(6)
   lockedAt         DateTime?
   createdById      String?
   deletedAt        DateTime?
@@ -652,6 +654,8 @@ model Load {
   @@unique([orgId, tripNumber])
   @@index([orgId, status])
   @@index([orgId, status, createdAt])
+  @@index([orgId, completedAt])
+  @@index([orgId, status, completedAt])
   @@index([orgId, operatingEntityId])
   @@index([orgId, deletedAt])
 }

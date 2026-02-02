@@ -5,8 +5,9 @@ import { apiFetch } from "@/lib/api";
 
 export type CurrentUser = {
   id: string;
-  role: "ADMIN" | "DISPATCHER" | "BILLING" | "DRIVER" | string;
+  role: "ADMIN" | "DISPATCHER" | "HEAD_DISPATCHER" | "BILLING" | "DRIVER" | string;
   permissions?: string[];
+  canSeeAllTeams?: boolean;
   name?: string | null;
   email?: string | null;
 };

@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libstdc++6 \
   lsb-release \
   xdg-utils \
+  chromium \
   wget \
   && rm -rf /var/lib/apt/lists/*
 
@@ -48,6 +49,8 @@ RUN corepack enable
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 ENV DATABASE_URL="postgresql://postgres:postgres@localhost:5432/truckerio"
+ENV PUPPETEER_SKIP_DOWNLOAD="1"
+ENV PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium"
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/package.json

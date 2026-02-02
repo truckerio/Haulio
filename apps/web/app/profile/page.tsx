@@ -89,7 +89,7 @@ export default function ProfilePage() {
 
   return (
     <AppShell title="Profile" subtitle="Your account details">
-      <RouteGuard allowedRoles={["ADMIN", "DISPATCHER", "BILLING"]}>
+      <RouteGuard allowedRoles={["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"]}>
         <div className="space-y-6">
           <Card className="space-y-3">
             <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Employee profile</div>

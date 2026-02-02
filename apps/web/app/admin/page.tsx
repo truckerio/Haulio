@@ -26,6 +26,7 @@ const DRIVER_STATUS_OPTIONS = ["AVAILABLE", "ON_LOAD", "UNAVAILABLE"] as const;
 const TRUCK_STATUS_OPTIONS = ["AVAILABLE", "ASSIGNED", "MAINTENANCE", "OUT_OF_SERVICE"] as const;
 const TRAILER_STATUS_OPTIONS = ["AVAILABLE", "ASSIGNED", "MAINTENANCE", "OUT_OF_SERVICE"] as const;
 const TRAILER_TYPE_OPTIONS = ["DRY_VAN", "REEFER", "FLATBED", "OTHER"] as const;
+const USER_ROLE_OPTIONS = ["DISPATCHER", "HEAD_DISPATCHER", "BILLING"] as const;
 
 export default function AdminPage() {
   const { user } = useUser();
@@ -119,6 +120,8 @@ export default function AdminPage() {
   const [wipeLoads, setWipeLoads] = useState(false);
   const [employeeImportResult, setEmployeeImportResult] = useState<any | null>(null);
   const [employeeInvites, setEmployeeInvites] = useState<any[]>([]);
+  const [roleSavingId, setRoleSavingId] = useState<string | null>(null);
+  const [roleError, setRoleError] = useState<string | null>(null);
 
   const loadSettings = async () => {
     try {
@@ -251,20 +254,63 @@ export default function AdminPage() {
 
   const updateSettings = async () => {
     if (!settingsDraft) return;
+    const toNumber = (value: any, fallback: number) => {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : fallback;
+    };
+    const toOptionalNumber = (value: any) => {
+      if (value === undefined || value === null || value === "") return undefined;
+      const num = Number(value);
+      return Number.isFinite(num) ? num : undefined;
+    };
+    const currency =
+      settingsDraft.currency && String(settingsDraft.currency).trim().length === 3
+        ? String(settingsDraft.currency).toUpperCase()
+        : undefined;
+    const operatingMode = settingsDraft.operatingMode ? String(settingsDraft.operatingMode) : undefined;
+    const trackingPreference = settingsDraft.trackingPreference ? String(settingsDraft.trackingPreference) : undefined;
+    const settlementSchedule = settingsDraft.settlementSchedule ? String(settingsDraft.settlementSchedule) : undefined;
+    const settlementTemplate = settingsDraft.settlementTemplate
+      ? {
+          includeLinehaul: Boolean(settingsDraft.settlementTemplate.includeLinehaul),
+          includeFuelSurcharge: Boolean(settingsDraft.settlementTemplate.includeFuelSurcharge),
+          includeAccessorials: Boolean(settingsDraft.settlementTemplate.includeAccessorials),
+        }
+      : undefined;
     const payload = {
-      ...settingsDraft,
-      nextInvoiceNumber: Number(settingsDraft.nextInvoiceNumber || 0),
-      podMinPages: Number(settingsDraft.podMinPages || 1),
-      collectPodDueMinutes: Number(settingsDraft.collectPodDueMinutes || 0),
-      missingPodAfterMinutes: Number(settingsDraft.missingPodAfterMinutes || 0),
-      reminderFrequencyMinutes: Number(settingsDraft.reminderFrequencyMinutes || 0),
-      freeStorageMinutes: Number(settingsDraft.freeStorageMinutes || 0),
-      storageRatePerDay: Number(settingsDraft.storageRatePerDay || 0),
-      pickupFreeDetentionMinutes: Number(settingsDraft.pickupFreeDetentionMinutes || 0),
-      deliveryFreeDetentionMinutes: Number(settingsDraft.deliveryFreeDetentionMinutes || 0),
-      detentionRatePerHour: settingsDraft.detentionRatePerHour ? Number(settingsDraft.detentionRatePerHour) : undefined,
-      driverRatePerMile: Number(settingsDraft.driverRatePerMile || 0),
-      invoiceTermsDays: settingsDraft.invoiceTermsDays ? Number(settingsDraft.invoiceTermsDays) : undefined,
+      companyDisplayName: String(settingsDraft.companyDisplayName ?? ""),
+      remitToAddress: String(settingsDraft.remitToAddress ?? ""),
+      currency,
+      operatingMode,
+      invoiceTerms: String(settingsDraft.invoiceTerms ?? ""),
+      invoiceTermsDays: toOptionalNumber(settingsDraft.invoiceTermsDays),
+      invoiceFooter: String(settingsDraft.invoiceFooter ?? ""),
+      invoicePrefix: String(settingsDraft.invoicePrefix ?? ""),
+      nextInvoiceNumber: toNumber(settingsDraft.nextInvoiceNumber, 0),
+      podRequireSignature: Boolean(settingsDraft.podRequireSignature),
+      podRequirePrintedName: Boolean(settingsDraft.podRequirePrintedName),
+      podRequireDeliveryDate: Boolean(settingsDraft.podRequireDeliveryDate),
+      podMinPages: toNumber(settingsDraft.podMinPages, 1),
+      requiredDocs: Array.isArray(settingsDraft.requiredDocs) ? settingsDraft.requiredDocs : [],
+      requiredDriverDocs: Array.isArray(settingsDraft.requiredDriverDocs) ? settingsDraft.requiredDriverDocs : [],
+      collectPodDueMinutes: toNumber(settingsDraft.collectPodDueMinutes, 0),
+      missingPodAfterMinutes: toNumber(settingsDraft.missingPodAfterMinutes, 0),
+      reminderFrequencyMinutes: toNumber(settingsDraft.reminderFrequencyMinutes, 0),
+      requireRateConBeforeDispatch: Boolean(settingsDraft.requireRateConBeforeDispatch),
+      trackingPreference,
+      settlementSchedule,
+      settlementTemplate,
+      timezone: settingsDraft.timezone ? String(settingsDraft.timezone) : undefined,
+      freeStorageMinutes: toNumber(settingsDraft.freeStorageMinutes, 0),
+      storageRatePerDay: String(settingsDraft.storageRatePerDay ?? "0"),
+      pickupFreeDetentionMinutes: toNumber(settingsDraft.pickupFreeDetentionMinutes, 0),
+      deliveryFreeDetentionMinutes: toNumber(settingsDraft.deliveryFreeDetentionMinutes, 0),
+      detentionRatePerHour:
+        settingsDraft.detentionRatePerHour !== undefined && settingsDraft.detentionRatePerHour !== null
+          ? String(settingsDraft.detentionRatePerHour)
+          : undefined,
+      driverRatePerMile: String(settingsDraft.driverRatePerMile ?? "0"),
+      logoUrl: settingsDraft.logoUrl ? String(settingsDraft.logoUrl) : undefined,
     };
     await apiFetch("/admin/settings", {
       method: "PUT",
@@ -351,6 +397,23 @@ export default function AdminPage() {
       setTeamsError((err as Error).message || "Failed to remove team member.");
     } finally {
       setTeamsSaving(false);
+    }
+  };
+
+  const updateUserRole = async (userId: string, role: string) => {
+    setRoleError(null);
+    setRoleSavingId(userId);
+    try {
+      const data = await apiFetch<{ user: any }>(`/admin/members/${userId}/role`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role }),
+      });
+      setUsers((prev) => prev.map((item) => (item.id === userId ? { ...item, role: data.user.role } : item)));
+    } catch (err) {
+      setRoleError((err as Error).message || "Failed to update role.");
+    } finally {
+      setRoleSavingId(null);
     }
   };
 
@@ -1739,6 +1802,7 @@ export default function AdminPage() {
 
             <Card>
               <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Users</div>
+              {roleError ? <ErrorBanner message={roleError} /> : null}
               <div className="mt-3 grid gap-2">
                 {users.map((user) => (
                   <div key={user.id} className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/60 px-4 py-2">
@@ -1753,6 +1817,23 @@ export default function AdminPage() {
                     </div>
                     <div className="flex flex-col items-end gap-2 text-xs text-[color:var(--color-text-muted)]">
                       <div>{user.email}</div>
+                      {USER_ROLE_OPTIONS.includes(user.role) ? (
+                        <Select
+                          value={user.role}
+                          onChange={(e) => updateUserRole(user.id, e.target.value)}
+                          disabled={roleSavingId === user.id}
+                        >
+                          {USER_ROLE_OPTIONS.map((role) => (
+                            <option key={role} value={role}>
+                              {role === "HEAD_DISPATCHER" ? "Head Dispatcher" : role}
+                            </option>
+                          ))}
+                        </Select>
+                      ) : (
+                        <div className="text-xs text-[color:var(--color-text-muted)]">
+                          {user.role === "ADMIN" ? "Admin" : user.role}
+                        </div>
+                      )}
                       <div className="flex flex-wrap gap-2">
                         <Button variant="ghost" size="sm" onClick={() => sendInvite(user.id)}>
                           Copy invite
