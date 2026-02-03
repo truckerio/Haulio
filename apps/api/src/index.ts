@@ -890,6 +890,10 @@ app.use((req, _res, next) => {
   next();
 });
 
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "haulio-api", health: "/health" });
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });

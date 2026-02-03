@@ -20,7 +20,8 @@ import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
 import { formatDocStatusLabel, formatInvoiceStatusLabel, formatStatusLabel } from "@/lib/status-format";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:4000";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE || "http://localhost:4000";
 const DOC_TYPES = ["POD", "RATECON", "BOL", "LUMPER", "SCALE", "DETENTION", "OTHER"] as const;
 const CHARGE_TYPES = ["LINEHAUL", "LUMPER", "DETENTION", "LAYOVER", "OTHER", "ADJUSTMENT"] as const;
 const CHARGE_LABELS: Record<string, string> = {
