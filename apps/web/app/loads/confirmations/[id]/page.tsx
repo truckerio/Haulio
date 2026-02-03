@@ -9,9 +9,7 @@ import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api";
 import { FormField } from "@/components/ui/form-field";
 import { Select } from "@/components/ui/select";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE || "http://localhost:4000";
+import { API_BASE } from "@/lib/apiBase";
 
 const STATUS_OPTIONS = [
   "DRAFT",

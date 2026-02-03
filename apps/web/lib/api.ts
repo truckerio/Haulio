@@ -1,27 +1,10 @@
-const ENV_API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE || "http://localhost:4000";
+import { API_BASE } from "@/lib/apiBase";
+
 const DEV_ERRORS = process.env.NEXT_PUBLIC_DEV_ERRORS === "true" || process.env.NODE_ENV !== "production";
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
 
-function getLocalApiBase() {
-  if (typeof window === "undefined") return null;
-  const host = window.location.hostname;
-  if (host === "localhost") {
-    return `${window.location.protocol}//127.0.0.1:4000`;
-  }
-  if (host === "127.0.0.1") {
-    return `${window.location.protocol}//${host}:4000`;
-  }
-  return null;
-}
-
 export function getApiBase() {
-  if (ENV_API_BASE.startsWith("/")) {
-    return ENV_API_BASE.replace(/\/$/, "");
-  }
-  const localBase = getLocalApiBase();
-  const base = localBase ?? ENV_API_BASE;
-  return base.replace(/\/$/, "");
+  return API_BASE;
 }
 
 export function getCsrfToken() {
@@ -51,21 +34,6 @@ async function refreshCsrfToken() {
 }
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}, retryOnCsrf = true): Promise<T> {
-  if (typeof window !== "undefined") {
-    try {
-      const uiHost = window.location.hostname;
-      const apiHost = new URL(getApiBase()).hostname;
-      const isLocal = (host: string) => host === "localhost" || host === "127.0.0.1";
-      if (isLocal(uiHost) && isLocal(apiHost) && uiHost !== apiHost) {
-        const url = new URL(window.location.href);
-        url.hostname = apiHost;
-        window.location.replace(url.toString());
-        return new Promise<T>(() => {});
-      }
-    } catch {
-      // ignore host checks if API_BASE is invalid
-    }
-  }
   const headers = new Headers(options.headers || {});
   if (options.method && options.method !== "GET") {
     const csrf = getCsrfToken();
