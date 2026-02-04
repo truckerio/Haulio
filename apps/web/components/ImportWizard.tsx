@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
+import { createId } from "@/lib/uuid";
 
 type ImportType = "drivers" | "employees" | "trucks" | "trailers" | "tms_load_sheet";
 
@@ -56,7 +57,7 @@ export function ImportWizard({
   const [result, setResult] = useState<CommitResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [importId] = useState(() => crypto.randomUUID());
+  const [importId] = useState(() => createId());
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
 
   const hasValidRows = preview ? preview.summary.valid > 0 : false;

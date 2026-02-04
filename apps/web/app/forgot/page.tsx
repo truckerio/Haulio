@@ -29,7 +29,7 @@ export default function ForgotPasswordPage() {
           body: JSON.stringify({ email }),
         }
       );
-      setStatus(data.message ?? "If an account exists, a reset link is available.");
+      setStatus(data.message ?? "If an account exists, a reset link will be sent to the email address.");
       if (data.resetUrl) {
         setResetUrl(data.resetUrl);
       }
@@ -46,14 +46,14 @@ export default function ForgotPasswordPage() {
         <Card className="space-y-4">
           <div>
             <h2 className="text-xl font-semibold">Forgot password</h2>
-            <p className="text-sm text-[color:var(--color-text-muted)]">Enter your email to get a reset link.</p>
+            <p className="text-sm text-[color:var(--color-text-muted)]">Enter your email to receive a reset link.</p>
           </div>
           <form className="space-y-3" onSubmit={handleSubmit}>
             <FormField label="Email" htmlFor="forgotEmail">
               <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" />
             </FormField>
             <Button type="submit" size="lg" className="w-full" disabled={loading}>
-              {loading ? "Sending..." : "Send reset link"}
+              {loading ? "Sending..." : "Send reset email"}
             </Button>
           </form>
           {status ? <div className="text-sm text-[color:var(--color-text-muted)]">{status}</div> : null}

@@ -1,0 +1,2 @@
+Load,Trip,Status,Customer,Cust Ref,Unit,Trailer,As Wgt,Total Rev,PU Date F,PU Time F,PU Time T,Shipper,Ship City,Ship St,Del Date F,Del Time T,Consignee,Cons City,Cons St,Sales,Drop Name,Load Notes (Shipper),Load Notes (Consignee),Inv Date,Del Date T,Type
+LD-1001,TRIP-9001,Planned,Acme Foods,PO-7788,TRK-101,TRL-201,42000,2500,01/20/2026,08:00,10:00,Acme DC,Chicago,IL,01/21/2026,16:00,Fresh Mart,Dallas,TX,A. Lee,Store 14,Handle with care,Deliver after 3 PM,,01/21/2026,Van

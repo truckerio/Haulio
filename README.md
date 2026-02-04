@@ -114,6 +114,21 @@ Files are stored locally in `uploads/`:
 - `uploads/invoices`
 - `uploads/packets`
 
+## Email (password resets)
+
+Configure SMTP to send real password reset emails:
+
+```bash
+SMTP_HOST="smtp.yourprovider.com"
+SMTP_PORT=587
+SMTP_SECURE="false"
+SMTP_USER="smtp-user"
+SMTP_PASS="smtp-pass"
+EMAIL_FROM="no-reply@yourdomain.com"
+EMAIL_REPLY_TO=""
+RETURN_RESET_URL="false"
+```
+
 ## Demo users
 
 - admin@demo.com / password123

@@ -53,6 +53,7 @@ import {
 import { createSession, setSessionCookie, clearSessionCookie, requireAuth, destroySession } from "./lib/auth";
 import { createCsrfToken, setCsrfCookie, requireCsrf } from "./lib/csrf";
 import { requireRole } from "./lib/rbac";
+import { isEmailConfigured, sendPasswordResetEmail } from "./lib/email";
 import {
   upload,
   saveDocumentFile,
@@ -1257,9 +1258,11 @@ app.post("/auth/forgot", async (req, res) => {
     res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
     return;
   }
+  const allowResetUrl =
+    (process.env.RETURN_RESET_URL || "").toLowerCase() === "true" || process.env.NODE_ENV !== "production";
   const users = await prisma.user.findMany({ where: { email: parsed.data.email } });
   if (users.length === 0) {
-    res.json({ message: "If an account exists, a reset link is available." });
+    res.json({ message: "If an account exists, a reset link will be sent to the email address." });
     return;
   }
   if (users.length > 1) {
@@ -1284,7 +1287,27 @@ app.post("/auth/forgot", async (req, res) => {
   });
   const webOrigin = process.env.WEB_ORIGIN || "http://localhost:3000";
   const resetUrl = `${webOrigin}/reset/${token}`;
-  res.json({ message: "Reset link generated.", resetUrl });
+  let emailSent = false;
+  if (isEmailConfigured()) {
+    try {
+      await sendPasswordResetEmail({
+        to: user.email,
+        resetUrl,
+        expiresInMinutes: RESET_TOKEN_TTL_MINUTES,
+      });
+      emailSent = true;
+    } catch (error) {
+      console.error("Failed to send password reset email", error);
+    }
+  }
+
+  const response: { message: string; resetUrl?: string } = {
+    message: "If an account exists, a reset link will be sent to the email address.",
+  };
+  if (!emailSent && allowResetUrl) {
+    response.resetUrl = resetUrl;
+  }
+  res.json(response);
 });
 
 app.post("/auth/reset", async (req, res) => {

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { StatusChip } from "@/components/ui/status-chip";
 import { apiFetch } from "@/lib/api";
+import { createId } from "@/lib/uuid";
 import { FormField } from "@/components/ui/form-field";
 import { Textarea } from "@/components/ui/textarea";
 import type { DocType } from "@truckerio/shared";
@@ -553,7 +554,7 @@ export default function DriverPage() {
 
     if (!navigator.onLine) {
       const queuedItem: QueuedUpload = {
-        id: crypto.randomUUID(),
+        id: createId(),
         loadId: load.id,
         type,
         fileName: processed.name,
@@ -578,7 +579,7 @@ export default function DriverPage() {
       await loadData();
     } catch (error) {
       const queuedItem: QueuedUpload = {
-        id: crypto.randomUUID(),
+        id: createId(),
         loadId: load.id,
         type,
         fileName: processed.name,
