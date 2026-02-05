@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -27,8 +28,16 @@ const TRUCK_STATUS_OPTIONS = ["AVAILABLE", "ASSIGNED", "MAINTENANCE", "OUT_OF_SE
 const TRAILER_STATUS_OPTIONS = ["AVAILABLE", "ASSIGNED", "MAINTENANCE", "OUT_OF_SERVICE"] as const;
 const TRAILER_TYPE_OPTIONS = ["DRY_VAN", "REEFER", "FLATBED", "OTHER"] as const;
 const USER_ROLE_OPTIONS = ["DISPATCHER", "HEAD_DISPATCHER", "BILLING"] as const;
+const EMPLOYEE_ROLE_OPTIONS = [
+  { value: "ADMIN", label: "Admin" },
+  { value: "HEAD_DISPATCHER", label: "Head Dispatcher" },
+  { value: "DISPATCHER", label: "Dispatcher" },
+  { value: "BILLING", label: "Billing" },
+] as const;
 
 export default function AdminPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { user } = useUser();
   const canAccess = Boolean(user && user.role === "ADMIN");
   const [settings, setSettings] = useState<any | null>(null);
@@ -92,6 +101,15 @@ export default function AdminPage() {
     payRatePerMile: "",
     password: "",
   });
+  const [employeeForm, setEmployeeForm] = useState({
+    email: "",
+    name: "",
+    role: "DISPATCHER",
+    password: "",
+  });
+  const [employeeSaving, setEmployeeSaving] = useState(false);
+  const [employeeError, setEmployeeError] = useState<string | null>(null);
+  const [employeeInviteUrl, setEmployeeInviteUrl] = useState<string | null>(null);
   const [truckForm, setTruckForm] = useState({
     unit: "",
     vin: "",
@@ -122,6 +140,20 @@ export default function AdminPage() {
   const [employeeInvites, setEmployeeInvites] = useState<any[]>([]);
   const [roleSavingId, setRoleSavingId] = useState<string | null>(null);
   const [roleError, setRoleError] = useState<string | null>(null);
+
+  const viewParam = searchParams.get("view");
+  const viewMode: "settings" | "classic" = viewParam === "classic" ? "classic" : "settings";
+
+  const setViewMode = (mode: "settings" | "classic") => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (mode === "classic") {
+      params.set("view", "classic");
+    } else {
+      params.delete("view");
+    }
+    const next = params.toString();
+    router.push(next ? `/admin?${next}` : "/admin");
+  };
 
   const loadSettings = async () => {
     try {
@@ -468,6 +500,41 @@ export default function AdminPage() {
     }
   };
 
+  const createEmployee = async (copyInvite: boolean) => {
+    setEmployeeSaving(true);
+    setEmployeeError(null);
+    setEmployeeInviteUrl(null);
+    try {
+      const data = await apiFetch<{ user: any }>("/admin/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(employeeForm),
+      });
+      if (copyInvite) {
+        const inviteData = await apiFetch<{ invites: any[] }>("/users/invite-bulk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userIds: [data.user.id] }),
+        });
+        const inviteUrl = inviteData.invites?.[0]?.inviteUrl;
+        if (inviteUrl) {
+          setEmployeeInviteUrl(inviteUrl);
+          try {
+            await navigator.clipboard.writeText(inviteUrl);
+          } catch (err) {
+            // Clipboard not available; still show the invite URL.
+          }
+        }
+      }
+      setEmployeeForm({ email: "", name: "", role: "DISPATCHER", password: "" });
+      loadData();
+    } catch (err) {
+      setEmployeeError((err as Error).message || "Failed to create employee.");
+    } finally {
+      setEmployeeSaving(false);
+    }
+  };
+
   const toggleUserStatus = async (userId: string, isActive: boolean) => {
     if (!window.confirm(`${isActive ? "Deactivate" : "Reactivate"} this account?`)) return;
     const endpoint = isActive ? `/admin/users/${userId}/deactivate` : `/admin/users/${userId}/reactivate`;
@@ -731,8 +798,1151 @@ export default function AdminPage() {
     <AppShell title="Admin Settings" subtitle="Users, roles, automation thresholds">
       <RouteGuard allowedRoles={["ADMIN"]}>
       <div className="space-y-6">
-        {error ? <ErrorBanner message={error} /> : null}
-        <details open className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Admin</div>
+            <div className="text-2xl font-semibold text-ink">Settings</div>
+            <div className="text-sm text-[color:var(--color-text-muted)]">Manage company defaults, people, and integrations.</div>
+          </div>
+          {viewMode === "classic" ? (
+            <Button variant="secondary" onClick={() => setViewMode("settings")}>
+              Switch to settings view
+            </Button>
+          ) : (
+            <Button variant="secondary" onClick={() => setViewMode("classic")}>
+              Back to classic admin
+            </Button>
+          )}
+        </div>
+
+        {viewMode === "settings" ? (
+          <div className="grid gap-6 lg:grid-cols-[220px,1fr]">
+            <aside className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 p-4 text-sm text-[color:var(--color-text-muted)] lg:sticky lg:top-24 lg:self-start">
+              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Sections</div>
+              <nav className="mt-3 grid gap-2">
+                <a className="font-semibold text-ink hover:underline" href="#company">Company</a>
+                <a className="font-semibold text-ink hover:underline" href="#documents">Documents</a>
+                <a className="font-semibold text-ink hover:underline" href="#automation">Automation & Integrations</a>
+                <a className="font-semibold text-ink hover:underline" href="#fleet">Fleet</a>
+                <a className="font-semibold text-ink hover:underline" href="#people">Permissions & People</a>
+              </nav>
+            </aside>
+            <div className="space-y-6">
+              {error ? <ErrorBanner message={error} /> : null}
+              <details open className="space-y-4" id="company">
+                <summary className="cursor-pointer list-none rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3 text-sm font-semibold text-ink">
+                  Company
+                  <div className="text-xs text-[color:var(--color-text-muted)]">Identity, billing, and operating entities.</div>
+                </summary>
+                <div className="space-y-4">
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Company</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Company display name" htmlFor="companyDisplayName">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.companyDisplayName ?? ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, companyDisplayName: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Invoice prefix" htmlFor="invoicePrefix">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.invoicePrefix ?? ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, invoicePrefix: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Next invoice number" htmlFor="nextInvoiceNumber">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.nextInvoiceNumber ? settingsDraft.nextInvoiceNumber : ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, nextInvoiceNumber: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Invoice terms" htmlFor="invoiceTerms">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.invoiceTerms ?? ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, invoiceTerms: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Invoice terms days" htmlFor="invoiceTermsDays">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.invoiceTermsDays ?? ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, invoiceTermsDays: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Invoice remit-to name" htmlFor="invoiceRemitToName">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.invoiceRemitToName ?? ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, invoiceRemitToName: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Invoice remit-to address" htmlFor="invoiceRemitToAddress">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.invoiceRemitToAddress ?? ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, invoiceRemitToAddress: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={saveSettings}>Save settings</Button>
+                      <Button variant="secondary" onClick={() => setSettingsDraft(settings)}>
+                        Reset changes
+                      </Button>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Numbering</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Load number prefix" htmlFor="loadPrefix">
+                        <Input
+                          placeholder=""
+                          value={sequenceDraft?.loadPrefix ?? ""}
+                          onChange={(e) => setSequenceDraft({ ...sequenceDraft, loadPrefix: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Next load number" htmlFor="nextLoadNumber">
+                        <Input
+                          placeholder=""
+                          value={sequenceDraft?.nextLoadNumber ? sequenceDraft.nextLoadNumber : ""}
+                          onChange={(e) => setSequenceDraft({ ...sequenceDraft, nextLoadNumber: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={saveSequences} disabled={sequenceSaving}>
+                        {sequenceSaving ? "Saving..." : "Save numbering"}
+                      </Button>
+                      {sequenceError ? <div className="text-sm text-[color:var(--color-danger)]">{sequenceError}</div> : null}
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Operating entities</div>
+                    <div className="grid gap-3">
+                      {operatingEntities.map((entity) => (
+                        <div key={entity.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 p-4">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <div className="text-lg font-semibold">{entity.name}</div>
+                              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
+                                {entity.type} {entity.isDefault ? "· Default" : ""}
+                              </div>
+                              <div className="text-sm text-[color:var(--color-text-muted)]">{entity.addressLine1 ?? entity.remitToAddressLine1 ?? "-"}</div>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button size="sm" variant="secondary" onClick={() => editOperatingEntity(entity)}>
+                                Edit
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={entity.isDefault}
+                                onClick={() => makeDefaultEntity(entity.id)}
+                              >
+                                Make default
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {operatingEntities.length === 0 ? <EmptyState title="No operating entities yet." /> : null}
+                    </div>
+
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Entity name" htmlFor="operatingEntityName" required>
+                        <Input
+                          placeholder=""
+                          value={operatingForm.name}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, name: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Entity type" htmlFor="operatingEntityType">
+                        <Select
+                          value={operatingForm.type}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, type: e.target.value })}
+                        >
+                          <option value="">Select type</option>
+                          <option value="CARRIER">Carrier</option>
+                          <option value="BROKER">Broker</option>
+                        </Select>
+                      </FormField>
+                      <FormField label="Address line 1" htmlFor="operatingAddressLine1">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.addressLine1}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, addressLine1: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Address line 2" htmlFor="operatingAddressLine2">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.addressLine2}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, addressLine2: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="City" htmlFor="operatingCity">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.city}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, city: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="State" htmlFor="operatingState">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.state}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, state: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Postal code" htmlFor="operatingZip">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.zip}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, zip: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Phone" htmlFor="operatingPhone">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.phone}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, phone: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Email" htmlFor="operatingEmail">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.email}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, email: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="MC number" htmlFor="operatingMcNumber">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.mcNumber}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, mcNumber: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="DOT number" htmlFor="operatingDotNumber">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.dotNumber}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, dotNumber: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Remit-to name" htmlFor="operatingRemitToName">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.remitToName}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, remitToName: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Remit-to address" htmlFor="operatingRemitToAddress">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.remitToAddressLine1}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, remitToAddressLine1: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Remit-to city" htmlFor="operatingRemitToCity">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.remitToCity}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, remitToCity: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Remit-to state" htmlFor="operatingRemitToState">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.remitToState}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, remitToState: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Remit-to postal code" htmlFor="operatingRemitToZip">
+                        <Input
+                          placeholder=""
+                          value={operatingForm.remitToZip}
+                          onChange={(e) => setOperatingForm({ ...operatingForm, remitToZip: e.target.value })}
+                        />
+                      </FormField>
+                      <CheckboxField
+                        id="operatingDefault"
+                        label="Default entity"
+                        checked={operatingForm.isDefault}
+                        onChange={(e) => setOperatingForm({ ...operatingForm, isDefault: e.target.checked })}
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={saveOperatingEntity}>
+                        {editingOperatingId ? "Update entity" : "Add entity"}
+                      </Button>
+                      {editingOperatingId ? (
+                        <Button variant="secondary" onClick={resetOperatingForm}>
+                          Cancel edit
+                        </Button>
+                      ) : null}
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Customers</div>
+                    <div className="grid gap-2">
+                      {customers.map((customer) => (
+                        <div key={customer.id} className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/60 px-4 py-2">
+                          <div>
+                            <div className="font-semibold">{customer.name}</div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {customer.billingEmail ?? "No email"} · Terms {customer.termsDays ?? "-"}
+                            </div>
+                          </div>
+                          <Button variant="ghost" onClick={() => {
+                            setEditingCustomerId(customer.id);
+                            setCustomerForm({
+                              name: customer.name ?? "",
+                              billingEmail: customer.billingEmail ?? "",
+                              billingPhone: customer.billingPhone ?? "",
+                              remitToAddress: customer.remitToAddress ?? "",
+                              termsDays: customer.termsDays ? String(customer.termsDays) : "",
+                            });
+                          }}>
+                            Edit
+                          </Button>
+                        </div>
+                      ))}
+                      {customers.length === 0 ? <EmptyState title="No customers yet." /> : null}
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Customer name" htmlFor="customerName">
+                        <Input
+                          placeholder=""
+                          value={customerForm.name}
+                          onChange={(e) => setCustomerForm({ ...customerForm, name: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Billing email" htmlFor="customerBillingEmail">
+                        <Input
+                          placeholder=""
+                          value={customerForm.billingEmail}
+                          onChange={(e) => setCustomerForm({ ...customerForm, billingEmail: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Billing phone" htmlFor="customerBillingPhone">
+                        <Input
+                          placeholder=""
+                          value={customerForm.billingPhone}
+                          onChange={(e) => setCustomerForm({ ...customerForm, billingPhone: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Remit-to address" htmlFor="customerRemitToAddress">
+                        <Input
+                          placeholder=""
+                          value={customerForm.remitToAddress}
+                          onChange={(e) => setCustomerForm({ ...customerForm, remitToAddress: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Terms days" htmlFor="customerTermsDays">
+                        <Input
+                          placeholder=""
+                          value={customerForm.termsDays}
+                          onChange={(e) => setCustomerForm({ ...customerForm, termsDays: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={saveCustomer}>{editingCustomerId ? "Update customer" : "Add customer"}</Button>
+                      {editingCustomerId ? (
+                        <Button variant="secondary" onClick={() => {
+                          setEditingCustomerId(null);
+                          setCustomerForm({ name: "", billingEmail: "", billingPhone: "", remitToAddress: "", termsDays: "" });
+                        }}>
+                          Cancel edit
+                        </Button>
+                      ) : null}
+                    </div>
+                  </Card>
+                </div>
+              </details>
+
+              <details className="space-y-4" id="documents">
+                <summary className="cursor-pointer list-none rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3 text-sm font-semibold text-ink">
+                  Documents
+                  <div className="text-xs text-[color:var(--color-text-muted)]">POD rules and required document lists.</div>
+                </summary>
+                <div className="space-y-4">
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">POD checklist</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <CheckboxField
+                        id="podRequireSignature"
+                        label="Require signature"
+                        checked={Boolean(settingsDraft?.podRequireSignature)}
+                        onChange={(e) => setSettingsDraft({ ...settingsDraft, podRequireSignature: e.target.checked })}
+                      />
+                      <CheckboxField
+                        id="podRequirePrintedName"
+                        label="Require printed name"
+                        checked={Boolean(settingsDraft?.podRequirePrintedName)}
+                        onChange={(e) => setSettingsDraft({ ...settingsDraft, podRequirePrintedName: e.target.checked })}
+                      />
+                      <CheckboxField
+                        id="podRequireDeliveryDate"
+                        label="Require consignee date"
+                        checked={Boolean(settingsDraft?.podRequireDeliveryDate)}
+                        onChange={(e) => setSettingsDraft({ ...settingsDraft, podRequireDeliveryDate: e.target.checked })}
+                      />
+                      <FormField label="Minimum POD pages" htmlFor="podMinPages">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.podMinPages ? settingsDraft.podMinPages : ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, podMinPages: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Required docs</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <div className="space-y-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Invoice docs</div>
+                        {DOC_TYPES.map((docType) => (
+                          <CheckboxField
+                            key={docType}
+                            id={`requiredDoc-${docType}`}
+                            label={docType}
+                            checked={settingsDraft?.requiredDocs?.includes(docType) ?? false}
+                            onChange={(e) => {
+                              const current = settingsDraft?.requiredDocs ?? [];
+                              const next = e.target.checked
+                                ? [...current, docType]
+                                : current.filter((item: string) => item !== docType);
+                              setSettingsDraft({ ...settingsDraft, requiredDocs: next });
+                            }}
+                          />
+                        ))}
+                      </div>
+                      <div className="space-y-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Driver docs</div>
+                        {DRIVER_DOC_TYPES.map((docType) => (
+                          <CheckboxField
+                            key={docType}
+                            id={`requiredDriverDoc-${docType}`}
+                            label={docType}
+                            checked={settingsDraft?.requiredDriverDocs?.includes(docType) ?? false}
+                            onChange={(e) => {
+                              const current = settingsDraft?.requiredDriverDocs ?? [];
+                              const next = e.target.checked
+                                ? [...current, docType]
+                                : current.filter((item: string) => item !== docType);
+                              setSettingsDraft({ ...settingsDraft, requiredDriverDocs: next });
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Dispatch rules</div>
+                    <CheckboxField
+                      id="requireRateConBeforeDispatch"
+                      label="Require rate confirmation before dispatch"
+                      checked={Boolean(settingsDraft?.requireRateConBeforeDispatch)}
+                      onChange={(e) => setSettingsDraft({ ...settingsDraft, requireRateConBeforeDispatch: e.target.checked })}
+                    />
+                  </Card>
+                </div>
+              </details>
+
+              <details className="space-y-4" id="automation">
+                <summary className="cursor-pointer list-none rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3 text-sm font-semibold text-ink">
+                  Automation & Integrations
+                  <div className="text-xs text-[color:var(--color-text-muted)]">Ops reminders and telematics.</div>
+                </summary>
+                <div className="space-y-4">
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Automation thresholds</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Collect POD due (minutes)" htmlFor="collectPodDueMinutes">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.collectPodDueMinutes ? settingsDraft.collectPodDueMinutes : ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, collectPodDueMinutes: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Missing POD after (minutes)" htmlFor="missingPodAfterMinutes">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.missingPodAfterMinutes ? settingsDraft.missingPodAfterMinutes : ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, missingPodAfterMinutes: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Reminder frequency (minutes)" htmlFor="reminderFrequencyMinutes">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.reminderFrequencyMinutes ? settingsDraft.reminderFrequencyMinutes : ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, reminderFrequencyMinutes: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Driver pay</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Rate per mile" htmlFor="driverRatePerMile">
+                        <Input
+                          placeholder=""
+                          value={settingsDraft?.driverRatePerMile ? settingsDraft.driverRatePerMile : ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, driverRatePerMile: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Tracking preference</div>
+                    <FormField label="Primary tracking method" htmlFor="trackingPreference">
+                      <Select
+                        value={settingsDraft?.trackingPreference ?? ""}
+                        onChange={(e) => setSettingsDraft({ ...settingsDraft, trackingPreference: e.target.value })}
+                      >
+                        <option value="">Select method</option>
+                        <option value="MANUAL">Manual</option>
+                        <option value="SAMSARA">Samsara</option>
+                        <option value="MOTIVE">Motive</option>
+                        <option value="OTHER">Other</option>
+                      </Select>
+                    </FormField>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Settlement defaults</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Settlement schedule" htmlFor="settlementSchedule">
+                        <Select
+                          value={settingsDraft?.settlementSchedule ?? ""}
+                          onChange={(e) => setSettingsDraft({ ...settingsDraft, settlementSchedule: e.target.value })}
+                        >
+                          <option value="">Select schedule</option>
+                          <option value="WEEKLY">Weekly</option>
+                          <option value="BIWEEKLY">Bi-weekly</option>
+                          <option value="SEMI_MONTHLY">Semi-monthly</option>
+                          <option value="MONTHLY">Monthly</option>
+                        </Select>
+                      </FormField>
+                      <div className="space-y-2">
+                        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Pay statement template</div>
+                        <CheckboxField
+                          id="settlementTemplateLinehaul"
+                          label="Include linehaul"
+                          checked={Boolean(settingsDraft?.settlementTemplate?.includeLinehaul)}
+                          onChange={(e) => {
+                            const current = settingsDraft?.settlementTemplate ?? {};
+                            setSettingsDraft({
+                              ...settingsDraft,
+                              settlementTemplate: { ...current, includeLinehaul: e.target.checked },
+                            });
+                          }}
+                        />
+                        <CheckboxField
+                          id="settlementTemplateFuel"
+                          label="Include fuel surcharge"
+                          checked={Boolean(settingsDraft?.settlementTemplate?.includeFuelSurcharge)}
+                          onChange={(e) => {
+                            const current = settingsDraft?.settlementTemplate ?? {};
+                            setSettingsDraft({
+                              ...settingsDraft,
+                              settlementTemplate: { ...current, includeFuelSurcharge: e.target.checked },
+                            });
+                          }}
+                        />
+                        <CheckboxField
+                          id="settlementTemplateAccessorials"
+                          label="Include accessorials"
+                          checked={Boolean(settingsDraft?.settlementTemplate?.includeAccessorials)}
+                          onChange={(e) => {
+                            const current = settingsDraft?.settlementTemplate ?? {};
+                            setSettingsDraft({
+                              ...settingsDraft,
+                              settlementTemplate: { ...current, includeAccessorials: e.target.checked },
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Integrations</div>
+                    <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-lg font-semibold">Samsara</div>
+                          <div className="text-sm text-[color:var(--color-text-muted)]">Status: {samsaraStatus?.status ?? "DISCONNECTED"}</div>
+                          {samsaraStatus?.errorMessage ? (
+                            <div className="text-xs text-[color:var(--color-danger)]">{samsaraStatus.errorMessage}</div>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button size="sm" variant="secondary" onClick={disconnectSamsara}>
+                            Disconnect
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-2 lg:grid-cols-[1fr,auto]">
+                        <FormField label="Samsara API token" htmlFor="samsaraToken">
+                          <Input
+                            placeholder=""
+                            value={samsaraToken}
+                            onChange={(e) => setSamsaraToken(e.target.value)}
+                          />
+                        </FormField>
+                        <Button onClick={connectSamsara} disabled={!samsaraToken}>
+                          Connect
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Truck mappings</div>
+                      <div className="grid gap-2">
+                        {trucks.map((truck) => (
+                          <div
+                            key={truck.id}
+                            className="flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-3 py-2"
+                          >
+                            <div className="text-sm font-semibold">{truck.unit}</div>
+                            <FormField label="Samsara vehicle/device ID" htmlFor={`mapping-${truck.id}`}>
+                              <Input
+                                placeholder=""
+                                value={mappingEdits[truck.id] ?? ""}
+                                onChange={(e) => setMappingEdits({ ...mappingEdits, [truck.id]: e.target.value })}
+                              />
+                            </FormField>
+                            <Button size="sm" variant="secondary" onClick={() => saveTruckMapping(truck.id)}>
+                              Save
+                            </Button>
+                          </div>
+                        ))}
+                        {trucks.length === 0 ? <EmptyState title="No trucks available." /> : null}
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Bulk load import</div>
+                    <div className="text-sm text-[color:var(--color-text-muted)]">
+                      Upload the CSV templates from <code>data/import</code>. Loads can include miles. Stops should follow the yard → yard → consignee pattern.
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Loads CSV" htmlFor="adminLoadsCsv">
+                        <Input
+                          type="file"
+                          accept=".csv"
+                          onChange={(e) => setLoadsFile(e.target.files?.[0] ?? null)}
+                        />
+                      </FormField>
+                      <FormField label="Stops CSV" htmlFor="adminStopsCsv">
+                        <Input
+                          type="file"
+                          accept=".csv"
+                          onChange={(e) => setStopsFile(e.target.files?.[0] ?? null)}
+                        />
+                      </FormField>
+                    </div>
+                    <CheckboxField
+                      id="wipeLoadsAdmin"
+                      label="Wipe existing loads before import"
+                      checked={wipeLoads}
+                      onChange={(e) => setWipeLoads(e.target.checked)}
+                    />
+                    {importError ? <div className="text-sm text-[color:var(--color-danger)]">{importError}</div> : null}
+                    {importResult ? <div className="text-sm text-[color:var(--color-success)]">{importResult}</div> : null}
+                    <Button onClick={runImport}>Import CSV</Button>
+                  </Card>
+                </div>
+              </details>
+
+              <details className="space-y-4" id="fleet">
+                <summary className="cursor-pointer list-none rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3 text-sm font-semibold text-ink">
+                  Fleet
+                  <div className="text-xs text-[color:var(--color-text-muted)]">Trucks, trailers, and bulk imports.</div>
+                </summary>
+                <div className="space-y-4">
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Trucks</div>
+                    <div className="grid gap-2">
+                      {trucks.map((truck) => (
+                        <div key={truck.id} className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/60 px-4 py-2">
+                          <div>
+                            <div className="font-semibold">{truck.unit}</div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {truck.vin ?? "VIN missing"} · {truck.plate ?? "No plate"} {truck.plateState ? `· ${truck.plateState}` : ""}
+                            </div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {truck.status ?? "AVAILABLE"} · {truck.active ? "Active" : "Inactive"}
+                            </div>
+                          </div>
+                          <Button variant="ghost" onClick={() => editTruck(truck)}>
+                            Edit
+                          </Button>
+                        </div>
+                      ))}
+                      {trucks.length === 0 ? <EmptyState title="No trucks yet." /> : null}
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Unit number" htmlFor="truckUnit" required>
+                        <Input
+                          placeholder=""
+                          value={truckForm.unit}
+                          onChange={(e) => setTruckForm({ ...truckForm, unit: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="VIN" htmlFor="truckVin" required>
+                        <Input
+                          placeholder=""
+                          value={truckForm.vin}
+                          onChange={(e) => setTruckForm({ ...truckForm, vin: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Plate" htmlFor="truckPlate">
+                        <Input
+                          placeholder=""
+                          value={truckForm.plate}
+                          onChange={(e) => setTruckForm({ ...truckForm, plate: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Plate state" htmlFor="truckPlateState">
+                        <Input
+                          placeholder=""
+                          value={truckForm.plateState}
+                          onChange={(e) => setTruckForm({ ...truckForm, plateState: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Status" htmlFor="truckStatus">
+                        <Select
+                          value={truckForm.status}
+                          onChange={(e) => setTruckForm({ ...truckForm, status: e.target.value })}
+                        >
+                          <option value="">Select status</option>
+                          {TRUCK_STATUS_OPTIONS.map((status) => (
+                            <option key={status} value={status}>{status}</option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <CheckboxField
+                        id="truckActive"
+                        label="Active"
+                        checked={truckForm.active}
+                        onChange={(e) => setTruckForm({ ...truckForm, active: e.target.checked })}
+                      />
+                    </div>
+                    {truckError ? <div className="text-sm text-[color:var(--color-danger)]">{truckError}</div> : null}
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={saveTruck}>{editingTruckId ? "Update truck" : "Add truck"}</Button>
+                      {editingTruckId ? (
+                        <Button variant="secondary" onClick={resetTruckForm}>
+                          Cancel edit
+                        </Button>
+                      ) : null}
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Trailers</div>
+                    <div className="grid gap-2">
+                      {trailers.map((trailer) => (
+                        <div key={trailer.id} className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/60 px-4 py-2">
+                          <div>
+                            <div className="font-semibold">{trailer.unit}</div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {trailer.type ?? "OTHER"} · {trailer.plate ?? "No plate"} {trailer.plateState ? `· ${trailer.plateState}` : ""}
+                            </div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {trailer.status ?? "AVAILABLE"} · {trailer.active ? "Active" : "Inactive"}
+                            </div>
+                          </div>
+                          <Button variant="ghost" onClick={() => editTrailer(trailer)}>
+                            Edit
+                          </Button>
+                        </div>
+                      ))}
+                      {trailers.length === 0 ? <EmptyState title="No trailers yet." /> : null}
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Unit number" htmlFor="trailerUnit" required>
+                        <Input
+                          placeholder=""
+                          value={trailerForm.unit}
+                          onChange={(e) => setTrailerForm({ ...trailerForm, unit: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Trailer type" htmlFor="trailerType">
+                        <Select
+                          value={trailerForm.type}
+                          onChange={(e) => setTrailerForm({ ...trailerForm, type: e.target.value })}
+                        >
+                          <option value="">Select type</option>
+                          {TRAILER_TYPE_OPTIONS.map((type) => (
+                            <option key={type} value={type}>{type}</option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <FormField label="Plate" htmlFor="trailerPlate">
+                        <Input
+                          placeholder=""
+                          value={trailerForm.plate}
+                          onChange={(e) => setTrailerForm({ ...trailerForm, plate: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Plate state" htmlFor="trailerPlateState">
+                        <Input
+                          placeholder=""
+                          value={trailerForm.plateState}
+                          onChange={(e) => setTrailerForm({ ...trailerForm, plateState: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Status" htmlFor="trailerStatus">
+                        <Select
+                          value={trailerForm.status}
+                          onChange={(e) => setTrailerForm({ ...trailerForm, status: e.target.value })}
+                        >
+                          <option value="">Select status</option>
+                          {TRAILER_STATUS_OPTIONS.map((status) => (
+                            <option key={status} value={status}>{status}</option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <CheckboxField
+                        id="trailerActive"
+                        label="Active"
+                        checked={trailerForm.active}
+                        onChange={(e) => setTrailerForm({ ...trailerForm, active: e.target.checked })}
+                      />
+                    </div>
+                    {trailerError ? <div className="text-sm text-[color:var(--color-danger)]">{trailerError}</div> : null}
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={saveTrailer}>{editingTrailerId ? "Update trailer" : "Add trailer"}</Button>
+                      {editingTrailerId ? (
+                        <Button variant="secondary" onClick={resetTrailerForm}>
+                          Cancel edit
+                        </Button>
+                      ) : null}
+                    </div>
+                  </Card>
+
+                  <ImportWizard
+                    type="trucks"
+                    title="Bulk import trucks"
+                    description="Upload trucks.csv to create or update fleet trucks."
+                    templateCsv={TRUCK_TEMPLATE}
+                    onImported={() => loadData()}
+                  />
+
+                  <ImportWizard
+                    type="trailers"
+                    title="Bulk import trailers"
+                    description="Upload trailers.csv to create or update fleet trailers."
+                    templateCsv={TRAILER_TEMPLATE}
+                    onImported={() => loadData()}
+                  />
+                </div>
+              </details>
+
+              <details className="space-y-4" id="people">
+                <summary className="cursor-pointer list-none rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3 text-sm font-semibold text-ink">
+                  Permissions & People
+                  <div className="text-xs text-[color:var(--color-text-muted)]">Users, drivers, and access controls.</div>
+                </summary>
+                <div className="space-y-4">
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Create employee login</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Email" htmlFor="employeeEmail" required>
+                        <Input
+                          placeholder=""
+                          value={employeeForm.email}
+                          onChange={(e) => setEmployeeForm({ ...employeeForm, email: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Full name" htmlFor="employeeName">
+                        <Input
+                          placeholder=""
+                          value={employeeForm.name}
+                          onChange={(e) => setEmployeeForm({ ...employeeForm, name: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Role" htmlFor="employeeRole">
+                        <Select
+                          value={employeeForm.role}
+                          onChange={(e) => setEmployeeForm({ ...employeeForm, role: e.target.value })}
+                        >
+                          {EMPLOYEE_ROLE_OPTIONS.map((role) => (
+                            <option key={role.value} value={role.value}>{role.label}</option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <FormField label="Temp password" htmlFor="employeePassword" hint="Share securely with the employee.">
+                        <Input
+                          placeholder=""
+                          value={employeeForm.password}
+                          onChange={(e) => setEmployeeForm({ ...employeeForm, password: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    {employeeError ? <div className="text-sm text-[color:var(--color-danger)]">{employeeError}</div> : null}
+                    {employeeInviteUrl ? (
+                      <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-3 py-2 text-xs break-all">
+                        Invite link: {employeeInviteUrl}
+                      </div>
+                    ) : null}
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        onClick={() => createEmployee(false)}
+                        disabled={employeeSaving || !employeeForm.email || !employeeForm.password}
+                      >
+                        {employeeSaving ? "Saving..." : "Create employee"}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        onClick={() => createEmployee(true)}
+                        disabled={employeeSaving || !employeeForm.email || !employeeForm.password}
+                      >
+                        Create + copy invite
+                      </Button>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4">
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Create driver login</div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <FormField label="Driver name" htmlFor="driverName" required>
+                        <Input
+                          placeholder=""
+                          value={driverForm.name}
+                          onChange={(e) => setDriverForm({ ...driverForm, name: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Driver email" htmlFor="driverEmail">
+                        <Input
+                          placeholder=""
+                          value={driverForm.email}
+                          onChange={(e) => setDriverForm({ ...driverForm, email: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Phone" htmlFor="driverPhone">
+                        <Input
+                          placeholder=""
+                          value={driverForm.phone}
+                          onChange={(e) => setDriverForm({ ...driverForm, phone: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="License" htmlFor="driverLicense">
+                        <Input
+                          placeholder=""
+                          value={driverForm.license}
+                          onChange={(e) => setDriverForm({ ...driverForm, license: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="License state" htmlFor="driverLicenseState">
+                        <Input
+                          placeholder=""
+                          value={driverForm.licenseState}
+                          onChange={(e) => setDriverForm({ ...driverForm, licenseState: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="License expires" htmlFor="driverLicenseExpires">
+                        <Input
+                          type="date"
+                          value={driverForm.licenseExpiresAt}
+                          onChange={(e) => setDriverForm({ ...driverForm, licenseExpiresAt: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Med card expires" htmlFor="driverMedCardExpires">
+                        <Input
+                          type="date"
+                          value={driverForm.medCardExpiresAt}
+                          onChange={(e) => setDriverForm({ ...driverForm, medCardExpiresAt: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Pay rate per mile" htmlFor="driverPayRate">
+                        <Input
+                          placeholder=""
+                          value={driverForm.payRatePerMile}
+                          onChange={(e) => setDriverForm({ ...driverForm, payRatePerMile: e.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Temp password" htmlFor="driverTempPassword" hint="Share securely with the driver.">
+                        <Input
+                          placeholder=""
+                          value={driverForm.password}
+                          onChange={(e) => setDriverForm({ ...driverForm, password: e.target.value })}
+                        />
+                      </FormField>
+                    </div>
+                    {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}
+                    <Button onClick={createDriver}>Create driver</Button>
+                  </Card>
+
+                  <ImportWizard
+                    type="employees"
+                    title="Bulk import employees"
+                    description="Upload employees.csv to create dispatch and billing users (invite links generated after import)."
+                    templateCsv={EMPLOYEE_TEMPLATE}
+                    onImported={(result) => {
+                      setEmployeeImportResult(result);
+                      setEmployeeInvites([]);
+                      loadData();
+                    }}
+                  />
+                  {employeeImportResult?.created?.length ? (
+                    <Card className="space-y-3">
+                      <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Invite new employees</div>
+                      <div className="text-sm text-[color:var(--color-text-muted)]">
+                        Generate one-time invite links for newly created accounts.
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button onClick={generateEmployeeInvites}>Generate invites</Button>
+                        {employeeInvites.length ? (
+                          <Button variant="secondary" onClick={copyInviteLinks}>Copy all</Button>
+                        ) : null}
+                      </div>
+                      {employeeInvites.length ? (
+                        <div className="grid gap-2">
+                          {employeeInvites.map((invite) => (
+                            <div key={invite.userId} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-2 text-sm">
+                              <div className="font-semibold">{invite.email}</div>
+                              <div className="text-xs text-[color:var(--color-text-muted)]">{invite.inviteUrl}</div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </Card>
+                  ) : null}
+
+                  <ImportWizard
+                    type="drivers"
+                    title="Bulk import drivers"
+                    description="Upload drivers.csv to create or update driver records."
+                    templateCsv={DRIVER_TEMPLATE}
+                    onImported={() => loadData()}
+                  />
+
+                  <Card>
+                    <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Users</div>
+                    {roleError ? <ErrorBanner message={roleError} /> : null}
+                    <div className="mt-3 grid gap-2">
+                      {users.map((user) => (
+                        <div key={user.id} className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/60 px-4 py-2">
+                          <div>
+                            <div className="font-semibold">{user.name ?? user.email}</div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {user.role} · {user.isActive ? "Active" : "Inactive"}
+                            </div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {user.phone ?? "No phone"} · {user.timezone ?? "No timezone"}
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-2 text-xs text-[color:var(--color-text-muted)]">
+                            <div>{user.email}</div>
+                            {USER_ROLE_OPTIONS.includes(user.role) ? (
+                              <Select
+                                value={user.role}
+                                onChange={(e) => updateUserRole(user.id, e.target.value)}
+                                disabled={roleSavingId === user.id}
+                              >
+                                {USER_ROLE_OPTIONS.map((role) => (
+                                  <option key={role} value={role}>
+                                    {role === "HEAD_DISPATCHER" ? "Head Dispatcher" : role}
+                                  </option>
+                                ))}
+                              </Select>
+                            ) : (
+                              <div className="text-xs text-[color:var(--color-text-muted)]">
+                                {user.role === "ADMIN" ? "Admin" : user.role}
+                              </div>
+                            )}
+                            <div className="flex flex-wrap gap-2">
+                              <Button variant="ghost" size="sm" onClick={() => sendInvite(user.id)}>
+                                Copy invite
+                              </Button>
+                              <Button
+                                variant={user.isActive ? "secondary" : "primary"}
+                                size="sm"
+                                onClick={() => toggleUserStatus(user.id, user.isActive)}
+                              >
+                                {user.isActive ? "Deactivate" : "Reactivate"}
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+
+                  <Card>
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Drivers</div>
+                      <CheckboxField
+                        id="showArchivedDrivers"
+                        label="Show archived"
+                        checked={showArchivedDrivers}
+                        onChange={(e) => setShowArchivedDrivers(e.target.checked)}
+                      />
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      {drivers
+                        .filter((driver) => (showArchivedDrivers ? true : !driver.archivedAt))
+                        .map((driver) => (
+                        <div key={driver.id} className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/60 px-4 py-2">
+                          <div>
+                            <div className="font-semibold">{driver.name}</div>
+                            <div className="text-xs text-[color:var(--color-text-muted)]">
+                              {driver.phone ?? "No phone"} · {driver.license ?? "No license"} ·{" "}
+                              {driver.status ?? "AVAILABLE"} · {driver.archivedAt ? "Archived" : "Active"}
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-2 text-xs text-[color:var(--color-text-muted)]">
+                            <div>{driver.user?.email ?? driver.userId ?? "Unlinked"}</div>
+                            <Select
+                              value={driver.status ?? "AVAILABLE"}
+                              onChange={(e) => updateDriverStatus(driver.id, e.target.value)}
+                            >
+                              {DRIVER_STATUS_OPTIONS.map((status) => (
+                                <option key={status} value={status}>{status}</option>
+                              ))}
+                            </Select>
+                            <Button
+                              variant={driver.archivedAt ? "primary" : "secondary"}
+                              size="sm"
+                              onClick={() => toggleDriverArchive(driver.id, driver.archivedAt)}
+                            >
+                              {driver.archivedAt ? "Restore" : "Archive"}
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </div>
+              </details>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {error ? <ErrorBanner message={error} /> : null}
+            <details open className="space-y-4">
           <summary className="cursor-pointer list-none rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3 text-sm font-semibold text-ink">
             Company
             <div className="text-xs text-[color:var(--color-text-muted)]">Identity, billing, and operating entities.</div>
@@ -1685,6 +2895,64 @@ export default function AdminPage() {
             <div className="text-xs text-[color:var(--color-text-muted)]">Users, drivers, and access controls.</div>
           </summary>
           <div className="space-y-4">
+            <Card className="space-y-4">
+              <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Create employee login</div>
+              <div className="grid gap-3 lg:grid-cols-2">
+                <FormField label="Email" htmlFor="employeeEmail" required>
+                  <Input
+                    placeholder=""
+                    value={employeeForm.email}
+                    onChange={(e) => setEmployeeForm({ ...employeeForm, email: e.target.value })}
+                  />
+                </FormField>
+                <FormField label="Full name" htmlFor="employeeName">
+                  <Input
+                    placeholder=""
+                    value={employeeForm.name}
+                    onChange={(e) => setEmployeeForm({ ...employeeForm, name: e.target.value })}
+                  />
+                </FormField>
+                <FormField label="Role" htmlFor="employeeRole">
+                  <Select
+                    value={employeeForm.role}
+                    onChange={(e) => setEmployeeForm({ ...employeeForm, role: e.target.value })}
+                  >
+                    {EMPLOYEE_ROLE_OPTIONS.map((role) => (
+                      <option key={role.value} value={role.value}>{role.label}</option>
+                    ))}
+                  </Select>
+                </FormField>
+                <FormField label="Temp password" htmlFor="employeePassword" hint="Share securely with the employee.">
+                  <Input
+                    placeholder=""
+                    value={employeeForm.password}
+                    onChange={(e) => setEmployeeForm({ ...employeeForm, password: e.target.value })}
+                  />
+                </FormField>
+              </div>
+              {employeeError ? <div className="text-sm text-[color:var(--color-danger)]">{employeeError}</div> : null}
+              {employeeInviteUrl ? (
+                <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-3 py-2 text-xs break-all">
+                  Invite link: {employeeInviteUrl}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  onClick={() => createEmployee(false)}
+                  disabled={employeeSaving || !employeeForm.email || !employeeForm.password}
+                >
+                  {employeeSaving ? "Saving..." : "Create employee"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => createEmployee(true)}
+                  disabled={employeeSaving || !employeeForm.email || !employeeForm.password}
+                >
+                  Create + copy invite
+                </Button>
+              </div>
+            </Card>
+
             <Card className="space-y-4">
               <div className="text-sm uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Create driver login</div>
               <div className="grid gap-3 lg:grid-cols-2">
