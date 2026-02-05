@@ -895,7 +895,7 @@ export default function AdminPage() {
                       </FormField>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button onClick={saveSettings}>Save settings</Button>
+                      <Button onClick={updateSettings}>Save settings</Button>
                       <Button variant="secondary" onClick={() => setSettingsDraft(settings)}>
                         Reset changes
                       </Button>
@@ -921,7 +921,7 @@ export default function AdminPage() {
                       </FormField>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button onClick={saveSequences} disabled={sequenceSaving}>
+                      <Button onClick={updateSequences} disabled={sequenceSaving}>
                         {sequenceSaving ? "Saving..." : "Save numbering"}
                       </Button>
                       {sequenceError ? <div className="text-sm text-[color:var(--color-danger)]">{sequenceError}</div> : null}
