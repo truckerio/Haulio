@@ -3167,6 +3167,8 @@ export default function AdminPage() {
           </div>
         </details>
       </div>
+        )}
+      </div>
       </RouteGuard>
     </AppShell>
   );
