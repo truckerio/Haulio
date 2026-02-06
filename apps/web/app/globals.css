@@ -9,7 +9,7 @@
   --color-text-muted: #5f6572;
   --color-text-subtle: #8a909c;
   --color-bg: #ffffff;
-  --color-bg-muted: #f6f7f8;
+  --color-bg-muted: #f4f4f2;
   --color-surface: #ffffff;
   --color-divider: rgba(0, 0, 0, 0.06);
   --color-divider-strong: rgba(0, 0, 0, 0.12);
@@ -33,7 +33,7 @@ body {
   font-family: var(--font-body);
   color: var(--color-text);
   background-color: var(--color-bg-muted);
-  background-image: radial-gradient(circle at 18% 20%, rgba(255, 255, 255, 0.9), transparent 45%);
+  background-image: none;
   overflow-x: hidden;
 }
 

@@ -1073,6 +1073,36 @@ async function resolveOrgTimeZone(orgId: string) {
   return { timeZone: "UTC", warning: null as string | null };
 }
 
+const formatDriverStatusLabel = (status: DriverStatus) => {
+  switch (status) {
+    case DriverStatus.AVAILABLE:
+      return "Available";
+    case DriverStatus.ON_LOAD:
+      return "On Load";
+    case DriverStatus.UNAVAILABLE:
+      return "Unavailable";
+    default:
+      return status;
+  }
+};
+
+const formatRoleLabel = (role: Role) => {
+  switch (role) {
+    case Role.ADMIN:
+      return "Admin";
+    case Role.HEAD_DISPATCHER:
+      return "Head Dispatcher";
+    case Role.DISPATCHER:
+      return "Dispatcher";
+    case Role.BILLING:
+      return "Billing";
+    case Role.DRIVER:
+      return "Driver";
+    default:
+      return role;
+  }
+};
+
 const buildLoadFilters = (
   req: express.Request,
   overrides: { from?: Date; to?: Date; archived?: boolean } = {}
@@ -5843,6 +5873,164 @@ app.get("/dispatch/availability", requireAuth, requirePermission(Permission.LOAD
   });
 });
 
+app.get(
+  "/search",
+  requireAuth,
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    if (!query) {
+      res.json({ results: [] });
+      return;
+    }
+    const limitParam = typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 10) : 6;
+    const orgId = req.user!.orgId;
+
+    const [loads, drivers, customers, users] = await Promise.all([
+      prisma.load.findMany({
+        where: {
+          orgId,
+          deletedAt: null,
+          OR: [
+            { loadNumber: { contains: query, mode: "insensitive" } },
+            { customerName: { contains: query, mode: "insensitive" } },
+            { customer: { name: { contains: query, mode: "insensitive" } } },
+            { customerRef: { contains: query, mode: "insensitive" } },
+            { bolNumber: { contains: query, mode: "insensitive" } },
+            { shipperReferenceNumber: { contains: query, mode: "insensitive" } },
+            { consigneeReferenceNumber: { contains: query, mode: "insensitive" } },
+            { externalTripId: { contains: query, mode: "insensitive" } },
+            { tripNumber: { contains: query, mode: "insensitive" } },
+            { driver: { name: { contains: query, mode: "insensitive" } } },
+            {
+              stops: {
+                some: {
+                  OR: [
+                    { name: { contains: query, mode: "insensitive" } },
+                    { address: { contains: query, mode: "insensitive" } },
+                    { city: { contains: query, mode: "insensitive" } },
+                    { state: { contains: query, mode: "insensitive" } },
+                    { zip: { contains: query, mode: "insensitive" } },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+        select: {
+          id: true,
+          loadNumber: true,
+          status: true,
+          customerName: true,
+          customer: { select: { name: true } },
+          driver: { select: { name: true } },
+          createdAt: true,
+        },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      }),
+      prisma.driver.findMany({
+        where: {
+          orgId,
+          OR: [
+            { name: { contains: query, mode: "insensitive" } },
+            { phone: { contains: query, mode: "insensitive" } },
+            { license: { contains: query, mode: "insensitive" } },
+            { user: { email: { contains: query, mode: "insensitive" } } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          status: true,
+          archivedAt: true,
+          user: { select: { email: true } },
+        },
+        orderBy: { name: "asc" },
+        take: limit,
+      }),
+      prisma.customer.findMany({
+        where: {
+          orgId,
+          OR: [
+            { name: { contains: query, mode: "insensitive" } },
+            { billingEmail: { contains: query, mode: "insensitive" } },
+          ],
+        },
+        select: { id: true, name: true, billingEmail: true },
+        orderBy: { name: "asc" },
+        take: limit,
+      }),
+      prisma.user.findMany({
+        where: {
+          orgId,
+          role: { not: Role.DRIVER },
+          OR: [
+            { name: { contains: query, mode: "insensitive" } },
+            { email: { contains: query, mode: "insensitive" } },
+            { phone: { contains: query, mode: "insensitive" } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          isActive: true,
+        },
+        orderBy: { name: "asc" },
+        take: limit,
+      }),
+    ]);
+
+    const results = [
+      ...loads.map((load) => {
+        const customerLabel = load.customerName || load.customer?.name || "Customer";
+        const driverLabel = load.driver?.name ? `Driver: ${load.driver.name}` : null;
+        const subtitle = [customerLabel, driverLabel].filter(Boolean).join(" · ");
+        return {
+          id: load.id,
+          type: "load" as const,
+          title: `Load ${load.loadNumber}`,
+          subtitle,
+          status: formatLoadStatusLabel(load.status),
+          url: `/loads/${load.id}`,
+        };
+      }),
+      ...drivers.map((driver) => ({
+        id: driver.id,
+        type: "driver" as const,
+        title: driver.name,
+        subtitle: driver.user?.email ?? driver.phone ?? "Driver",
+        status: driver.archivedAt ? "Archived" : formatDriverStatusLabel(driver.status),
+        url: "/admin/people/drivers",
+      })),
+      ...users.map((user) => {
+        const subtitleParts = [formatRoleLabel(user.role), user.email].filter(Boolean);
+        return {
+          id: user.id,
+          type: "employee" as const,
+          title: user.name ?? user.email ?? "Employee",
+          subtitle: subtitleParts.join(" · "),
+          status: user.isActive ? "Active" : "Inactive",
+          url: "/admin/people/employees",
+        };
+      }),
+      ...customers.map((customer) => ({
+        id: customer.id,
+        type: "customer" as const,
+        title: customer.name,
+        subtitle: customer.billingEmail ?? "Customer",
+        url: "/admin/company",
+      })),
+    ];
+
+    res.json({ results });
+  }
+);
+
 app.get("/customers", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
   const customers = await prisma.customer.findMany({
     where: { orgId: req.user!.orgId },
@@ -9540,6 +9728,68 @@ app.post("/admin/drivers/:id/status", requireAuth, requireCsrf, requireRole("ADM
   res.json({ driver: updated });
 });
 
+app.patch("/admin/drivers/:id", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    name: z.string().min(2).optional(),
+    phone: z.string().optional(),
+    license: z.string().optional(),
+    licenseState: z.string().optional(),
+    licenseExpiresAt: z.string().optional(),
+    medCardExpiresAt: z.string().optional(),
+    payRatePerMile: z.union([z.number(), z.string()]).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const driver = await prisma.driver.findFirst({ where: { id: req.params.id, orgId: req.user!.orgId } });
+  if (!driver) {
+    res.status(404).json({ error: "Driver not found" });
+    return;
+  }
+
+  const parseOptionalDate = (value?: string) => {
+    if (value === undefined) return undefined;
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+
+  const updateData: Prisma.DriverUpdateInput = {
+    name: parsed.data.name ?? undefined,
+    phone: parsed.data.phone === undefined ? undefined : normalizeOptionalText(parsed.data.phone),
+    license: parsed.data.license === undefined ? undefined : normalizeOptionalText(parsed.data.license),
+    licenseState: parsed.data.licenseState === undefined ? undefined : normalizeOptionalText(parsed.data.licenseState),
+    licenseExpiresAt: parseOptionalDate(parsed.data.licenseExpiresAt),
+    medCardExpiresAt: parseOptionalDate(parsed.data.medCardExpiresAt),
+    payRatePerMile: parsed.data.payRatePerMile !== undefined ? toDecimal(parsed.data.payRatePerMile) : undefined,
+  };
+
+  const updated = await prisma.driver.update({
+    where: { id: driver.id },
+    data: updateData,
+  });
+
+  if (parsed.data.name && driver.userId) {
+    await prisma.user.update({
+      where: { id: driver.userId },
+      data: { name: parsed.data.name },
+    });
+  }
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "DRIVER_UPDATED",
+    entity: "Driver",
+    entityId: driver.id,
+    summary: `Updated driver ${updated.name}`,
+  });
+
+  res.json({ driver: updated });
+});
+
 app.get("/admin/trucks", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const trucks = await prisma.truck.findMany({
     where: { orgId: req.user!.orgId },
@@ -10915,7 +11165,7 @@ app.post(
 
 app.post("/admin/drivers", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
-    email: z.string().email(),
+    email: z.string().email().optional(),
     name: z.string().min(2),
     phone: z.string().optional(),
     license: z.string().optional(),
@@ -10923,28 +11173,36 @@ app.post("/admin/drivers", requireAuth, requireCsrf, requireRole("ADMIN"), async
     licenseExpiresAt: z.string().optional(),
     medCardExpiresAt: z.string().optional(),
     payRatePerMile: z.union([z.number(), z.string()]).optional(),
-    password: z.string().min(6),
+    password: z.string().min(6).optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
-  const passwordHash = await bcrypt.hash(parsed.data.password, 10);
+  const hasEmail = Boolean(parsed.data.email);
+  if (hasEmail && !parsed.data.password) {
+    res.status(400).json({ error: "Password required when creating a driver login." });
+    return;
+  }
   const { user, driver } = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: {
-        orgId: req.user!.orgId,
-        email: parsed.data.email,
-        name: parsed.data.name,
-        role: "DRIVER",
-        passwordHash,
-      },
-    });
+    let user: any | null = null;
+    if (parsed.data.email && parsed.data.password) {
+      const passwordHash = await bcrypt.hash(parsed.data.password, 10);
+      user = await tx.user.create({
+        data: {
+          orgId: req.user!.orgId,
+          email: parsed.data.email,
+          name: parsed.data.name,
+          role: "DRIVER",
+          passwordHash,
+        },
+      });
+    }
     const driver = await tx.driver.create({
       data: {
         orgId: req.user!.orgId,
-        userId: user.id,
+        userId: user?.id ?? null,
         name: parsed.data.name,
         phone: parsed.data.phone,
         license: parsed.data.license,
@@ -10972,6 +11230,8 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
     email: z.string().email(),
     name: z.string().optional(),
     role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]),
+    phone: z.string().optional(),
+    timezone: z.string().optional(),
     password: z.string().min(6),
   });
   const parsed = schema.safeParse(req.body);
@@ -10986,6 +11246,8 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
       email: parsed.data.email,
       name: parsed.data.name,
       role: parsed.data.role,
+      phone: normalizeOptionalText(parsed.data.phone),
+      timezone: normalizeOptionalText(parsed.data.timezone),
       passwordHash,
     },
   });

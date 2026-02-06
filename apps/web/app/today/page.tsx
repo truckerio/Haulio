@@ -85,10 +85,13 @@ const WARNING_META = [
 ] as const;
 
 const TONE_CLASS: Record<(typeof SECTION_META)[number]["tone"], string> = {
-  danger: "border-[color:var(--color-danger-soft)] bg-[color:var(--color-danger-soft)]/30",
-  warning: "border-[color:var(--color-warning-soft)] bg-[color:var(--color-warning-soft)]/30",
-  info: "border-[color:var(--color-info-soft)] bg-[color:var(--color-info-soft)]/30",
+  danger: "border-0 border-l-4 border-l-[color:var(--color-danger)] bg-white",
+  warning: "border-0 border-l-4 border-l-[color:var(--color-warning)] bg-white",
+  info: "border-0 bg-white",
 };
+
+const GLOSSY_SURFACE =
+  "bg-white shadow-[inset_0_1px_0_rgba(255,255,255,0.9),_0_6px_16px_rgba(12,12,12,0.04)]";
 
 const SETUP_STEPS: Array<{ key: string; label: string }> = [
   { key: "basics", label: "Company basics" },
@@ -117,6 +120,7 @@ function TodayContent() {
   const [detailsLoads, setDetailsLoads] = useState<WarningDetailLoad[]>([]);
   const [detailsNextCursor, setDetailsNextCursor] = useState<string | null>(null);
   const [detailsQuery, setDetailsQuery] = useState<{ type: string; teamId?: string | null } | null>(null);
+  const [showAllTeams, setShowAllTeams] = useState(false);
 
   const loadToday = async () => {
     setLoading(true);
@@ -165,12 +169,31 @@ function TodayContent() {
   }, [data]);
 
   const baseSubtitle = user?.role ? `${user.role.toLowerCase()} focus` : "Your attention stack";
-  const subtitle = data?.teamsEnabled && data.scope === "team" ? "Your team focus" : baseSubtitle;
+  const showTeamToggle = Boolean(data?.teamsEnabled && canSeeTeamsView);
+  const subtitle = showTeamToggle
+    ? viewMode === "teams"
+      ? "Team focus"
+      : "Company focus"
+    : data?.teamsEnabled && data.scope === "team"
+      ? "Your team focus"
+      : baseSubtitle;
   const showSetup = onboarding?.status === "NOT_ACTIVATED";
   const completedSteps = new Set(onboarding?.completedSteps ?? []);
   const remainingSteps = SETUP_STEPS.filter((step) => !completedSteps.has(step.key));
   const setupPreview = remainingSteps.slice(0, 3);
   const isDispatcherRole = user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+  const teamTotals = useMemo(() => {
+    const teams = data?.teamBreakdown ?? [];
+    return teams
+      .map((team) => {
+        const total = WARNING_META.reduce((sum, warning) => sum + (team.warnings?.[warning.key] ?? 0), 0);
+        return { ...team, total };
+      })
+      .sort((a, b) => b.total - a.total);
+  }, [data]);
+  const visibleTeams = showAllTeams ? teamTotals : teamTotals.slice(0, 6);
+  const totalTeams = teamTotals.length;
+  const totalWarnings = teamTotals.reduce((sum, team) => sum + team.total, 0);
 
   const resolveItemHref = (item: TodayItem) => {
     if (!item.href) return null;
@@ -252,17 +275,33 @@ function TodayContent() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Today</div>
-          <div className="text-2xl font-semibold">Your priority stack</div>
-          <div className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</div>
+    <div className="w-full space-y-6">
+      <div className={`rounded-[var(--radius-card)] border-0 px-6 py-4 ${GLOSSY_SURFACE}`}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-muted)]">Today</div>
+            <div className="text-xl font-semibold text-ink">Priority stack</div>
+            <div className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</div>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {showTeamToggle ? (
+              <SegmentedControl
+                value={viewMode}
+                options={[
+                  { label: "Company", value: "company" },
+                  { label: "Teams", value: "teams" },
+                ]}
+                onChange={(value) => setViewMode(value as "company" | "teams")}
+              />
+            ) : null}
+            <Button variant="secondary" onClick={loadToday} disabled={loading}>
+              {loading ? "Refreshing…" : "Refresh"}
+            </Button>
+          </div>
         </div>
-        <Button variant="secondary" onClick={loadToday} disabled={loading}>
-          {loading ? "Refreshing…" : "Refresh"}
-        </Button>
       </div>
+
+      <div className="border-t border-[color:var(--color-divider)]" />
 
       {error ? <ErrorBanner message={error} /> : null}
 
@@ -303,67 +342,73 @@ function TodayContent() {
         <EmptyState title="All clear." description="No urgent actions detected right now." />
       ) : null}
 
-      <div className="grid gap-6 lg:grid-cols-3">
+      <div className="grid gap-7 lg:grid-cols-3">
         {SECTION_META.map((section) => {
           const items = data ? data[section.key] : [];
           const isWarnings = section.key === "warnings";
-          const warningSubtitle =
-            isWarnings && data?.teamsEnabled && data.scope === "team" ? "Your team" : section.subtitle;
-          const showTeamToggle = Boolean(isWarnings && canSeeTeamsView && data?.teamsEnabled);
-          const teamBreakdown = data?.teamBreakdown ?? [];
+          const warningSubtitle = isWarnings && showTeamToggle ? (viewMode === "teams" ? "Team view" : "Company view") : section.subtitle;
           return (
             <div key={section.key} className="space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <SectionHeader title={section.label} subtitle={warningSubtitle} />
-                {showTeamToggle ? (
-                  <SegmentedControl
-                    value={viewMode}
-                    options={[
-                      { label: "Company", value: "company" },
-                      { label: "Teams", value: "teams" },
-                    ]}
-                    onChange={(value) => setViewMode(value as "company" | "teams")}
-                  />
-                ) : null}
-              </div>
+              <SectionHeader title={section.label} subtitle={warningSubtitle} />
               {loading ? (
-                <Card className="text-sm text-[color:var(--color-text-muted)]">Loading…</Card>
+                <Card className={`min-h-[130px] border-0 p-4 text-sm text-[color:var(--color-text-muted)] ${GLOSSY_SURFACE}`}>
+                  Loading…
+                </Card>
               ) : isWarnings && showTeamToggle && viewMode === "teams" ? (
-                teamBreakdown.length === 0 ? (
-                  <Card className="text-sm text-[color:var(--color-text-muted)]">Nothing here right now.</Card>
+                teamTotals.length === 0 ? (
+                  <Card className={`min-h-[130px] border-0 p-4 text-sm text-[color:var(--color-text-muted)] ${GLOSSY_SURFACE}`}>
+                    Nothing here right now.
+                  </Card>
                 ) : (
-                  teamBreakdown.map((team) => (
-                    <Card key={team.teamId} className="space-y-3 border border-[color:var(--color-divider)]">
-                      <div className="text-sm font-semibold">{team.teamName}</div>
-                      <div className="flex flex-wrap gap-2">
-                        {WARNING_META.map((warning) => {
-                          const count = team.warnings?.[warning.key] ?? 0;
-                          return (
-                            <button
-                              key={warning.key}
-                              type="button"
-                              disabled={count === 0}
-                              className={`rounded-full border px-3 py-1 text-xs ${
-                                count === 0
-                                  ? "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"
-                                  : "border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] text-ink"
-                              }`}
-                              onClick={() => openWarningDetails(warning.key, team.teamId)}
-                            >
-                              {warning.label} · {count}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </Card>
-                  ))
+                  <div className="space-y-3">
+                    <div className="text-xs text-[color:var(--color-text-muted)]">
+                      {totalTeams} teams · {totalWarnings} warnings
+                    </div>
+                    <div className="space-y-2">
+                      {visibleTeams.map((team) => (
+                        <Card key={team.teamId} className={`space-y-3 border-0 p-4 ${GLOSSY_SURFACE}`}>
+                          <div className="text-sm font-semibold">{team.teamName}</div>
+                          <div className="flex flex-wrap gap-2">
+                            {WARNING_META.map((warning) => {
+                              const count = team.warnings?.[warning.key] ?? 0;
+                              return (
+                                <button
+                                  key={warning.key}
+                                  type="button"
+                                  disabled={count === 0}
+                                  className={`rounded-full border px-3 py-1 text-xs ${
+                                    count === 0
+                                      ? "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"
+                                      : "border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] text-ink"
+                                  }`}
+                                  onClick={() => openWarningDetails(warning.key, team.teamId)}
+                                >
+                                  {warning.label} · {count}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+                    {totalTeams > 6 ? (
+                      <Button variant="secondary" onClick={() => setShowAllTeams((prev) => !prev)}>
+                        {showAllTeams ? "Show fewer teams" : "View all teams"}
+                      </Button>
+                    ) : null}
+                  </div>
                 )
               ) : items.length === 0 ? (
-                <Card className="text-sm text-[color:var(--color-text-muted)]">Nothing here right now.</Card>
+                <Card className={`min-h-[130px] border-0 p-4 text-sm text-[color:var(--color-text-muted)] ${GLOSSY_SURFACE}`}>
+                  Nothing here right now.
+                </Card>
               ) : (
                 items.map((item, index) => (
-                  <Card key={`${item.title}-${index}`} className={`space-y-2 border ${TONE_CLASS[section.tone]}`}>
-                    <div className="text-sm font-semibold">{item.title}</div>
+                  <Card
+                    key={`${item.title}-${index}`}
+                    className={`min-h-[130px] space-y-2 p-4 ${TONE_CLASS[section.tone]} ${GLOSSY_SURFACE}`}
+                  >
+                    <div className="text-sm font-medium text-ink">{item.title}</div>
                     {item.detail ? <div className="text-xs text-[color:var(--color-text-muted)]">{item.detail}</div> : null}
                     {item.href ? (
                       <Button
@@ -462,7 +507,7 @@ function TodayContent() {
 
 export default function TodayPage() {
   return (
-    <AppShell title="Today" subtitle="What needs attention right now">
+    <AppShell title="Today" subtitle="Priority stack" hideHeader>
       <TodayContent />
     </AppShell>
   );
