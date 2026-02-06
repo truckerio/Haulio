@@ -57,6 +57,18 @@ Optional overrides:
    docker compose -f docker-compose.demo.yml exec api pnpm db:seed
    ```
 
+### Dual local + LAN (no file edits)
+
+- Default uses `.env.docker`.
+- To override per machine without changing the repo, pass `ENV_FILE`:
+  ```bash
+  ENV_FILE=.env.docker.local docker compose -f docker-compose.demo.yml up -d --build
+  ```
+  or
+  ```bash
+  ENV_FILE=.env.docker.lan docker compose -f docker-compose.demo.yml up -d --build
+  ```
+
 ## Render (Docker)
 
 Use repo root as the build context for all services.

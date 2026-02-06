@@ -1,105 +1,220 @@
 import bcrypt from "bcryptjs";
 import { prisma, Prisma } from "../src";
 
+const ORG_NAME = process.env.DEMO_ORG_NAME || "Haulio Demo Logistics";
+const ADMIN_EMAIL = process.env.DEMO_ADMIN_EMAIL || "karan@admin.com";
+const ADMIN_PASSWORD = process.env.DEMO_ADMIN_PASSWORD || "password123";
+
+const LOAD_COUNT = Number(process.env.DEMO_LOAD_COUNT || "200");
+const DRIVER_COUNT = Number(process.env.DEMO_DRIVER_COUNT || "40");
+const TRUCK_COUNT = Number(process.env.DEMO_TRUCK_COUNT || "35");
+const TRAILER_COUNT = Number(process.env.DEMO_TRAILER_COUNT || "35");
+
+const TEAM_NAMES = ["Default", "Alpha", "Bravo", "Charlie", "Delta", "Echo"];
+
+const CUSTOMER_NAMES = [
+  "Blue Ridge Foods",
+  "Granite Mills",
+  "Freshline Produce",
+  "Sunrise Paper",
+  "Ironline Steel",
+  "Maple Logistics",
+  "Northwind Plastics",
+  "Summit Retail",
+];
+
+const STOP_CITIES = [
+  { city: "Dallas", state: "TX" },
+  { city: "Houston", state: "TX" },
+  { city: "Austin", state: "TX" },
+  { city: "Memphis", state: "TN" },
+  { city: "Nashville", state: "TN" },
+  { city: "Atlanta", state: "GA" },
+  { city: "Charlotte", state: "NC" },
+  { city: "Denver", state: "CO" },
+];
+
+const LOAD_STATUSES = [
+  ...Array(40).fill("PLANNED"),
+  ...Array(40).fill("ASSIGNED"),
+  ...Array(40).fill("IN_TRANSIT"),
+  ...Array(30).fill("DELIVERED"),
+  ...Array(20).fill("POD_RECEIVED"),
+  ...Array(20).fill("READY_TO_INVOICE"),
+  ...Array(10).fill("INVOICED"),
+];
+
+function toDecimal(value: number) {
+  return new Prisma.Decimal(value.toFixed(2));
+}
+
+function pick<T>(list: T[], index: number) {
+  return list[index % list.length];
+}
+
 async function main() {
-  await prisma.session.deleteMany();
-  await prisma.event.deleteMany();
-  await prisma.document.deleteMany();
-  await prisma.task.deleteMany();
-  await prisma.invoice.deleteMany();
-  await prisma.stop.deleteMany();
-  await prisma.load.deleteMany();
-  await prisma.driver.deleteMany();
-  await prisma.truck.deleteMany();
-  await prisma.trailer.deleteMany();
-  await prisma.user.deleteMany();
-  await prisma.orgSettings.deleteMany();
-  await prisma.organization.deleteMany();
+  await prisma.$executeRawUnsafe('TRUNCATE TABLE "Organization" CASCADE');
+
+  const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
 
   const org = await prisma.organization.create({
-    data: { name: "Demo Transport" },
+    data: { name: ORG_NAME },
   });
-
-  const passwordHash = await bcrypt.hash("password123", 10);
 
   const admin = await prisma.user.create({
     data: {
       orgId: org.id,
-      email: "admin@demo.com",
+      email: ADMIN_EMAIL,
       passwordHash,
       role: "ADMIN",
-      name: "Ari Admin",
+      name: "Karan Admin",
+      canSeeAllTeams: true,
     },
   });
 
-  const dispatch = await prisma.user.create({
+  const headDispatcher = await prisma.user.create({
     data: {
       orgId: org.id,
-      email: "dispatch@demo.com",
+      email: "head.dispatch@demo.com",
       passwordHash,
-      role: "DISPATCHER",
-      name: "Drew Dispatch",
+      role: "HEAD_DISPATCHER",
+      name: "Harper Head",
+      canSeeAllTeams: true,
     },
   });
 
-  const billing = await prisma.user.create({
-    data: {
+  const dispatchers = await Promise.all(
+    ["dispatch1@demo.com", "dispatch2@demo.com"].map((email, index) =>
+      prisma.user.create({
+        data: {
+          orgId: org.id,
+          email,
+          passwordHash,
+          role: "DISPATCHER",
+          name: `Dispatch ${index + 1}`,
+        },
+      })
+    )
+  );
+
+  const billingUsers = await Promise.all(
+    ["billing1@demo.com", "billing2@demo.com"].map((email, index) =>
+      prisma.user.create({
+        data: {
+          orgId: org.id,
+          email,
+          passwordHash,
+          role: "BILLING",
+          name: `Billing ${index + 1}`,
+        },
+      })
+    )
+  );
+
+  const driverUsers = await Promise.all(
+    Array.from({ length: Math.min(DRIVER_COUNT, 10) }).map((_, index) =>
+      prisma.user.create({
+        data: {
+          orgId: org.id,
+          email: `driver${index + 1}@demo.com`,
+          passwordHash,
+          role: "DRIVER",
+          name: `Driver ${index + 1}`,
+        },
+      })
+    )
+  );
+
+  const teams = await Promise.all(
+    TEAM_NAMES.map((name) =>
+      prisma.team.create({
+        data: { orgId: org.id, name, active: true },
+      })
+    )
+  );
+  const defaultTeam = teams.find((team) => team.name === "Default") ?? teams[0];
+  const otherTeams = teams.filter((team) => team.id !== defaultTeam.id);
+
+  const allUsers = [admin, headDispatcher, ...dispatchers, ...billingUsers, ...driverUsers];
+  await prisma.user.updateMany({
+    where: { orgId: org.id },
+    data: { defaultTeamId: defaultTeam.id },
+  });
+  await prisma.teamMember.createMany({
+    data: allUsers.map((user) => ({
       orgId: org.id,
-      email: "billing@demo.com",
-      passwordHash,
-      role: "BILLING",
-      name: "Bill Billing",
-    },
+      teamId: defaultTeam.id,
+      userId: user.id,
+    })),
+    skipDuplicates: true,
   });
 
-  const driverUser = await prisma.user.create({
-    data: {
-      orgId: org.id,
-      email: "driver@demo.com",
-      passwordHash,
-      role: "DRIVER",
-      name: "Dani Driver",
-    },
-  });
+  for (const [index, user] of dispatchers.entries()) {
+    const team = pick(otherTeams, index);
+    if (!team) continue;
+    await prisma.teamMember.create({
+      data: { orgId: org.id, teamId: team.id, userId: user.id },
+    });
+  }
 
-  const driver = await prisma.driver.create({
-    data: {
-      orgId: org.id,
-      userId: driverUser.id,
-      name: "Dani Driver",
-      status: "ON_LOAD",
-      phone: "(555) 010-2000",
-      license: "D-1234567",
-      licenseState: "TX",
-      licenseExpiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
-      medCardExpiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 180),
-      payRatePerMile: new Prisma.Decimal("0.68"),
-    },
-  });
+  const drivers = await Promise.all(
+    Array.from({ length: DRIVER_COUNT }).map((_, index) =>
+      prisma.driver.create({
+        data: {
+          orgId: org.id,
+          userId: driverUsers[index]?.id ?? null,
+          name: driverUsers[index]?.name ?? `Driver ${index + 1}`,
+          status: index % 3 === 0 ? "ON_LOAD" : index % 3 === 1 ? "AVAILABLE" : "UNAVAILABLE",
+          phone: `(555) 010-${(2000 + index).toString().slice(-4)}`,
+          license: `D-${100000 + index}`,
+          licenseState: "TX",
+          licenseExpiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+          medCardExpiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 180),
+          payRatePerMile: toDecimal(0.62 + (index % 5) * 0.02),
+        },
+      })
+    )
+  );
 
-  const truck1 = await prisma.truck.create({
-    data: { orgId: org.id, unit: "T-101", vin: "1HGBH41JXMN109186", plate: "ABC-123", plateState: "TX", status: "ASSIGNED" },
-  });
-  const truck2 = await prisma.truck.create({
-    data: { orgId: org.id, unit: "T-102", vin: "1HGCM82633A004352", plate: "DEF-456", plateState: "TX", status: "ASSIGNED" },
-  });
+  const trucks = await Promise.all(
+    Array.from({ length: TRUCK_COUNT }).map((_, index) =>
+      prisma.truck.create({
+        data: {
+          orgId: org.id,
+          unit: `T-${100 + index}`,
+          vin: `VIN${100000 + index}`,
+          plate: `TRK-${100 + index}`,
+          plateState: "TX",
+          status: index % 4 === 0 ? "MAINTENANCE" : "AVAILABLE",
+        },
+      })
+    )
+  );
 
-  const trailer1 = await prisma.trailer.create({
-    data: { orgId: org.id, unit: "TR-201", type: "DRY_VAN", plate: "TR-201", plateState: "TX", status: "ASSIGNED" },
-  });
-  const trailer2 = await prisma.trailer.create({
-    data: { orgId: org.id, unit: "TR-202", type: "REEFER", plate: "TR-202", plateState: "TX", status: "ASSIGNED" },
-  });
+  const trailers = await Promise.all(
+    Array.from({ length: TRAILER_COUNT }).map((_, index) =>
+      prisma.trailer.create({
+        data: {
+          orgId: org.id,
+          unit: `TR-${200 + index}`,
+          type: index % 3 === 0 ? "REEFER" : index % 3 === 1 ? "FLATBED" : "DRY_VAN",
+          plate: `TRL-${200 + index}`,
+          plateState: "TX",
+          status: index % 4 === 0 ? "MAINTENANCE" : "AVAILABLE",
+        },
+      })
+    )
+  );
 
   await prisma.orgSettings.create({
     data: {
       orgId: org.id,
-      companyDisplayName: "Demo Transport LLC",
-      remitToAddress: "Demo Transport LLC\n123 Freight Ave\nDallas, TX 75201",
+      companyDisplayName: "Haulio Demo Logistics",
+      remitToAddress: "Haulio Demo Logistics\n123 Freight Ave\nDallas, TX 75201",
       invoiceTerms: "Net 30",
       invoiceFooter: "Thank you for your business.",
       invoicePrefix: "INV-",
-      nextInvoiceNumber: 1001,
+      nextInvoiceNumber: 1200,
       currency: "USD",
       operatingMode: "CARRIER",
       requireRateConBeforeDispatch: false,
@@ -116,430 +231,248 @@ async function main() {
       missingPodAfterMinutes: 120,
       reminderFrequencyMinutes: 20,
       timezone: "America/Chicago",
-      // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
       freeStorageMinutes: 120,
-      // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
-      storageRatePerDay: new Prisma.Decimal("150.00"),
+      storageRatePerDay: toDecimal(150),
       pickupFreeDetentionMinutes: 120,
       deliveryFreeDetentionMinutes: 120,
-      detentionRatePerHour: new Prisma.Decimal("75.00"),
+      detentionRatePerHour: toDecimal(75),
       invoiceTermsDays: 30,
-      driverRatePerMile: new Prisma.Decimal("0.65"),
+      driverRatePerMile: toDecimal(0.65),
     },
   });
 
   const operatingEntity = await prisma.operatingEntity.create({
     data: {
       orgId: org.id,
-      name: "Demo Transport LLC",
+      name: "Haulio Demo Logistics",
       type: "CARRIER",
-      addressLine1: "Demo Transport LLC\n123 Freight Ave\nDallas, TX 75201",
-      remitToName: "Demo Transport LLC",
-      remitToAddressLine1: "Demo Transport LLC\n123 Freight Ave\nDallas, TX 75201",
+      addressLine1: "Haulio Demo Logistics\n123 Freight Ave\nDallas, TX 75201",
+      remitToName: "Haulio Demo Logistics",
+      remitToAddressLine1: "Haulio Demo Logistics\n123 Freight Ave\nDallas, TX 75201",
       isDefault: true,
     },
   });
 
-  const customerA = await prisma.customer.create({
-    data: {
-      orgId: org.id,
-      name: "Blue Ridge Foods",
-      billingEmail: "ap@blueridge.test",
-      billingPhone: "(555) 101-0909",
-      termsDays: 30,
-    },
-  });
-  const customerB = await prisma.customer.create({
-    data: {
-      orgId: org.id,
-      name: "Granite Mills",
-      billingEmail: "billing@granite.test",
-      termsDays: 21,
-    },
-  });
-  const customerC = await prisma.customer.create({
-    data: {
-      orgId: org.id,
-      name: "Freshline Produce",
-      billingEmail: "billing@freshline.test",
-      termsDays: 14,
-    },
-  });
-  const customerD = await prisma.customer.create({
-    data: {
-      orgId: org.id,
-      name: "Sunrise Paper",
-      billingEmail: "billing@sunrise.test",
-      termsDays: 30,
-    },
-  });
-  const customerE = await prisma.customer.create({
-    data: {
-      orgId: org.id,
-      name: "Ironline Steel",
-      billingEmail: "billing@ironline.test",
-      termsDays: 45,
-    },
-  });
+  const customers = await Promise.all(
+    CUSTOMER_NAMES.map((name, index) =>
+      prisma.customer.create({
+        data: {
+          orgId: org.id,
+          name,
+          billingEmail: `ap${index + 1}@demo.com`,
+          billingPhone: `(555) 100-${(3000 + index).toString().slice(-4)}`,
+          termsDays: 14 + (index % 4) * 7,
+        },
+      })
+    )
+  );
 
-  const load1 = await prisma.load.create({
-    data: {
-      orgId: org.id,
-      loadNumber: "LD-1001",
-      status: "ASSIGNED",
-      loadType: "COMPANY",
-      operatingEntityId: operatingEntity.id,
-      customerId: customerA.id,
-      customerName: "Blue Ridge Foods",
-      miles: 280,
-      assignedDriverId: driver.id,
-      truckId: truck1.id,
-      trailerId: trailer1.id,
-      assignedDriverAt: new Date(),
-      assignedTruckAt: new Date(),
-      assignedTrailerAt: new Date(),
-      rate: new Prisma.Decimal("1400.00"),
-      customerRef: "PO-4491",
-      bolNumber: "BOL-1001",
-      createdById: dispatch.id,
-      stops: {
-        create: [
-          {
-            orgId: org.id,
-            type: "PICKUP",
-            status: "PLANNED",
-            name: "BRF Warehouse",
-            address: "1200 Maple St",
-            city: "Memphis",
-            state: "TN",
-            zip: "38103",
-            appointmentStart: new Date(Date.now() + 60 * 60 * 1000),
-            appointmentEnd: new Date(Date.now() + 2 * 60 * 60 * 1000),
-            sequence: 1,
-          },
-          {
-            orgId: org.id,
-            type: "DELIVERY",
-            status: "PLANNED",
-            name: "Grove Market DC",
-            address: "8801 Commerce Rd",
-            city: "Nashville",
-            state: "TN",
-            zip: "37209",
-            appointmentStart: new Date(Date.now() + 6 * 60 * 60 * 1000),
-            appointmentEnd: new Date(Date.now() + 7 * 60 * 60 * 1000),
-            sequence: 2,
-          },
-        ],
+  const assignableTeams = otherTeams.length > 0 ? otherTeams : [defaultTeam];
+  const createdBy = dispatchers[0] ?? admin;
+  const loads: Array<{ id: string; status: string }> = [];
+
+  for (const [index, status] of LOAD_STATUSES.slice(0, LOAD_COUNT).entries()) {
+    const customer = pick(customers, index);
+    const driver = pick(drivers, index);
+    const truck = pick(trucks, index);
+    const trailer = pick(trailers, index);
+    const team = pick(assignableTeams, index);
+
+    const loadType = index % 7 === 0 ? "BROKERED" : "COMPANY";
+    const shouldAssign = status !== "PLANNED" && !(status === "ASSIGNED" && index % 4 === 0);
+    const assignedDriverId = shouldAssign ? driver.id : null;
+    const assignedTruckId = shouldAssign ? truck.id : null;
+    const assignedTrailerId = shouldAssign ? trailer.id : null;
+
+    const baseTime = new Date(Date.now() - (index % 12) * 6 * 60 * 60 * 1000);
+    const pickupCity = pick(STOP_CITIES, index);
+    const dropCity = pick(STOP_CITIES, index + 3);
+
+    const pickupStatus =
+      status === "IN_TRANSIT" ||
+      status === "DELIVERED" ||
+      status === "POD_RECEIVED" ||
+      status === "READY_TO_INVOICE" ||
+      status === "INVOICED"
+        ? "DEPARTED"
+        : status === "ASSIGNED"
+          ? "PLANNED"
+          : "PLANNED";
+    const dropStatus =
+      status === "DELIVERED" ||
+      status === "POD_RECEIVED" ||
+      status === "READY_TO_INVOICE" ||
+      status === "INVOICED"
+        ? "ARRIVED"
+        : "PLANNED";
+
+    const load = await prisma.load.create({
+      data: {
+        orgId: org.id,
+        loadNumber: `LD-${2000 + index}`,
+        status: status as any,
+        loadType: loadType as any,
+        operatingEntityId: operatingEntity.id,
+        customerId: customer.id,
+        customerName: customer.name,
+        miles: 120 + (index % 10) * 30,
+        rate: toDecimal(1200 + (index % 25) * 40),
+        customerRef: `PO-${7000 + index}`,
+        bolNumber: `BOL-${2000 + index}`,
+        assignedDriverId,
+        truckId: assignedTruckId,
+        trailerId: assignedTrailerId,
+        assignedDriverAt: assignedDriverId ? baseTime : null,
+        assignedTruckAt: assignedTruckId ? baseTime : null,
+        assignedTrailerAt: assignedTrailerId ? baseTime : null,
+        deliveredAt:
+          status === "DELIVERED" ||
+          status === "POD_RECEIVED" ||
+          status === "READY_TO_INVOICE" ||
+          status === "INVOICED"
+            ? new Date(baseTime.getTime() + 6 * 60 * 60 * 1000)
+            : null,
+        podVerifiedAt: status === "READY_TO_INVOICE" || status === "INVOICED" ? new Date() : null,
+        createdById: createdBy.id,
+        stops: {
+          create: [
+            {
+              orgId: org.id,
+              type: "PICKUP",
+              status: pickupStatus as any,
+              name: `${customer.name} Pickup`,
+              address: `${100 + (index % 80)} Main St`,
+              city: pickupCity.city,
+              state: pickupCity.state,
+              zip: `75${(200 + index).toString().slice(-3)}`,
+              appointmentStart: new Date(baseTime.getTime() + 60 * 60 * 1000),
+              appointmentEnd: new Date(baseTime.getTime() + 2 * 60 * 60 * 1000),
+              arrivedAt: pickupStatus !== "PLANNED" ? new Date(baseTime.getTime() + 60 * 60 * 1000) : null,
+              departedAt: pickupStatus === "DEPARTED" ? new Date(baseTime.getTime() + 2 * 60 * 60 * 1000) : null,
+              sequence: 1,
+            },
+            {
+              orgId: org.id,
+              type: "DELIVERY",
+              status: dropStatus as any,
+              name: `${customer.name} Delivery`,
+              address: `${600 + (index % 80)} Market Ave`,
+              city: dropCity.city,
+              state: dropCity.state,
+              zip: `76${(300 + index).toString().slice(-3)}`,
+              appointmentStart: new Date(baseTime.getTime() + 6 * 60 * 60 * 1000),
+              appointmentEnd: new Date(baseTime.getTime() + 7 * 60 * 60 * 1000),
+              arrivedAt: dropStatus !== "PLANNED" ? new Date(baseTime.getTime() + 6 * 60 * 60 * 1000) : null,
+              departedAt:
+                dropStatus === "ARRIVED" && status === "INVOICED"
+                  ? new Date(baseTime.getTime() + 7 * 60 * 60 * 1000)
+                  : null,
+              sequence: 2,
+            },
+          ],
+        },
       },
-    },
-  });
+    });
 
-  const load2 = await prisma.load.create({
-    data: {
-      orgId: org.id,
-      loadNumber: "LD-1002",
-      status: "IN_TRANSIT",
-      loadType: "COMPANY",
-      operatingEntityId: operatingEntity.id,
-      customerId: customerB.id,
-      customerName: "Granite Mills",
-      miles: 210,
-      assignedDriverId: driver.id,
-      truckId: truck2.id,
-      trailerId: trailer2.id,
-      assignedDriverAt: new Date(),
-      assignedTruckAt: new Date(),
-      assignedTrailerAt: new Date(),
-      rate: new Prisma.Decimal("1150.00"),
-      customerRef: "PO-7781",
-      createdById: dispatch.id,
-      stops: {
-        create: [
-          {
-            orgId: org.id,
-            type: "PICKUP",
-            status: "DEPARTED",
-            name: "Granite Mills Plant",
-            address: "45 Quarry Rd",
-            city: "Birmingham",
-            state: "AL",
-            zip: "35203",
-            arrivedAt: new Date(Date.now() - 6 * 60 * 60 * 1000),
-            departedAt: new Date(Date.now() - 5 * 60 * 60 * 1000),
-            sequence: 1,
-          },
-          {
-            orgId: org.id,
-            type: "DELIVERY",
-            status: "PLANNED",
-            name: "Southline Retail",
-            address: "990 Market St",
-            city: "Atlanta",
-            state: "GA",
-            zip: "30303",
-            sequence: 2,
-          },
-        ],
+    loads.push({ id: load.id, status });
+
+    await prisma.teamAssignment.create({
+      data: {
+        orgId: org.id,
+        teamId: team.id,
+        entityType: "LOAD",
+        entityId: load.id,
       },
-    },
-  });
+    });
+  }
 
-  const load3 = await prisma.load.create({
-    data: {
-      orgId: org.id,
-      loadNumber: "LD-1003",
-      status: "DELIVERED",
-      loadType: "COMPANY",
-      operatingEntityId: operatingEntity.id,
-      customerId: customerC.id,
-      customerName: "Freshline Produce",
-      miles: 165,
-      rate: new Prisma.Decimal("980.00"),
-      assignedDriverId: driver.id,
-      createdById: dispatch.id,
-      deliveredAt: new Date(Date.now() - 4 * 60 * 60 * 1000),
-      stops: {
-        create: [
-          {
-            orgId: org.id,
-            type: "PICKUP",
-            status: "DEPARTED",
-            name: "Freshline Yard",
-            address: "330 Orchard Ln",
-            city: "Austin",
-            state: "TX",
-            zip: "73301",
-            arrivedAt: new Date(Date.now() - 12 * 60 * 60 * 1000),
-            departedAt: new Date(Date.now() - 11 * 60 * 60 * 1000),
-            sequence: 1,
-          },
-          {
-            orgId: org.id,
-            type: "DELIVERY",
-            status: "ARRIVED",
-            name: "Harbor Foods",
-            address: "1600 Dock St",
-            city: "Houston",
-            state: "TX",
-            zip: "77002",
-            arrivedAt: new Date(Date.now() - 4 * 60 * 60 * 1000),
-            sequence: 2,
-          },
-        ],
+  const podUploader = driverUsers[0] ?? admin;
+  const billingUser = billingUsers[0] ?? admin;
+  const invoicedLoads = loads.filter((load) => load.status === "INVOICED").slice(0, 5);
+  const deliveredLoads = loads.filter((load) => load.status === "DELIVERED").slice(0, 10);
+
+  for (const load of deliveredLoads) {
+    await prisma.document.create({
+      data: {
+        orgId: org.id,
+        loadId: load.id,
+        type: "POD",
+        status: "UPLOADED",
+        filename: `pod_${load.id}.pdf`,
+        originalName: "POD.pdf",
+        mimeType: "application/pdf",
+        size: 12345,
+        uploadedById: podUploader.id,
       },
-    },
-  });
+    });
+  }
 
-  const load4 = await prisma.load.create({
-    data: {
-      orgId: org.id,
-      loadNumber: "LD-1004",
-      status: "READY_TO_INVOICE",
-      loadType: "COMPANY",
-      operatingEntityId: operatingEntity.id,
-      customerId: customerD.id,
-      customerName: "Sunrise Paper",
-      miles: 310,
-      rate: new Prisma.Decimal("1550.00"),
-      assignedDriverId: driver.id,
-      createdById: dispatch.id,
-      deliveredAt: new Date(Date.now() - 6 * 60 * 60 * 1000),
-      podVerifiedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-      stops: {
-        create: [
-          {
-            orgId: org.id,
-            type: "PICKUP",
-            status: "DEPARTED",
-            name: "Sunrise Paper Mill",
-            address: "12 Mill Rd",
-            city: "Shreveport",
-            state: "LA",
-            zip: "71101",
-            arrivedAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
-            departedAt: new Date(Date.now() - 23 * 60 * 60 * 1000),
-            sequence: 1,
-          },
-          {
-            orgId: org.id,
-            type: "DELIVERY",
-            status: "DEPARTED",
-            name: "City Print House",
-            address: "88 Press Ave",
-            city: "Little Rock",
-            state: "AR",
-            zip: "72201",
-            arrivedAt: new Date(Date.now() - 6 * 60 * 60 * 1000),
-            departedAt: new Date(Date.now() - 5 * 60 * 60 * 1000),
-            sequence: 2,
-          },
-        ],
+  for (const load of invoicedLoads) {
+    await prisma.document.create({
+      data: {
+        orgId: org.id,
+        loadId: load.id,
+        type: "POD",
+        status: "VERIFIED",
+        filename: `pod_${load.id}.pdf`,
+        originalName: "POD.pdf",
+        mimeType: "application/pdf",
+        size: 12345,
+        uploadedById: podUploader.id,
+        verifiedById: billingUser.id,
+        verifiedAt: new Date(),
       },
-    },
-  });
-
-  const load5 = await prisma.load.create({
-    data: {
-      orgId: org.id,
-      loadNumber: "LD-1005",
-      status: "INVOICED",
-      loadType: "BROKERED",
-      operatingEntityId: operatingEntity.id,
-      lockedAt: new Date(),
-      customerId: customerE.id,
-      customerName: "Ironline Steel",
-      miles: 445,
-      rate: new Prisma.Decimal("1850.00"),
-      assignedDriverId: driver.id,
-      createdById: dispatch.id,
-      deliveredAt: new Date(Date.now() - 60 * 60 * 1000 * 40),
-      podVerifiedAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
-      stops: {
-        create: [
-          {
-            orgId: org.id,
-            type: "PICKUP",
-            status: "DEPARTED",
-            name: "Ironline Plant",
-            address: "900 Forge Dr",
-            city: "Tulsa",
-            state: "OK",
-            zip: "74103",
-            arrivedAt: new Date(Date.now() - 60 * 60 * 1000 * 48),
-            departedAt: new Date(Date.now() - 60 * 60 * 1000 * 47),
-            sequence: 1,
-          },
-          {
-            orgId: org.id,
-            type: "DELIVERY",
-            status: "DEPARTED",
-            name: "Metro Steelworks",
-            address: "700 Foundry Blvd",
-            city: "Kansas City",
-            state: "MO",
-            zip: "64101",
-            arrivedAt: new Date(Date.now() - 60 * 60 * 1000 * 40),
-            departedAt: new Date(Date.now() - 60 * 60 * 1000 * 39),
-            sequence: 2,
-          },
-        ],
+    });
+    await prisma.invoice.create({
+      data: {
+        orgId: org.id,
+        loadId: load.id,
+        invoiceNumber: `INV-${1500 + Math.floor(Math.random() * 1000)}`,
+        status: "SENT",
+        totalAmount: toDecimal(1500 + Math.floor(Math.random() * 500)),
+        sentAt: new Date(),
+        pdfPath: `uploads/invoices/INV-${load.id}.pdf`,
+        packetPath: `uploads/packets/INV-${load.id}.zip`,
+        items: {
+          create: [
+            {
+              code: "LINEHAUL",
+              description: "Linehaul",
+              quantity: toDecimal(1),
+              rate: toDecimal(1500),
+              amount: toDecimal(1500),
+            },
+          ],
+        },
       },
-    },
-  });
+    });
+  }
 
-  await prisma.document.create({
-    data: {
-      orgId: org.id,
-      loadId: load4.id,
-      type: "POD",
-      status: "VERIFIED",
-      filename: "pod_ld-1004_demo.pdf",
-      originalName: "POD.pdf",
-      mimeType: "application/pdf",
-      size: 12345,
-      uploadedById: driverUser.id,
-      verifiedById: billing.id,
-      verifiedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-    },
-  });
-
-  await prisma.document.create({
-    data: {
-      orgId: org.id,
-      loadId: load5.id,
-      type: "POD",
-      status: "VERIFIED",
-      filename: "pod_ld-1005_demo.pdf",
-      originalName: "POD.pdf",
-      mimeType: "application/pdf",
-      size: 12345,
-      uploadedById: driverUser.id,
-      verifiedById: billing.id,
-      verifiedAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
-    },
-  });
-
-  await prisma.invoice.create({
-    data: {
-      orgId: org.id,
-      loadId: load5.id,
-      invoiceNumber: "INV-1000",
-      status: "SENT",
-      totalAmount: new Prisma.Decimal("1850.00"),
-      sentAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
-      pdfPath: "uploads/invoices/INV-1000.pdf",
-      packetPath: "uploads/packets/INV-1000.zip",
-      items: {
-        create: [
-          {
-            code: "LINEHAUL",
-            description: "Linehaul",
-            quantity: new Prisma.Decimal("1.00"),
-            rate: new Prisma.Decimal("1850.00"),
-            amount: new Prisma.Decimal("1850.00"),
-          },
-        ],
-      },
-    },
-  });
-
-  await prisma.task.create({
-    data: {
-      orgId: org.id,
-      loadId: load3.id,
-      type: "COLLECT_POD",
-      title: "Collect POD",
-      priority: "HIGH",
-      assignedRole: "BILLING",
-      createdById: dispatch.id,
-      dueAt: new Date(Date.now() + 30 * 60 * 1000),
-    },
-  });
-
-  await prisma.task.create({
-    data: {
-      orgId: org.id,
-      loadId: load1.id,
-      type: "CUSTOMER_CALLBACK",
-      title: "Dispatch check-in",
-      priority: "MED",
-      assignedRole: "DISPATCHER",
-      createdById: dispatch.id,
-    },
-  });
-
-  await prisma.event.createMany({
+  await prisma.task.createMany({
     data: [
       {
         orgId: org.id,
-        loadId: load1.id,
-        userId: dispatch.id,
-        type: "LOAD_CREATED",
-        message: "Load created",
+        type: "COLLECT_POD",
+        title: "Collect POD",
+        priority: "HIGH",
+        assignedRole: "BILLING",
+        createdById: billingUser.id,
+        dueAt: new Date(Date.now() + 30 * 60 * 1000),
       },
       {
         orgId: org.id,
-        loadId: load1.id,
-        userId: dispatch.id,
-        type: "LOAD_ASSIGNED",
-        message: "Driver assigned",
+        type: "CUSTOMER_CALLBACK",
+        title: "Dispatch check-in",
+        priority: "MED",
+        assignedRole: "DISPATCHER",
+        createdById: createdBy.id,
       },
     ],
   });
 
-  await prisma.auditLog.create({
-    data: {
-      orgId: org.id,
-      userId: dispatch.id,
-      action: "LOAD_ASSIGNED",
-      entity: "Load",
-      entityId: load1.id,
-      summary: "Assigned Dani Driver to LD-1001",
-    },
-  });
-
-  console.log("Seed complete");
+  console.log("Seed complete.");
+  console.log(`Admin: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+  console.log(`Loads: ${LOAD_COUNT} | Drivers: ${DRIVER_COUNT} | Teams: ${TEAM_NAMES.length}`);
 }
 
 main()
