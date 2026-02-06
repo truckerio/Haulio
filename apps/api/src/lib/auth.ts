@@ -17,6 +17,7 @@ export type AuthRequest = {
 
 const SESSION_COOKIE = "session";
 const SESSION_TTL_DAYS = 14;
+const IS_PROD = process.env.NODE_ENV === "production";
 
 function hashToken(token: string) {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -43,7 +44,7 @@ export function setSessionCookie(res: Response, token: string, expiresAt: Date) 
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: false,
+    secure: IS_PROD,
     expires: expiresAt,
   });
 }

@@ -47,10 +47,16 @@ export default function HomePage() {
     setError(null);
     setLoading(true);
     try {
+      const form = event.currentTarget as HTMLFormElement;
+      const formData = new FormData(form);
+      const formEmail = String(formData.get("email") ?? "");
+      const formPassword = String(formData.get("password") ?? "");
+      const nextEmail = formEmail.trim() || email.trim();
+      const nextPassword = formPassword || password;
       const data = await apiFetch<{ user: { role: string }; csrfToken: string }>("/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: nextEmail, password: nextPassword }),
       });
       setCsrfToken(data.csrfToken);
       if (data.user.role === "DRIVER") {
@@ -113,14 +119,22 @@ export default function HomePage() {
             </div>
             <form className="space-y-3" onSubmit={handleLogin}>
               <FormField label="Email" htmlFor="loginEmail">
-                <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" />
+                <Input
+                  name="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="name@company.com"
+                  autoComplete="email"
+                />
               </FormField>
               <FormField label="Password" htmlFor="loginPassword">
                 <Input
+                  name="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Your password"
                   type="password"
+                  autoComplete="current-password"
                 />
               </FormField>
               {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}

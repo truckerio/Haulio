@@ -47,7 +47,7 @@ Optional overrides:
 
 ## Docker demo (one-command)
 
-1. Copy `.env.docker.example` to `.env.docker` and edit `WEB_ORIGIN` + `NEXT_PUBLIC_API_BASE` to match your server hostname.
+1. Copy `.env.docker.example` to `.env.docker`. In LAN/dev you can leave `WEB_ORIGIN` blank and keep `NEXT_PUBLIC_API_BASE=/api`.
 2. Run:
    ```bash
    docker compose -f docker-compose.demo.yml up -d --build
@@ -103,9 +103,16 @@ Example: `truckerio.local`
 2. Update `.env`:
    ```
    WEB_ORIGIN="http://truckerio.local:3000"
-   NEXT_PUBLIC_API_BASE="http://truckerio.local:4000"
+   NEXT_PUBLIC_API_BASE="/api"
+   API_BASE_INTERNAL="http://localhost:4000"
    ```
 3. Restart `pnpm dev:web` and `pnpm dev:api`
+
+## LAN access checklist
+
+- Browser requests go to `http://<host-ip>:3000/api/...` (never `localhost:4000`).
+- Web container can reach API service: `wget -qO- http://api:4000/health` returns `{ ok: true }`.
+- Login response sets a `session` cookie scoped to `<host-ip>`.
 
 ## Uploads
 

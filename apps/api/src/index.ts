@@ -862,28 +862,44 @@ async function recordLearningExample(params: {
 }
 
 app.use(helmet());
-const allowedOrigins = [
-  process.env.WEB_ORIGIN,
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-].filter(Boolean);
+const explicitOrigins = [process.env.WEB_ORIGIN].filter(Boolean) as string[];
+const IS_PROD = process.env.NODE_ENV === "production";
 
-app.use(
+const parseHostname = (value?: string) => {
+  if (!value) return null;
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return null;
+  }
+};
+
+const parseHostHeader = (value?: string | null) => {
+  if (!value) return null;
+  return value.split(",")[0]?.trim().split(":")[0] ?? null;
+};
+
+const isLocalhostHost = (hostname: string | null) => hostname === "localhost" || hostname === "127.0.0.1";
+
+const isAllowedOrigin = (origin: string | undefined, hostHeader: string | undefined) => {
+  if (!origin) return true;
+  if (explicitOrigins.includes(origin)) return true;
+  if (IS_PROD) return false;
+  const originHost = parseHostname(origin);
+  if (!originHost) return false;
+  if (isLocalhostHost(originHost)) return true;
+  const requestHost = parseHostHeader(hostHeader);
+  return Boolean(requestHost && originHost === requestHost);
+};
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin as string | undefined;
+  const allowed = isAllowedOrigin(origin, req.headers.host);
   cors({
-    origin: (origin, callback) => {
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new Error("Not allowed by CORS"));
-    },
+    origin: allowed ? origin || true : false,
     credentials: true,
-  })
-);
+  })(req, res, next);
+});
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use((req, _res, next) => {

@@ -2,6 +2,7 @@ import crypto from "crypto";
 import type { Response, NextFunction } from "express";
 
 const CSRF_COOKIE = "csrf";
+const IS_PROD = process.env.NODE_ENV === "production";
 
 export function createCsrfToken() {
   return crypto.randomBytes(24).toString("hex");
@@ -11,7 +12,7 @@ export function setCsrfCookie(res: Response, token: string) {
   res.cookie(CSRF_COOKIE, token, {
     httpOnly: false,
     sameSite: "lax",
-    secure: false,
+    secure: IS_PROD,
   });
 }
 
