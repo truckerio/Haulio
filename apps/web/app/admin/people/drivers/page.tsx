@@ -370,7 +370,10 @@ export default function DriversPage() {
           subtitle={editingDriverId ? "Update driver details and availability." : "Create a driver profile and login."}
           footer={
             <div className="flex flex-wrap gap-2">
-              <Button onClick={saveDriver} disabled={!driverForm.name || (!editingDriverId && !driverForm.password && driverForm.email)}>
+              <Button
+                onClick={saveDriver}
+                disabled={!driverForm.name || (!editingDriverId && Boolean(driverForm.email) && !driverForm.password)}
+              >
                 {editingDriverId ? "Save" : "Create"}
               </Button>
               <Button variant="secondary" onClick={closeDrawer}>
