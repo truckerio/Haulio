@@ -172,9 +172,12 @@ export default function DocumentsSettingsPage() {
               <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Document Vault</div>
               <div className="text-sm text-[color:var(--color-text-muted)]">Company, truck, and driver compliance files.</div>
             </div>
-            <Button asChild variant="secondary">
-              <Link href="/admin/documents/vault">Open vault</Link>
-            </Button>
+            <Link
+              href="/admin/documents/vault"
+              className="inline-flex items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-white px-4 py-2.5 text-sm font-medium text-ink transition hover:border-[color:var(--color-divider-strong)] hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] focus-visible:ring-offset-2"
+            >
+              Open vault
+            </Link>
           </Card>
 
           <Card className="space-y-4">
