@@ -253,10 +253,6 @@ export default function DriverPage() {
     loadData();
   }, [loadData]);
 
-  useEffect(() => {
-    setComplianceAcknowledged(false);
-  }, [isCoDriver, load?.id]);
-
   const highlightAnchor = useCallback((hash: string) => {
     if (!hash) return;
     const id = hash.replace("#", "");
@@ -315,6 +311,10 @@ export default function DriverPage() {
   const otherDriverName = isCoDriver
     ? primaryMember?.driver?.name ?? load?.driver?.name ?? null
     : coDriverMember?.driver?.name ?? null;
+
+  useEffect(() => {
+    setComplianceAcknowledged(false);
+  }, [isCoDriver, load?.id]);
 
   const driverProfile = driver ?? load?.driver ?? null;
   const profileIncomplete =
