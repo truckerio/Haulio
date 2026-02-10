@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FormField } from "@/components/ui/form-field";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorBanner } from "@/components/ui/error-banner";
+import { StatusChip } from "@/components/ui/status-chip";
 import { AdminSettingsShell } from "@/components/admin-settings/AdminSettingsShell";
 import { apiFetch } from "@/lib/api";
 
@@ -20,6 +21,7 @@ export default function IntegrationsSettingsPage() {
   const [truckMappings, setTruckMappings] = useState<any[]>([]);
   const [trucks, setTrucks] = useState<any[]>([]);
   const [mappingEdits, setMappingEdits] = useState<Record<string, string>>({});
+  const [fuelStatus, setFuelStatus] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visibleTruckCount, setVisibleTruckCount] = useState(5);
 
@@ -29,12 +31,14 @@ export default function IntegrationsSettingsPage() {
         apiFetch<{ integration: any }>("/api/integrations/samsara/status"),
         apiFetch<{ mappings: any[] }>("/api/integrations/samsara/truck-mappings"),
         apiFetch<{ trucks: any[] }>("/admin/trucks"),
+        apiFetch<{ status: string }>("/admin/fuel/status"),
       ]);
-      const [samsaraResult, mappingResult, trucksResult] = results;
+      const [samsaraResult, mappingResult, trucksResult, fuelResult] = results;
 
       if (samsaraResult.status === "fulfilled") setSamsaraStatus(samsaraResult.value.integration ?? null);
       if (mappingResult.status === "fulfilled") setTruckMappings(mappingResult.value.mappings ?? []);
       if (trucksResult.status === "fulfilled") setTrucks(trucksResult.value.trucks ?? []);
+      if (fuelResult.status === "fulfilled") setFuelStatus(fuelResult.value ?? null);
       setError(null);
     } catch (err) {
       setError((err as Error).message || "Failed to load integrations.");
@@ -80,6 +84,10 @@ export default function IntegrationsSettingsPage() {
   };
 
   const visibleTrucks = trucks.slice(0, visibleTruckCount);
+  const lastFuelSyncAt = fuelStatus?.lastFuelSyncAt ? new Date(fuelStatus.lastFuelSyncAt) : null;
+  const lastFuelSyncError = fuelStatus?.lastFuelSyncError ?? null;
+  const fuelStale = !lastFuelSyncAt || Date.now() - lastFuelSyncAt.getTime() > 12 * 60 * 60 * 1000;
+  const fuelNeedsAttention = Boolean(lastFuelSyncError) || fuelStale;
 
   return (
     <AppShell title="Settings" hideHeader={true}>
@@ -108,8 +116,25 @@ export default function IntegrationsSettingsPage() {
                   {samsaraStatus?.errorMessage ? (
                     <div className="text-xs text-[color:var(--color-danger)]">{samsaraStatus.errorMessage}</div>
                   ) : null}
+                  {fuelStatus ? (
+                    <div className="mt-2 text-xs text-[color:var(--color-text-muted)]">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusChip label={fuelNeedsAttention ? "Needs attention" : "Healthy"} tone={fuelNeedsAttention ? "warning" : "success"} />
+                        <span>
+                          Vehicles mapped {fuelStatus.mappedCount ?? 0}/{fuelStatus.totalTrucks ?? 0} ·
+                          {lastFuelSyncAt ? ` Last sync ${lastFuelSyncAt.toLocaleString()}` : " No fuel sync yet"}
+                        </span>
+                      </div>
+                      {fuelNeedsAttention && lastFuelSyncError ? (
+                        <div className="mt-1 text-[11px] text-[color:var(--color-danger)]">{lastFuelSyncError}</div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => router.push("/admin/integrations/samsara/fuel")}>
+                    View fuel summary
+                  </Button>
                   <Button size="sm" variant="secondary" onClick={disconnectSamsara}>
                     Disconnect
                   </Button>

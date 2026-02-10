@@ -18,6 +18,7 @@ import { NoAccess } from "@/components/rbac/no-access";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch, getApiBase } from "@/lib/api";
 import { formatInvoiceStatusLabel } from "@/lib/status-format";
+import { billingReadinessTone, deriveBillingReadiness } from "@/lib/billing-readiness";
 
 const FILTERS = ["Missing POD", "Needs Verify", "Rejected", "Verified", "Ready to Invoice"] as const;
 
@@ -235,8 +236,16 @@ function BillingQueueContent() {
     return rows.sort((a, b) => order[a.queueStatus] - order[b.queueStatus]);
   }, [queue]);
 
+  const disputedRows = useMemo(() => {
+    return (queue.invoiced ?? []).filter((load: any) => {
+      const invoice = load.invoices?.[0];
+      return invoice?.status === "DISPUTED" || invoice?.status === "SHORT_PAID";
+    });
+  }, [queue.invoiced]);
+
   const showInvoiced = tab === "Paid/Complete";
   const filteredRows = showInvoiced ? [] : queueRows.filter((row) => filters.includes(row.queueStatus));
+  const activeRows = tab === "Disputed" ? disputedRows : filteredRows;
 
   if (!canAccess) {
     return <NoAccess />;
@@ -282,11 +291,22 @@ function BillingQueueContent() {
         ) : null}
 
             <div className="grid gap-4">
-              {filteredRows.map((load) => {
+              {activeRows.map((load: any) => {
+                const readiness = deriveBillingReadiness({
+                  load,
+                  charges: load.charges ?? [],
+                  invoices: load.invoices ?? [],
+                });
                 const podDocs = (load.docs ?? []).filter((doc: any) => doc.type === "POD");
                 const primaryDoc = podDocs[0];
                 const shipper = load.stops?.find((stop: any) => stop.type === "PICKUP");
                 const consignee = load.stops?.find((stop: any) => stop.type === "DELIVERY");
+                const invoice = load.invoices?.[0] ?? null;
+                const statusLabel =
+                  tab === "Disputed" && invoice?.status
+                    ? formatInvoiceStatusLabel(invoice.status)
+                    : load.queueStatus;
+                const statusToneValue = tab === "Disputed" ? "danger" : statusTone(load.queueStatus);
                 return (
                   <div
                     key={load.id}
@@ -301,7 +321,7 @@ function BillingQueueContent() {
                           {shipper?.city ?? "-"}, {shipper?.state ?? "-"} → {consignee?.city ?? "-"}, {consignee?.state ?? "-"}
                         </div>
                       </div>
-                      <StatusChip label={load.queueStatus} tone={statusTone(load.queueStatus)} />
+                      <StatusChip label={statusLabel} tone={statusToneValue} />
                     </div>
                     <div className="mt-2 flex flex-wrap gap-3 text-xs text-[color:var(--color-text-muted)]">
                       <div>Operating entity: {load.operatingEntity?.name ?? "-"}</div>
@@ -311,9 +331,31 @@ function BillingQueueContent() {
                       <div>Consignee ref: {load.consigneeReferenceNumber ?? "-"}</div>
                     </div>
 
+                    <div className="mt-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-muted)] px-3 py-2">
+                      <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
+                        Billing readiness
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {readiness.items.map((item) => (
+                          <StatusChip
+                            key={item.key}
+                            label={`${item.label}${item.detail ? ` · ${item.detail}` : ""}`}
+                            tone={billingReadinessTone(item.status)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+
                     {load.queueStatus === "Ready to Invoice" ? (
                       <div className="mt-3">
-                        <Button onClick={() => generateInvoice(load.id)}>Generate invoice</Button>
+                        <Button onClick={() => generateInvoice(load.id)} disabled={!readiness.readyForInvoice}>
+                          Generate invoice
+                        </Button>
+                        {!readiness.readyForInvoice ? (
+                          <div className="mt-2 text-xs text-[color:var(--color-text-muted)]">
+                            Resolve readiness items before invoicing.
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
 
@@ -414,7 +456,7 @@ function BillingQueueContent() {
               </div>
             );
           })}
-          {!showInvoiced && filteredRows.length === 0 ? (
+          {!showInvoiced && activeRows.length === 0 ? (
             <EmptyState title="No loads match this queue view." description="Try a different queue tab to review items." />
           ) : null}
         </div>

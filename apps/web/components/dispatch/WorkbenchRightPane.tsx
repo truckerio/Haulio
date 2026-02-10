@@ -20,8 +20,11 @@ import { apiFetch } from "@/lib/api";
 import { AddLegDrawer } from "@/components/dispatch/AddLegDrawer";
 
 export type WorkbenchAssignmentProps = {
-  form: { driverId: string; truckId: string; trailerId: string };
-  setForm: (next: { driverId: string; truckId: string; trailerId: string }) => void;
+  form: { driverId: string; coDriverId: string; truckId: string; trailerId: string };
+  setForm: (next: { driverId: string; coDriverId: string; truckId: string; trailerId: string }) => void;
+  assignmentMode: "solo" | "team";
+  setAssignmentMode: (mode: "solo" | "team") => void;
+  coDriverConflict?: boolean;
   availableDrivers: Array<{ id: string; name?: string | null; reason?: string | null }>;
   unavailableDrivers: Array<{ id: string; name?: string | null; reason?: string | null }>;
   availableTrucks: Array<{ id: string; unit?: string | null; reason?: string | null }>;
@@ -50,6 +53,7 @@ export type WorkbenchAssignmentProps = {
   confirmReassign: boolean;
   assignedSummary?: {
     driverName?: string | null;
+    coDriverName?: string | null;
     truckUnit?: string | null;
     trailerUnit?: string | null;
   };
@@ -154,6 +158,7 @@ export function WorkbenchRightPane({
 }) {
   const [activeTab, setActiveTab] = useState<"stops" | "documents" | "tracking">("stops");
   const [assignmentExpanded, setAssignmentExpanded] = useState(false);
+  const [assignmentModeExpanded, setAssignmentModeExpanded] = useState(false);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   const [showMoreSuggestions, setShowMoreSuggestions] = useState(false);
   const readOnlyHint = readOnly ? "Read-only in History view" : undefined;
@@ -165,8 +170,13 @@ export function WorkbenchRightPane({
   };
 
   const isAssigned = Boolean(assignedSummary.driverName || assignedSummary.truckUnit || assignedSummary.trailerUnit);
+  const driverLabel = assignedSummary.driverName ?? "Driver";
+  const coDriverLabel = assignedSummary.coDriverName ? ` + ${assignedSummary.coDriverName}` : "";
+  const assignmentModeLabel = assignment.assignmentMode === "team" ? "Team (2 drivers)" : "Solo";
   const driverUnavailableSelected =
     Boolean(assignment.form.driverId) && !assignment.availableDrivers.find((driver) => driver.id === assignment.form.driverId);
+  const coDriverUnavailableSelected =
+    Boolean(assignment.form.coDriverId) && !assignment.availableDrivers.find((driver) => driver.id === assignment.form.coDriverId);
   const truckUnavailableSelected =
     Boolean(assignment.form.truckId) && !assignment.availableTrucks.find((truck) => truck.id === assignment.form.truckId);
   const trailerUnavailableSelected =
@@ -179,6 +189,11 @@ export function WorkbenchRightPane({
   useEffect(() => {
     setShowMoreSuggestions(false);
   }, [load?.id]);
+
+  useEffect(() => {
+    const hasTeam = assignment.assignmentMode === "team" || Boolean(assignment.form.coDriverId);
+    setAssignmentModeExpanded(hasTeam);
+  }, [load?.id, assignment.assignmentMode, assignment.form.coDriverId]);
 
   const laneLabel = useMemo(() => {
     const shipper = loadSummary?.route?.shipperCity;
@@ -295,7 +310,7 @@ export function WorkbenchRightPane({
               <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Assignment</div>
               {isAssigned && !assignmentExpanded ? (
                 <div className="text-sm text-ink">
-                  {assignedSummary.driverName ?? "Driver"} · Truck {assignedSummary.truckUnit ?? "-"} · Trailer {assignedSummary.trailerUnit ?? "-"}
+                  {driverLabel}{coDriverLabel} · Truck {assignedSummary.truckUnit ?? "-"} · Trailer {assignedSummary.trailerUnit ?? "-"}
                 </div>
               ) : (
                 <div className="text-sm text-[color:var(--color-text-muted)]">Select driver and equipment</div>
@@ -353,8 +368,42 @@ export function WorkbenchRightPane({
                 </div>
               ) : null}
 
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/80 px-3 py-2 text-left"
+                  onClick={() => setAssignmentModeExpanded((prev) => !prev)}
+                >
+                  <div>
+                    <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
+                      Assignment mode
+                    </div>
+                    <div className="text-sm font-semibold text-ink">{assignmentModeLabel}</div>
+                  </div>
+                  <div className="text-xs font-medium text-[color:var(--color-text-muted)]">
+                    {assignmentModeExpanded ? "Hide" : "Change"}
+                  </div>
+                </button>
+                {assignmentModeExpanded ? (
+                  <FormField
+                    label="Mode"
+                    htmlFor="assignmentMode"
+                    hint="Team adds a co-driver to the same load."
+                  >
+                    <SegmentedControl
+                      value={assignment.assignmentMode}
+                      options={[
+                        { label: "Solo", value: "solo" },
+                        { label: "Team (2 drivers)", value: "team" },
+                      ]}
+                      onChange={(value) => assignment.setAssignmentMode(value as "solo" | "team")}
+                    />
+                  </FormField>
+                ) : null}
+              </div>
+
               <div className="grid gap-3 lg:grid-cols-3">
-                <FormField label="Driver" htmlFor="workbenchAssignDriver">
+                <FormField label="Primary driver" htmlFor="workbenchAssignDriver">
                   <Select
                     id="workbenchAssignDriver"
                     value={assignment.form.driverId}
@@ -427,6 +476,38 @@ export function WorkbenchRightPane({
                   </Select>
                 </FormField>
               </div>
+
+              {assignment.assignmentMode === "team" ? (
+                <FormField
+                  label="Co-driver (optional)"
+                  htmlFor="workbenchAssignCoDriver"
+                  hint="Co-driver receives load details and notifications."
+                  error={assignment.coDriverConflict ? "Co-driver must be different from primary." : undefined}
+                >
+                  <Select
+                    id="workbenchAssignCoDriver"
+                    value={assignment.form.coDriverId}
+                    onChange={(event) => assignment.setForm({ ...assignment.form, coDriverId: event.target.value })}
+                    disabled={readOnly}
+                  >
+                    <option value="">Select co-driver</option>
+                    {buildOptions(
+                      assignment.availableDrivers,
+                      assignment.unavailableDrivers,
+                      assignment.showUnavailable || coDriverUnavailableSelected
+                    ).map((driver) => (
+                      <option
+                        key={driver.id}
+                        value={driver.id}
+                        disabled={Boolean(driver.reason) && !assignment.showUnavailable && driver.id !== assignment.form.coDriverId}
+                      >
+                        {driver.name ?? "Driver"}
+                        {driver.reason ? ` (Unavailable: ${driver.reason})` : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+              ) : null}
 
               {assignment.assignmentNotSuggested ? (
                 <FormField label="Suggestion override" htmlFor="workbenchAssistOverride" hint="Optional">

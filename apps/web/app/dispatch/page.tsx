@@ -141,7 +141,8 @@ export default function DispatchPage() {
   const [dispatchSettings, setDispatchSettings] = useState<any | null>(null);
   const [availability, setAvailability] = useState<AvailabilityData | null>(null);
   const [showUnavailable, setShowUnavailable] = useState(false);
-  const [assignForm, setAssignForm] = useState({ driverId: "", truckId: "", trailerId: "" });
+  const [assignmentMode, setAssignmentMode] = useState<"solo" | "team">("solo");
+  const [assignForm, setAssignForm] = useState({ driverId: "", coDriverId: "", truckId: "", trailerId: "" });
   const [assignmentSuggestions, setAssignmentSuggestions] = useState<AssignmentSuggestion[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
@@ -155,6 +156,7 @@ export default function DispatchPage() {
   const [teamAssignError, setTeamAssignError] = useState<string | null>(null);
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
+  const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [overrideReason, setOverrideReason] = useState("");
   const [showStopActions, setShowStopActions] = useState(false);
   const [blocked, setBlocked] = useState<{ message?: string; ctaHref?: string } | null>(null);
@@ -197,6 +199,17 @@ export default function DispatchPage() {
     [pathname, router, searchParams]
   );
 
+  const selectedLoadInView = Boolean(selectedLoadId && loads.some((load) => load.id === selectedLoadId));
+
+
+
+  const updateAssignmentMode = useCallback((nextMode: "solo" | "team") => {
+    setAssignmentMode(nextMode);
+    if (nextMode === "solo") {
+      setAssignForm((prev) => ({ ...prev, coDriverId: "" }));
+    }
+  }, []);
+
   const selectLoad = useCallback(
     (loadId: string) => {
       setSelectedLoadId(loadId);
@@ -212,6 +225,7 @@ export default function DispatchPage() {
     setLegAddedNote(false);
     updateLoadIdParam(null);
   }, [updateLoadIdParam]);
+
 
   const handleLegCreated = useCallback(() => {
     setLegDrawerOpen(false);
@@ -234,11 +248,18 @@ export default function DispatchPage() {
   const dispatchStage =
     selectedLoad?.status && ["DRAFT", "PLANNED", "ASSIGNED"].includes(selectedLoad.status);
   const rateConRequired = Boolean(dispatchSettings?.requireRateConBeforeDispatch && selectedLoad?.loadType === "BROKERED");
-  const hasRateCon = (selectedLoad?.docs ?? []).some((doc: any) => doc.type === "RATECON");
+  const hasRateCon = (selectedLoad?.docs ?? []).some(
+    (doc: any) => doc.type === "RATECON" || doc.type === "RATE_CONFIRMATION"
+  );
   const rateConMissing = Boolean(dispatchStage && rateConRequired && !hasRateCon);
+  const coDriverConflict =
+    assignmentMode === "team" &&
+    Boolean(assignForm.coDriverId) &&
+    assignForm.coDriverId === assignForm.driverId;
   const assignDisabled =
     isQueueReadOnly ||
     !assignForm.driverId ||
+    coDriverConflict ||
     (rateConMissing && !canOverride) ||
     (rateConMissing && canOverride && !overrideReason.trim());
 
@@ -321,16 +342,21 @@ export default function DispatchPage() {
 
   const loadAssets = useCallback(async () => {
     if (!canDispatch) return;
-    const [driversData, trucksData, trailersData, entitiesData] = await Promise.all([
-      apiFetch<{ drivers: DriverRecord[] }>("/assets/drivers"),
-      apiFetch<{ trucks: TruckRecord[] }>("/assets/trucks"),
-      apiFetch<{ trailers: TrailerRecord[] }>("/assets/trailers"),
-      apiFetch<{ entities: Array<{ id: string; name: string; isDefault?: boolean }> }>("/operating-entities"),
-    ]);
-    setDrivers(driversData.drivers ?? []);
-    setTrucks(trucksData.trucks ?? []);
-    setTrailers(trailersData.trailers ?? []);
-    setOperatingEntities(entitiesData.entities ?? []);
+    try {
+      const [driversData, trucksData, trailersData, entitiesData] = await Promise.all([
+        apiFetch<{ drivers: DriverRecord[] }>("/assets/drivers"),
+        apiFetch<{ trucks: TruckRecord[] }>("/assets/trucks"),
+        apiFetch<{ trailers: TrailerRecord[] }>("/assets/trailers"),
+        apiFetch<{ entities: Array<{ id: string; name: string; isDefault?: boolean }> }>("/operating-entities"),
+      ]);
+      setDrivers(driversData.drivers ?? []);
+      setTrucks(trucksData.trucks ?? []);
+      setTrailers(trailersData.trailers ?? []);
+      setOperatingEntities(entitiesData.entities ?? []);
+      setDispatchError(null);
+    } catch (error) {
+      setDispatchError((error as Error).message || "Unable to load dispatch assets.");
+    }
   }, [canDispatch]);
 
   useEffect(() => {
@@ -375,12 +401,17 @@ export default function DispatchPage() {
 
   const loadDispatchLoads = useCallback(async (nextFilters = filters, page = pageIndex) => {
     if (!canDispatch) return;
-    const query = buildParams(nextFilters, page);
-    const url = query ? `/loads?${query}` : "/loads?view=dispatch";
-    const data = await apiFetch<{ items: DispatchItem[]; total: number; totalPages: number }>(url);
-    setLoads(data.items ?? []);
-    setTotalPages(data.totalPages ?? 1);
-    setTotalCount(data.total ?? 0);
+    try {
+      const query = buildParams(nextFilters, page);
+      const url = query ? `/loads?${query}` : "/loads?view=dispatch";
+      const data = await apiFetch<{ items: DispatchItem[]; total: number; totalPages: number }>(url);
+      setLoads(data.items ?? []);
+      setTotalPages(data.totalPages ?? 1);
+      setTotalCount(data.total ?? 0);
+      setDispatchError(null);
+    } catch (error) {
+      setDispatchError((error as Error).message || "Unable to load dispatch queue.");
+    }
   }, [canDispatch, buildParams, filters, pageIndex]);
 
   useEffect(() => {
@@ -413,29 +444,40 @@ export default function DispatchPage() {
 
   const refreshSelectedLoad = useCallback(async (loadId: string) => {
     if (!canDispatch) return;
-    const data = await apiFetch<{ load: any; settings?: any | null }>(`/loads/${loadId}/dispatch-detail`);
-    setSelectedLoad(data.load ?? null);
-    setDispatchSettings(data.settings ?? null);
-    setAssignError(null);
-    setAssignForm({
-      driverId: data.load?.assignedDriverId ?? "",
-      truckId: data.load?.truckId ?? "",
-      trailerId: data.load?.trailerId ?? "",
-    });
-    return data.load ?? null;
+    try {
+      const data = await apiFetch<{ load: any; settings?: any | null }>(`/loads/${loadId}/dispatch-detail`);
+      setSelectedLoad(data.load ?? null);
+      setDispatchSettings(data.settings ?? null);
+      setAssignError(null);
+      const selectedCoDriverId =
+        data.load?.assignmentMembers?.find((member: any) => member.role === "CO_DRIVER")?.driverId ?? "";
+      setAssignForm({
+        driverId: data.load?.assignedDriverId ?? "",
+        coDriverId: selectedCoDriverId,
+        truckId: data.load?.truckId ?? "",
+        trailerId: data.load?.trailerId ?? "",
+      });
+      setAssignmentMode(selectedCoDriverId ? "team" : "solo");
+      setDispatchError(null);
+      return data.load ?? null;
+    } catch (error) {
+      setAssignError((error as Error).message || "Unable to refresh load details.");
+      setDispatchError((error as Error).message || "Unable to refresh load details.");
+      return null;
+    }
   }, [canDispatch]);
 
   useEffect(() => {
-    if (!selectedLoadId || !canDispatch) return;
+    if (!selectedLoadId || !selectedLoadInView || !canDispatch) return;
     refreshSelectedLoad(selectedLoadId);
     const teamQuery = canSeeAllTeams && filters.teamId ? `&teamId=${filters.teamId}` : "";
     apiFetch<AvailabilityData>(`/dispatch/availability?loadId=${selectedLoadId}${teamQuery}`)
       .then((data) => setAvailability(data))
       .catch(() => setAvailability(null));
-  }, [selectedLoadId, canDispatch, refreshSelectedLoad, filters.teamId, canSeeAllTeams]);
+  }, [selectedLoadId, selectedLoadInView, canDispatch, refreshSelectedLoad, filters.teamId, canSeeAllTeams]);
 
   useEffect(() => {
-    if (!selectedLoadId || !canDispatch || isQueueReadOnly) {
+    if (!selectedLoadId || !selectedLoadInView || !canDispatch || isQueueReadOnly) {
       setAssignmentSuggestions([]);
       setSuggestionsError(null);
       setSuggestionLogId(null);
@@ -490,7 +532,7 @@ export default function DispatchPage() {
     setConfirmReassign(false);
     setAssignError(null);
     setOverrideReason("");
-  }, [assignForm.driverId, assignForm.truckId, assignForm.trailerId, selectedLoadId, showUnavailable]);
+  }, [assignForm.driverId, assignForm.coDriverId, assignForm.truckId, assignForm.trailerId, selectedLoadId, showUnavailable]);
 
   useEffect(() => {
     const shouldAutoExpand = Boolean(selectedLoad?.riskFlags?.atRisk || selectedLoad?.riskFlags?.overdueStopWindow);
@@ -549,12 +591,18 @@ export default function DispatchPage() {
     );
   };
 
-  const buildConflictMessages = (driverId?: string, truckId?: string, trailerId?: string) => {
+  const buildConflictMessages = (driverId?: string, coDriverId?: string, truckId?: string, trailerId?: string) => {
     const conflicts: string[] = [];
     if (driverId) {
       const driver = unavailableDrivers.find((item) => item.id === driverId);
       if (driver) {
         conflicts.push(`Driver: Assigning this driver will move them from ${driver.reason ?? "another load"}.`);
+      }
+    }
+    if (coDriverId) {
+      const coDriver = unavailableDrivers.find((item) => item.id === coDriverId);
+      if (coDriver) {
+        conflicts.push(`Co-driver: Assigning this driver will move them from ${coDriver.reason ?? "another load"}.`);
       }
     }
     if (truckId) {
@@ -593,11 +641,11 @@ export default function DispatchPage() {
     }
   };
 
-  const performAssign = async (params: { driverId: string; truckId?: string; trailerId?: string }) => {
+  const performAssign = async (params: { driverId: string; coDriverId?: string; truckId?: string; trailerId?: string }) => {
     if (isQueueReadOnly) return;
     if (!selectedLoad) return;
     if (!params.driverId) return;
-    const conflicts = buildConflictMessages(params.driverId, params.truckId, params.trailerId);
+    const conflicts = buildConflictMessages(params.driverId, params.coDriverId, params.truckId, params.trailerId);
     if (conflicts.length > 0 && !confirmReassign) {
       setConfirmReassign(true);
       return;
@@ -608,7 +656,8 @@ export default function DispatchPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          driverId: params.driverId,
+          primaryDriverId: params.driverId,
+          coDriverId: assignmentMode === "team" ? params.coDriverId || undefined : undefined,
           truckId: params.truckId || undefined,
           trailerId: params.trailerId || undefined,
           overrideReason: overrideReason || undefined,
@@ -644,6 +693,7 @@ export default function DispatchPage() {
   const assign = async () => {
     await performAssign({
       driverId: assignForm.driverId,
+      coDriverId: assignmentMode === "team" ? assignForm.coDriverId : undefined,
       truckId: assignForm.truckId || undefined,
       trailerId: assignForm.trailerId || undefined,
     });
@@ -655,6 +705,7 @@ export default function DispatchPage() {
     setAssistOverrideReason("");
     await performAssign({
       driverId,
+      coDriverId: assignmentMode === "team" ? assignForm.coDriverId : undefined,
       truckId: (truckId ?? assignForm.truckId) || undefined,
       trailerId: assignForm.trailerId || undefined,
     });
@@ -805,18 +856,12 @@ export default function DispatchPage() {
     return sortedLoads.find((load) => load.id === selectedLoadId) ?? null;
   }, [sortedLoads, selectedLoadId]);
 
-  useEffect(() => {
-    if (!selectedLoadId) return;
-    if (!sortedLoads.length) return;
-    const exists = sortedLoads.some((load) => load.id === selectedLoadId);
-    if (!exists) {
-      clearSelectedLoad();
-    }
-  }, [sortedLoads, selectedLoadId, clearSelectedLoad]);
-
   const workbenchAssignment = {
     form: assignForm,
     setForm: setAssignForm,
+    assignmentMode,
+    setAssignmentMode: updateAssignmentMode,
+    coDriverConflict,
     availableDrivers,
     unavailableDrivers,
     availableTrucks,
@@ -845,6 +890,8 @@ export default function DispatchPage() {
     confirmReassign,
     assignedSummary: {
       driverName: selectedLoadSummary?.assignment?.driver?.name ?? selectedLoad?.driver?.name ?? null,
+      coDriverName:
+        selectedLoad?.assignmentMembers?.find((member: any) => member.role === "CO_DRIVER")?.driver?.name ?? null,
       truckUnit: selectedLoadSummary?.assignment?.truck?.unit ?? selectedLoad?.truck?.unit ?? null,
       trailerUnit: selectedLoadSummary?.assignment?.trailer?.unit ?? selectedLoad?.trailer?.unit ?? null,
     },
@@ -950,6 +997,12 @@ export default function DispatchPage() {
           </Button>
         </div>
       </div>
+
+      {dispatchError ? (
+        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-warning-soft)] bg-[color:var(--color-warning-soft)]/60 px-4 py-3 text-sm text-[color:var(--color-warning)]">
+          {dispatchError}
+        </div>
+      ) : null}
 
       {showFilters ? (
         <RefinePanel>

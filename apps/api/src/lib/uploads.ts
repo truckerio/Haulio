@@ -143,3 +143,14 @@ export async function saveLoadConfirmationFile(file: Express.Multer.File, orgId:
   await fs.writeFile(target, file.buffer);
   return { filename: safeName, storageKey };
 }
+
+export async function saveVaultDocumentFile(file: Express.Multer.File, orgId: string, docId: string) {
+  await ensureUploadDirs();
+  const original = file.originalname || "document";
+  const safeName = path.basename(original).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const storageKey = path.posix.join("org", orgId, "vault", docId, safeName);
+  const target = resolveUploadPath(storageKey);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, file.buffer);
+  return { filename: safeName, storageKey };
+}

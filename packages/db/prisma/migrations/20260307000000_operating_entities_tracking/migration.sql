@@ -4,8 +4,12 @@ CREATE TYPE "OperatingEntityType" AS ENUM ('CARRIER', 'BROKER');
 -- CreateEnum
 CREATE TYPE "LoadType" AS ENUM ('COMPANY', 'BROKERED');
 
--- CreateEnum
-CREATE TYPE "TrackingProviderType" AS ENUM ('PHONE', 'SAMSARA');
+DO $$
+BEGIN
+  CREATE TYPE "TrackingProviderType" AS ENUM ('PHONE', 'SAMSARA');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
 
 -- CreateEnum
 CREATE TYPE "TrackingSessionStatus" AS ENUM ('OFF', 'ON', 'ERROR', 'ENDED');
@@ -52,6 +56,8 @@ CREATE TABLE "TrackingIntegration" (
     "status" "TrackingIntegrationStatus" NOT NULL DEFAULT 'DISCONNECTED',
     "configJson" JSONB,
     "errorMessage" TEXT,
+    "lastFuelSyncAt" TIMESTAMP(3),
+    "lastFuelSyncError" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 

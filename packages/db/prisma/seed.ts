@@ -1,16 +1,30 @@
 import bcrypt from "bcryptjs";
-import { prisma, Prisma } from "../src";
+import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
+import {
+  prisma,
+  Prisma,
+  DocType,
+  VaultDocType,
+  VaultScopeType,
+  BillingStatus,
+  AccessorialStatus,
+  AccessorialType,
+} from "../src";
 
 const ORG_NAME = process.env.DEMO_ORG_NAME || "Haulio Demo Logistics";
 const ADMIN_EMAIL = process.env.DEMO_ADMIN_EMAIL || "karan@admin.com";
 const ADMIN_PASSWORD = process.env.DEMO_ADMIN_PASSWORD || "password123";
 
-const LOAD_COUNT = Number(process.env.DEMO_LOAD_COUNT || "200");
-const DRIVER_COUNT = Number(process.env.DEMO_DRIVER_COUNT || "40");
-const TRUCK_COUNT = Number(process.env.DEMO_TRUCK_COUNT || "35");
-const TRAILER_COUNT = Number(process.env.DEMO_TRAILER_COUNT || "35");
+const LOAD_COUNT = Number(process.env.DEMO_LOAD_COUNT || "50");
+const DRIVER_COUNT = Number(process.env.DEMO_DRIVER_COUNT || "55");
+const TRUCK_COUNT = Number(process.env.DEMO_TRUCK_COUNT || "50");
+const TRAILER_COUNT = Number(process.env.DEMO_TRAILER_COUNT || "50");
 
-const TEAM_NAMES = ["Default", "Alpha", "Bravo", "Charlie", "Delta", "Echo"];
+const TEAM_NAMES = ["Default", "Inbound", "Outbound"];
+const INBOUND_TRUCKS = 10;
+const OUTBOUND_TRUCKS = 40;
 
 const CUSTOMER_NAMES = [
   "Blue Ridge Foods",
@@ -35,13 +49,13 @@ const STOP_CITIES = [
 ];
 
 const LOAD_STATUSES = [
-  ...Array(40).fill("PLANNED"),
-  ...Array(40).fill("ASSIGNED"),
-  ...Array(40).fill("IN_TRANSIT"),
-  ...Array(30).fill("DELIVERED"),
-  ...Array(20).fill("POD_RECEIVED"),
-  ...Array(20).fill("READY_TO_INVOICE"),
-  ...Array(10).fill("INVOICED"),
+  ...Array(10).fill("PLANNED"),
+  ...Array(10).fill("ASSIGNED"),
+  ...Array(10).fill("IN_TRANSIT"),
+  ...Array(8).fill("DELIVERED"),
+  ...Array(5).fill("POD_RECEIVED"),
+  ...Array(5).fill("READY_TO_INVOICE"),
+  ...Array(2).fill("INVOICED"),
 ];
 
 function toDecimal(value: number) {
@@ -50,6 +64,36 @@ function toDecimal(value: number) {
 
 function pick<T>(list: T[], index: number) {
   return list[index % list.length];
+}
+
+async function getRepoRoot() {
+  let current = process.cwd();
+  while (true) {
+    try {
+      await fs.access(path.join(current, "pnpm-workspace.yaml"));
+      return current;
+    } catch {
+      try {
+        await fs.access(path.join(current, ".git"));
+        return current;
+      } catch {
+        const parent = path.dirname(current);
+        if (parent === current) return process.cwd();
+        current = parent;
+      }
+    }
+  }
+}
+
+async function writeVaultFile(orgId: string, docId: string, filename: string, content: string) {
+  const root = await getRepoRoot();
+  const base = path.join(root, "uploads");
+  const target = path.join(base, "org", orgId, "vault", docId, filename);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, content, "utf8");
+  return path
+    .relative(base, target)
+    .replace(/\\/g, "/");
 }
 
 async function main() {
@@ -72,23 +116,38 @@ async function main() {
     },
   });
 
-  const headDispatcher = await prisma.user.create({
+  const admin2 = await prisma.user.create({
     data: {
       orgId: org.id,
-      email: "head.dispatch@demo.com",
+      email: "admin2@demo.com",
       passwordHash,
-      role: "HEAD_DISPATCHER",
-      name: "Harper Head",
+      role: "ADMIN",
+      name: "Riley Admin",
       canSeeAllTeams: true,
     },
   });
 
-  const dispatchers = await Promise.all(
-    ["dispatch1@demo.com", "dispatch2@demo.com"].map((email, index) =>
+  const headDispatchers = await Promise.all(
+    ["head.dispatch1@demo.com", "head.dispatch2@demo.com"].map((email, index) =>
       prisma.user.create({
         data: {
           orgId: org.id,
           email,
+          passwordHash,
+          role: "HEAD_DISPATCHER",
+          name: `Head Dispatcher ${index + 1}`,
+          canSeeAllTeams: true,
+        },
+      })
+    )
+  );
+
+  const dispatchers = await Promise.all(
+    Array.from({ length: 8 }).map((_, index) =>
+      prisma.user.create({
+        data: {
+          orgId: org.id,
+          email: `dispatch${index + 1}@demo.com`,
           passwordHash,
           role: "DISPATCHER",
           name: `Dispatch ${index + 1}`,
@@ -98,7 +157,7 @@ async function main() {
   );
 
   const billingUsers = await Promise.all(
-    ["billing1@demo.com", "billing2@demo.com"].map((email, index) =>
+    ["billing1@demo.com", "billing2@demo.com", "billing3@demo.com"].map((email, index) =>
       prisma.user.create({
         data: {
           orgId: org.id,
@@ -133,9 +192,10 @@ async function main() {
     )
   );
   const defaultTeam = teams.find((team) => team.name === "Default") ?? teams[0];
-  const otherTeams = teams.filter((team) => team.id !== defaultTeam.id);
+  const inboundTeam = teams.find((team) => team.name === "Inbound") ?? teams[0];
+  const outboundTeam = teams.find((team) => team.name === "Outbound") ?? teams[0];
 
-  const allUsers = [admin, headDispatcher, ...dispatchers, ...billingUsers, ...driverUsers];
+  const allUsers = [admin, admin2, ...headDispatchers, ...dispatchers, ...billingUsers, ...driverUsers];
   await prisma.user.updateMany({
     where: { orgId: org.id },
     data: { defaultTeamId: defaultTeam.id },
@@ -149,11 +209,22 @@ async function main() {
     skipDuplicates: true,
   });
 
-  for (const [index, user] of dispatchers.entries()) {
-    const team = pick(otherTeams, index);
-    if (!team) continue;
+  const inboundDispatchers = dispatchers.slice(0, 2);
+  const outboundDispatchers = dispatchers.slice(2);
+  for (const user of inboundDispatchers) {
     await prisma.teamMember.create({
-      data: { orgId: org.id, teamId: team.id, userId: user.id },
+      data: { orgId: org.id, teamId: inboundTeam.id, userId: user.id },
+    });
+  }
+  for (const user of outboundDispatchers) {
+    await prisma.teamMember.create({
+      data: { orgId: org.id, teamId: outboundTeam.id, userId: user.id },
+    });
+  }
+  for (const head of headDispatchers) {
+    const team = head.email.includes("1") ? inboundTeam : outboundTeam;
+    await prisma.teamMember.create({
+      data: { orgId: org.id, teamId: team.id, userId: head.id },
     });
   }
 
@@ -176,6 +247,39 @@ async function main() {
     )
   );
 
+  const inboundDrivers = drivers.slice(0, INBOUND_TRUCKS);
+  const outboundDrivers = drivers.slice(INBOUND_TRUCKS, INBOUND_TRUCKS + OUTBOUND_TRUCKS);
+  const unassignedDrivers = drivers.slice(INBOUND_TRUCKS + OUTBOUND_TRUCKS);
+  await prisma.teamAssignment.createMany({
+    data: inboundDrivers.map((driver) => ({
+      orgId: org.id,
+      teamId: inboundTeam.id,
+      entityType: "DRIVER",
+      entityId: driver.id,
+    })),
+    skipDuplicates: true,
+  });
+  await prisma.teamAssignment.createMany({
+    data: outboundDrivers.map((driver) => ({
+      orgId: org.id,
+      teamId: outboundTeam.id,
+      entityType: "DRIVER",
+      entityId: driver.id,
+    })),
+    skipDuplicates: true,
+  });
+  if (unassignedDrivers.length > 0) {
+    await prisma.teamAssignment.createMany({
+      data: unassignedDrivers.map((driver) => ({
+        orgId: org.id,
+        teamId: defaultTeam.id,
+        entityType: "DRIVER",
+        entityId: driver.id,
+      })),
+      skipDuplicates: true,
+    });
+  }
+
   const trucks = await Promise.all(
     Array.from({ length: TRUCK_COUNT }).map((_, index) =>
       prisma.truck.create({
@@ -190,6 +294,27 @@ async function main() {
       })
     )
   );
+
+  const inboundTrucks = trucks.slice(0, INBOUND_TRUCKS);
+  const outboundTrucks = trucks.slice(INBOUND_TRUCKS, INBOUND_TRUCKS + OUTBOUND_TRUCKS);
+  await prisma.teamAssignment.createMany({
+    data: inboundTrucks.map((truck) => ({
+      orgId: org.id,
+      teamId: inboundTeam.id,
+      entityType: "TRUCK",
+      entityId: truck.id,
+    })),
+    skipDuplicates: true,
+  });
+  await prisma.teamAssignment.createMany({
+    data: outboundTrucks.map((truck) => ({
+      orgId: org.id,
+      teamId: outboundTeam.id,
+      entityType: "TRUCK",
+      entityId: truck.id,
+    })),
+    skipDuplicates: true,
+  });
 
   const trailers = await Promise.all(
     Array.from({ length: TRAILER_COUNT }).map((_, index) =>
@@ -209,8 +334,8 @@ async function main() {
   await prisma.orgSettings.create({
     data: {
       orgId: org.id,
-      companyDisplayName: "Haulio Demo Logistics",
-      remitToAddress: "Haulio Demo Logistics\n123 Freight Ave\nDallas, TX 75201",
+      companyDisplayName: ORG_NAME,
+      remitToAddress: `${ORG_NAME}\n123 Freight Ave\nDallas, TX 75201`,
       invoiceTerms: "Net 30",
       invoiceFooter: "Thank you for your business.",
       invoicePrefix: "INV-",
@@ -225,7 +350,7 @@ async function main() {
       podRequirePrintedName: true,
       podRequireDeliveryDate: true,
       podMinPages: 1,
-      requiredDocs: ["POD"],
+      requiredDocs: ["POD", "RATECON", "BOL", "LUMPER", "SCALE", "DETENTION", "OTHER"],
       requiredDriverDocs: ["CDL", "MED_CARD"],
       collectPodDueMinutes: 30,
       missingPodAfterMinutes: 120,
@@ -244,11 +369,11 @@ async function main() {
   const operatingEntity = await prisma.operatingEntity.create({
     data: {
       orgId: org.id,
-      name: "Haulio Demo Logistics",
+      name: ORG_NAME,
       type: "CARRIER",
-      addressLine1: "Haulio Demo Logistics\n123 Freight Ave\nDallas, TX 75201",
-      remitToName: "Haulio Demo Logistics",
-      remitToAddressLine1: "Haulio Demo Logistics\n123 Freight Ave\nDallas, TX 75201",
+      addressLine1: `${ORG_NAME}\n123 Freight Ave\nDallas, TX 75201`,
+      remitToName: ORG_NAME,
+      remitToAddressLine1: `${ORG_NAME}\n123 Freight Ave\nDallas, TX 75201`,
       isDefault: true,
     },
   });
@@ -267,7 +392,6 @@ async function main() {
     )
   );
 
-  const assignableTeams = otherTeams.length > 0 ? otherTeams : [defaultTeam];
   const createdBy = dispatchers[0] ?? admin;
   const loads: Array<{ id: string; status: string }> = [];
 
@@ -276,7 +400,7 @@ async function main() {
     const driver = pick(drivers, index);
     const truck = pick(trucks, index);
     const trailer = pick(trailers, index);
-    const team = pick(assignableTeams, index);
+    const team = index < INBOUND_TRUCKS ? inboundTeam : outboundTeam;
 
     const loadType = index % 7 === 0 ? "BROKERED" : "COMPANY";
     const shouldAssign = status !== "PLANNED" && !(status === "ASSIGNED" && index % 4 === 0);
@@ -390,8 +514,13 @@ async function main() {
   const billingUser = billingUsers[0] ?? admin;
   const invoicedLoads = loads.filter((load) => load.status === "INVOICED").slice(0, 5);
   const deliveredLoads = loads.filter((load) => load.status === "DELIVERED").slice(0, 10);
+  const missingPodLoad = deliveredLoads[0];
+  const missingRateConLoad = deliveredLoads[1];
+  const accessorialLoad = deliveredLoads[2];
+  const readyLoad = deliveredLoads[3];
 
   for (const load of deliveredLoads) {
+    if (missingPodLoad && load.id === missingPodLoad.id) continue;
     await prisma.document.create({
       data: {
         orgId: org.id,
@@ -403,6 +532,37 @@ async function main() {
         mimeType: "application/pdf",
         size: 12345,
         uploadedById: podUploader.id,
+      },
+    });
+  }
+
+  for (const load of [readyLoad, accessorialLoad].filter(Boolean) as { id: string }[]) {
+    await prisma.document.create({
+      data: {
+        orgId: org.id,
+        loadId: load.id,
+        type: "RATECON",
+        status: "UPLOADED",
+        filename: `ratecon_${load.id}.pdf`,
+        originalName: "RateCon.pdf",
+        mimeType: "application/pdf",
+        size: 9823,
+        uploadedById: createdBy.id,
+      },
+    });
+  }
+
+  if (accessorialLoad) {
+    await prisma.accessorial.create({
+      data: {
+        orgId: org.id,
+        loadId: accessorialLoad.id,
+        type: AccessorialType.LUMPER,
+        amount: toDecimal(250),
+        requiresProof: true,
+        status: AccessorialStatus.NEEDS_PROOF,
+        notes: "Lumper fee pending receipt",
+        createdById: createdBy.id,
       },
     });
   }
@@ -421,6 +581,19 @@ async function main() {
         uploadedById: podUploader.id,
         verifiedById: billingUser.id,
         verifiedAt: new Date(),
+      },
+    });
+    await prisma.document.create({
+      data: {
+        orgId: org.id,
+        loadId: load.id,
+        type: "RATECON",
+        status: "UPLOADED",
+        filename: `ratecon_${load.id}.pdf`,
+        originalName: "RateCon.pdf",
+        mimeType: "application/pdf",
+        size: 9823,
+        uploadedById: createdBy.id,
       },
     });
     await prisma.invoice.create({
@@ -448,6 +621,60 @@ async function main() {
     });
   }
 
+  if (invoicedLoads.length > 0) {
+    await prisma.load.updateMany({
+      where: { id: { in: invoicedLoads.map((load) => load.id) } },
+      data: { billingStatus: BillingStatus.INVOICED, billingBlockingReasons: [], invoicedAt: new Date() },
+    });
+  }
+
+  if (readyLoad) {
+    await prisma.load.update({
+      where: { id: readyLoad.id },
+      data: { billingStatus: BillingStatus.READY, billingBlockingReasons: [] },
+    });
+  }
+  if (missingPodLoad) {
+    await prisma.load.update({
+      where: { id: missingPodLoad.id },
+      data: { billingStatus: BillingStatus.BLOCKED, billingBlockingReasons: ["Missing POD"] },
+    });
+  }
+  if (missingRateConLoad) {
+    await prisma.load.update({
+      where: { id: missingRateConLoad.id },
+      data: { billingStatus: BillingStatus.BLOCKED, billingBlockingReasons: ["Missing Rate Confirmation"] },
+    });
+  }
+  if (accessorialLoad) {
+    await prisma.load.update({
+      where: { id: accessorialLoad.id },
+      data: {
+        billingStatus: BillingStatus.BLOCKED,
+        billingBlockingReasons: ["Accessorial missing proof", "Accessorial pending resolution"],
+      },
+    });
+  }
+
+  const extraDocTypes: DocType[] = [DocType.BOL, DocType.LUMPER, DocType.SCALE, DocType.DETENTION, DocType.OTHER];
+  for (const [index, docType] of extraDocTypes.entries()) {
+    const load = loads[index];
+    if (!load) continue;
+    await prisma.document.create({
+      data: {
+        orgId: org.id,
+        loadId: load.id,
+        type: docType,
+        status: "UPLOADED",
+        filename: `${docType.toLowerCase()}_${load.id}.pdf`,
+        originalName: `${docType}.pdf`,
+        mimeType: "application/pdf",
+        size: 8456,
+        uploadedById: createdBy.id,
+      },
+    });
+  }
+
   await prisma.task.createMany({
     data: [
       {
@@ -469,6 +696,106 @@ async function main() {
       },
     ],
   });
+
+  const now = new Date();
+  const expiringSoon = new Date(Date.now() + 1000 * 60 * 60 * 24 * 21);
+  const expired = new Date(Date.now() - 1000 * 60 * 60 * 24 * 14);
+  const farFuture = new Date(Date.now() + 1000 * 60 * 60 * 24 * 180);
+
+  const vaultDocs: Array<{
+    docType: VaultDocType;
+    scopeType: VaultScopeType;
+    scopeId?: string | null;
+    expiresAt?: Date | null;
+    referenceNumber?: string | null;
+    notes?: string | null;
+    label: string;
+  }> = [
+    { docType: VaultDocType.INSURANCE, scopeType: VaultScopeType.ORG, expiresAt: expiringSoon, referenceNumber: "POL-1001", label: "Company insurance" },
+    { docType: VaultDocType.CARGO_INSURANCE, scopeType: VaultScopeType.ORG, expiresAt: null, referenceNumber: "CARGO-9921", label: "Cargo insurance (needs details)" },
+    { docType: VaultDocType.LIABILITY, scopeType: VaultScopeType.ORG, expiresAt: farFuture, label: "Liability policy" },
+    { docType: VaultDocType.IFTA, scopeType: VaultScopeType.ORG, expiresAt: farFuture, label: "IFTA filing" },
+    { docType: VaultDocType.OTHER, scopeType: VaultScopeType.ORG, expiresAt: null, label: "Safety checklist" },
+  ];
+
+  const inboundTruck = inboundTrucks[0];
+  const outboundTruck = outboundTrucks[0];
+  if (inboundTruck) {
+    vaultDocs.push({
+      docType: VaultDocType.REGISTRATION,
+      scopeType: VaultScopeType.TRUCK,
+      scopeId: inboundTruck.id,
+      expiresAt: expired,
+      label: `Inbound truck registration ${inboundTruck.unit}`,
+    });
+    vaultDocs.push({
+      docType: VaultDocType.TITLE,
+      scopeType: VaultScopeType.TRUCK,
+      scopeId: inboundTruck.id,
+      expiresAt: farFuture,
+      label: `Inbound truck title ${inboundTruck.unit}`,
+    });
+  }
+  if (outboundTruck) {
+    vaultDocs.push({
+      docType: VaultDocType.PERMIT,
+      scopeType: VaultScopeType.TRUCK,
+      scopeId: outboundTruck.id,
+      expiresAt: expiringSoon,
+      label: `Outbound truck permit ${outboundTruck.unit}`,
+    });
+  }
+
+  const inboundDriver = drivers[0];
+  const outboundDriver = drivers[INBOUND_TRUCKS] ?? drivers[1];
+  if (inboundDriver) {
+    vaultDocs.push({
+      docType: VaultDocType.PERMIT,
+      scopeType: VaultScopeType.DRIVER,
+      scopeId: inboundDriver.id,
+      expiresAt: expiringSoon,
+      label: `Inbound driver permit ${inboundDriver.name}`,
+    });
+  }
+  if (outboundDriver) {
+    vaultDocs.push({
+      docType: VaultDocType.OTHER,
+      scopeType: VaultScopeType.DRIVER,
+      scopeId: outboundDriver.id,
+      expiresAt: null,
+      label: `Outbound driver document ${outboundDriver.name}`,
+      notes: "Demo document",
+    });
+  }
+
+  for (const doc of vaultDocs) {
+    const id = crypto.randomUUID();
+    const filename = `${doc.docType.toLowerCase()}-${id.slice(0, 8)}.txt`;
+    const storageKey = await writeVaultFile(
+      org.id,
+      id,
+      filename,
+      `Vault document\nType: ${doc.docType}\nLabel: ${doc.label}\n`
+    );
+    await prisma.vaultDocument.create({
+      data: {
+        id,
+        orgId: org.id,
+        scopeType: doc.scopeType,
+        scopeId: doc.scopeId ?? null,
+        docType: doc.docType,
+        filename,
+        originalName: filename,
+        mimeType: "text/plain",
+        size: 120,
+        storageKey,
+        expiresAt: doc.expiresAt ?? null,
+        referenceNumber: doc.referenceNumber ?? null,
+        notes: doc.notes ?? null,
+        uploadedById: admin.id,
+      },
+    });
+  }
 
   console.log("Seed complete.");
   console.log(`Admin: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);

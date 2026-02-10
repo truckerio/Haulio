@@ -119,7 +119,7 @@ export async function buildAssignmentSuggestions(params: {
     ]);
   }
 
-  const [drivers, trucks, activeAssignments] = await Promise.all([
+  const [drivers, trucks, activeAssignments, activeMembers] = await Promise.all([
     prisma.driver.findMany({
       where: { orgId: user.orgId, id: { in: scopedDriverIds ?? undefined } },
       select: { id: true, name: true, status: true },
@@ -139,9 +139,22 @@ export async function buildAssignmentSuggestions(params: {
       },
       select: { assignedDriverId: true, truckId: true },
     }),
+    prisma.loadAssignmentMember.findMany({
+      where: {
+        load: {
+          orgId: user.orgId,
+          id: { not: load.id },
+          status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
+        },
+      },
+      select: { driverId: true },
+    }),
   ]);
 
-  const activeDriverIds = new Set(activeAssignments.map((row) => row.assignedDriverId).filter(Boolean) as string[]);
+  const activeDriverIds = new Set([
+    ...activeAssignments.map((row) => row.assignedDriverId).filter(Boolean),
+    ...activeMembers.map((row) => row.driverId),
+  ] as string[]);
   const activeTruckIds = new Set(activeAssignments.map((row) => row.truckId).filter(Boolean) as string[]);
 
   const availableDrivers = drivers.filter((driver) => driver.status === DriverStatus.AVAILABLE && !activeDriverIds.has(driver.id));

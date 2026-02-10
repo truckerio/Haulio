@@ -8,6 +8,7 @@ export function AdminDrawer({
   onClose,
   title,
   subtitle,
+  eyebrow = "People & Access",
   children,
   footer,
 }: {
@@ -15,6 +16,7 @@ export function AdminDrawer({
   onClose: () => void;
   title: string;
   subtitle?: string;
+  eyebrow?: string;
   children: ReactNode;
   footer?: ReactNode;
 }) {
@@ -25,7 +27,7 @@ export function AdminDrawer({
       <div className="h-full w-full max-w-xl bg-white shadow-[var(--shadow-subtle)]">
         <div className="flex items-center justify-between border-b border-[color:var(--color-divider)] px-5 py-4">
           <div>
-            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">People & Access</div>
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">{eyebrow}</div>
             <div className="text-lg font-semibold text-ink">{title}</div>
             {subtitle ? <div className="text-xs text-[color:var(--color-text-muted)]">{subtitle}</div> : null}
           </div>

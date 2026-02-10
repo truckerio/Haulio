@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
@@ -19,6 +19,7 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
 import { formatDocStatusLabel, formatInvoiceStatusLabel, formatStatusLabel } from "@/lib/status-format";
+import { deriveBillingReadiness } from "@/lib/billing-readiness";
 
 import { API_BASE } from "@/lib/apiBase";
 const DOC_TYPES = ["POD", "RATECON", "BOL", "LUMPER", "SCALE", "DETENTION", "OTHER"] as const;
@@ -30,6 +31,23 @@ const CHARGE_LABELS: Record<string, string> = {
   LAYOVER: "Layover",
   OTHER: "Other",
   ADJUSTMENT: "Adjustment",
+};
+const ACCESSORIAL_TYPES = ["DETENTION", "LUMPER", "TONU", "REDELIVERY", "STOP_OFF", "OTHER"] as const;
+const ACCESSORIAL_LABELS: Record<string, string> = {
+  DETENTION: "Detention",
+  LUMPER: "Lumper",
+  TONU: "TONU",
+  REDELIVERY: "Redelivery",
+  STOP_OFF: "Stop off",
+  OTHER: "Other",
+};
+const ACCESSORIAL_REQUIRES_PROOF = new Set(["DETENTION", "LUMPER"]);
+const ACCESSORIAL_STATUS_LABELS: Record<string, string> = {
+  PROPOSED: "Proposed",
+  NEEDS_PROOF: "Needs proof",
+  PENDING_APPROVAL: "Pending approval",
+  APPROVED: "Approved",
+  REJECTED: "Rejected",
 };
 
 const TIMELINE_STEPS = [
@@ -84,6 +102,18 @@ export default function LoadDetailsPage() {
     maxAmountCents?: number;
   } | null>(null);
   const lastChargeQuery = useRef("");
+  const [accessorialForm, setAccessorialForm] = useState({
+    type: "DETENTION",
+    amount: "",
+    requiresProof: true,
+    notes: "",
+  });
+  const [accessorialSaving, setAccessorialSaving] = useState(false);
+  const [accessorialError, setAccessorialError] = useState<string | null>(null);
+  const [accessorialActionId, setAccessorialActionId] = useState<string | null>(null);
+  const [proofTargetId, setProofTargetId] = useState<string | null>(null);
+  const proofInputRef = useRef<HTMLInputElement | null>(null);
+  const [billingActionError, setBillingActionError] = useState<string | null>(null);
   const [freightForm, setFreightForm] = useState({
     loadType: "COMPANY",
     operatingEntityId: "",
@@ -264,7 +294,7 @@ export default function LoadDetailsPage() {
   }, [podDocs]);
   const rateConRequired = Boolean(settings?.requireRateConBeforeDispatch && load?.loadType === "BROKERED");
   const hasRateCon = useMemo(
-    () => (load?.docs ?? []).some((doc: any) => doc.type === "RATECON"),
+    () => (load?.docs ?? []).some((doc: any) => doc.type === "RATECON" || doc.type === "RATE_CONFIRMATION"),
     [load?.docs]
   );
   const dispatchStage =
@@ -307,6 +337,17 @@ export default function LoadDetailsPage() {
       : null;
   const displayCharges = impliedLinehaul ? [impliedLinehaul, ...charges] : charges;
   const chargesTotalCents = displayCharges.reduce((sum, charge) => sum + (charge.amountCents ?? 0), 0);
+  const billingReadiness = useMemo(() => {
+    if (!load) return null;
+    return deriveBillingReadiness({ load, charges, invoices: load.invoices ?? [] });
+  }, [load, charges]);
+  const billingBlockingReasons = (load?.billingBlockingReasons ?? []) as string[];
+  const billingStatus = load?.billingStatus ?? null;
+  const billingStatusLabel =
+    billingStatus === "READY" ? "Ready to bill" : billingStatus === "INVOICED" ? "Invoiced" : "Blocked";
+  const billingStatusTone =
+    billingStatus === "READY" ? "success" : billingStatus === "INVOICED" ? "info" : "warning";
+  const accessorials = load?.accessorials ?? [];
 
   const openDoc = (doc: any) => {
     const name = doc.filename?.split("/").pop();
@@ -365,8 +406,19 @@ export default function LoadDetailsPage() {
     user?.role === "DISPATCHER" ||
     user?.role === "HEAD_DISPATCHER" ||
     user?.role === "BILLING";
+  const canManageAccessorials =
+    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER" || user?.role === "BILLING";
+  const canApproveAccessorials = user?.role === "ADMIN" || user?.role === "BILLING";
+  const canBillActions = user?.role === "ADMIN" || user?.role === "BILLING";
+  const quickbooksEnabled = process.env.NEXT_PUBLIC_QUICKBOOKS_ENABLED === "true";
 
   const formatAmount = (cents: number) => (cents / 100).toFixed(2);
+  const formatMoney = (value: any) => {
+    if (value === null || value === undefined) return "-";
+    const numeric = typeof value === "string" ? Number(value) : Number(value);
+    if (Number.isNaN(numeric)) return String(value);
+    return numeric.toFixed(2);
+  };
   const parseAmountToCents = (value: string) => {
     const normalized = value.replace(/[^0-9.-]/g, "");
     if (!normalized) return null;
@@ -444,6 +496,135 @@ export default function LoadDetailsPage() {
       setChargeError((err as Error).message);
     } finally {
       setChargeSaving(false);
+    }
+  };
+
+  const resetAccessorialForm = () => {
+    const requiresProof = ACCESSORIAL_REQUIRES_PROOF.has("DETENTION");
+    setAccessorialForm({ type: "DETENTION", amount: "", requiresProof, notes: "" });
+    setAccessorialError(null);
+  };
+
+  const parseAmount = (value: string) => {
+    const cents = parseAmountToCents(value);
+    if (cents === null) return null;
+    return (cents / 100).toFixed(2);
+  };
+
+  const accessorialTone = (status: string) => {
+    if (status === "APPROVED") return "success";
+    if (status === "REJECTED") return "danger";
+    return "warning";
+  };
+
+  const saveAccessorial = async () => {
+    if (!loadId) return;
+    const amount = parseAmount(accessorialForm.amount);
+    if (!amount) {
+      setAccessorialError("Enter a valid amount.");
+      return;
+    }
+    setAccessorialSaving(true);
+    try {
+      await apiFetch(`/loads/${loadId}/accessorials`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: accessorialForm.type,
+          amount,
+          requiresProof: accessorialForm.requiresProof,
+          notes: accessorialForm.notes || undefined,
+        }),
+      });
+      resetAccessorialForm();
+      loadData();
+    } catch (err) {
+      setAccessorialError((err as Error).message);
+    } finally {
+      setAccessorialSaving(false);
+    }
+  };
+
+  const handleProofUpload = (accessorialId: string) => {
+    setProofTargetId(accessorialId);
+    proofInputRef.current?.click();
+  };
+
+  const uploadAccessorialProof = async (file: File, accessorialId: string) => {
+    if (!loadId) return;
+    const body = new FormData();
+    body.append("file", file);
+    body.append("type", "ACCESSORIAL_PROOF");
+    body.append("accessorialId", accessorialId);
+    await apiFetch(`/loads/${loadId}/docs`, { method: "POST", body });
+  };
+
+  const handleProofFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    if (!file || !proofTargetId) return;
+    setAccessorialActionId(proofTargetId);
+    setAccessorialError(null);
+    try {
+      await uploadAccessorialProof(file, proofTargetId);
+      loadData();
+    } catch (err) {
+      setAccessorialError((err as Error).message);
+    } finally {
+      setAccessorialActionId(null);
+      setProofTargetId(null);
+      event.target.value = "";
+    }
+  };
+
+  const approveAccessorial = async (accessorialId: string) => {
+    setAccessorialActionId(accessorialId);
+    setAccessorialError(null);
+    try {
+      await apiFetch(`/accessorials/${accessorialId}/approve`, { method: "POST" });
+      loadData();
+    } catch (err) {
+      setAccessorialError((err as Error).message);
+    } finally {
+      setAccessorialActionId(null);
+    }
+  };
+
+  const rejectAccessorial = async (accessorialId: string) => {
+    setAccessorialActionId(accessorialId);
+    setAccessorialError(null);
+    try {
+      await apiFetch(`/accessorials/${accessorialId}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: "Rejected" }),
+      });
+      loadData();
+    } catch (err) {
+      setAccessorialError((err as Error).message);
+    } finally {
+      setAccessorialActionId(null);
+    }
+  };
+
+  const markInvoiced = async () => {
+    if (!loadId) return;
+    setBillingActionError(null);
+    try {
+      await apiFetch(`/billing/readiness/${loadId}/mark-invoiced`, { method: "POST" });
+      loadData();
+    } catch (err) {
+      setBillingActionError((err as Error).message);
+    }
+  };
+
+  const sendToQuickbooks = async () => {
+    if (!loadId) return;
+    setBillingActionError(null);
+    try {
+      await apiFetch(`/billing/readiness/${loadId}/quickbooks`, { method: "POST" });
+      loadData();
+    } catch (err) {
+      setBillingActionError((err as Error).message);
     }
   };
 
@@ -1100,18 +1281,194 @@ export default function LoadDetailsPage() {
           {activeTab === "billing" ? (
             <Card className="space-y-4" id="billing">
               <SectionHeader title="Billing" subtitle="Invoice status and actions" />
+              {load ? (
+                <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-muted)] px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
+                      Billing readiness
+                    </div>
+                    <StatusChip label={billingStatusLabel} tone={billingStatusTone} />
+                  </div>
+                  {billingBlockingReasons.length > 0 ? (
+                    <div className="mt-2 text-xs text-[color:var(--color-text-muted)]">
+                      <ul className="space-y-1">
+                        {billingBlockingReasons.map((reason) => (
+                          <li key={reason} className="flex items-start gap-2">
+                            <span className="mt-[6px] h-1.5 w-1.5 rounded-full bg-[color:var(--color-text-muted)]" />
+                            <span>{reason}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <div className="mt-2 text-xs text-[color:var(--color-text-muted)]">
+                      All billing requirements are met.
+                    </div>
+                  )}
+                </div>
+              ) : null}
               <div className="text-sm text-[color:var(--color-text-muted)]">
                 Invoice status: {invoice?.status ? formatInvoiceStatusLabel(invoice.status) : "Not generated"}
               </div>
               <div className="flex flex-wrap gap-2">
                 {load?.status === "READY_TO_INVOICE" && canVerify ? (
-                  <Button onClick={generateInvoice}>Generate invoice</Button>
+                  <Button onClick={generateInvoice} disabled={billingReadiness ? !billingReadiness.readyForInvoice : false}>
+                    Generate invoice
+                  </Button>
+                ) : null}
+                {billingStatus === "READY" && canBillActions ? (
+                  <Button variant="secondary" onClick={markInvoiced}>
+                    Mark invoiced
+                  </Button>
+                ) : null}
+                {billingStatus === "READY" && canBillActions && quickbooksEnabled ? (
+                  <Button variant="secondary" onClick={sendToQuickbooks}>
+                    Send to QuickBooks
+                  </Button>
                 ) : null}
                 {invoice?.pdfPath ? (
                   <Button variant="secondary" onClick={() => window.open(`${API_BASE}/invoices/${invoice.id}/pdf`, "_blank")}>
                     Download PDF
                   </Button>
                 ) : null}
+              </div>
+              {billingActionError ? (
+                <div className="text-xs text-[color:var(--color-danger)]">{billingActionError}</div>
+              ) : null}
+              {billingReadiness && !billingReadiness.readyForInvoice ? (
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Resolve readiness items before invoicing.
+                </div>
+              ) : null}
+              {load?.externalInvoiceRef ? (
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  External invoice: {load.externalInvoiceRef}
+                </div>
+              ) : null}
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Accessorials</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">{accessorials.length} total</div>
+                </div>
+                <div className="grid gap-2">
+                  {accessorials.map((item: any) => (
+                    <div
+                      key={item.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2 text-sm"
+                    >
+                      <div>
+                        <div className="font-semibold text-ink">{ACCESSORIAL_LABELS[item.type] ?? item.type}</div>
+                        <div className="text-xs text-[color:var(--color-text-muted)]">{item.notes || "—"}</div>
+                        {item.requiresProof ? (
+                          <div className="text-xs text-[color:var(--color-text-muted)]">
+                            Proof: {item.proofDocumentId ? "On file" : "Required"}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-sm text-ink">${formatMoney(item.amount)}</div>
+                        <StatusChip
+                          label={ACCESSORIAL_STATUS_LABELS[item.status] ?? item.status}
+                          tone={accessorialTone(item.status)}
+                        />
+                        {item.requiresProof && !item.proofDocumentId && canManageAccessorials ? (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => handleProofUpload(item.id)}
+                            disabled={accessorialActionId === item.id || accessorialSaving}
+                          >
+                            Upload proof
+                          </Button>
+                        ) : null}
+                        {canApproveAccessorials && item.status !== "APPROVED" && item.status !== "REJECTED" ? (
+                          <>
+                            <Button
+                              size="sm"
+                              onClick={() => approveAccessorial(item.id)}
+                              disabled={accessorialActionId === item.id}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => rejectAccessorial(item.id)}
+                              disabled={accessorialActionId === item.id}
+                            >
+                              Reject
+                            </Button>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                  {accessorials.length === 0 ? <EmptyState title="No accessorials yet." /> : null}
+                </div>
+                {accessorialError ? (
+                  <div className="text-xs text-[color:var(--color-danger)]">{accessorialError}</div>
+                ) : null}
+                {canManageAccessorials ? (
+                  <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3">
+                    <div className="grid gap-3 lg:grid-cols-4">
+                      <FormField label="Type" htmlFor="accessorialType">
+                        <Select
+                          value={accessorialForm.type}
+                          onChange={(event) => {
+                            const nextType = event.target.value;
+                            const requiresProof = ACCESSORIAL_REQUIRES_PROOF.has(nextType);
+                            setAccessorialForm({ ...accessorialForm, type: nextType, requiresProof });
+                          }}
+                        >
+                          {ACCESSORIAL_TYPES.map((type) => (
+                            <option key={type} value={type}>
+                              {ACCESSORIAL_LABELS[type]}
+                            </option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <FormField label="Amount ($)" htmlFor="accessorialAmount">
+                        <Input
+                          placeholder="150.00"
+                          value={accessorialForm.amount}
+                          onChange={(event) => setAccessorialForm({ ...accessorialForm, amount: event.target.value })}
+                        />
+                      </FormField>
+                      <FormField label="Notes" htmlFor="accessorialNotes">
+                        <Input
+                          placeholder="Detention after 2 hours"
+                          value={accessorialForm.notes}
+                          onChange={(event) => setAccessorialForm({ ...accessorialForm, notes: event.target.value })}
+                        />
+                      </FormField>
+                      <div className="flex items-end">
+                        <CheckboxField
+                          id="accessorialProof"
+                          label="Requires proof"
+                          checked={accessorialForm.requiresProof}
+                          onChange={(event) =>
+                            setAccessorialForm({ ...accessorialForm, requiresProof: event.target.checked })
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button size="sm" onClick={saveAccessorial} disabled={accessorialSaving}>
+                        Add accessorial
+                      </Button>
+                      <Button size="sm" variant="secondary" onClick={resetAccessorialForm} disabled={accessorialSaving}>
+                        Reset
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                <input
+                  ref={proofInputRef}
+                  type="file"
+                  accept="application/pdf,image/*"
+                  onChange={handleProofFileChange}
+                  className="hidden"
+                />
               </div>
               {canViewCharges ? (
                 <div className="space-y-3">

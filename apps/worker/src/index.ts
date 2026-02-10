@@ -10,6 +10,9 @@ import {
   DocStatus,
 } from "@truckerio/db";
 import { processLoadConfirmations } from "./load-confirmations";
+import { syncSamsaraFuelSummaries } from "./samsara-fuel";
+
+const FUEL_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const parseTermsDays = (value?: string | null) => {
   if (!value) return null;
@@ -249,6 +252,7 @@ async function ensureComplianceTasks() {
 }
 
 let lastLearningPruneAt: number | null = null;
+let lastFuelSyncAt: number | null = null;
 
 async function pruneLearningExamples() {
   const orgDomains = await prisma.learningExample.findMany({
@@ -289,6 +293,11 @@ async function runLoop() {
     if (!lastLearningPruneAt || Date.now() - lastLearningPruneAt > 24 * 60 * 60 * 1000) {
       await pruneLearningExamples();
       lastLearningPruneAt = Date.now();
+    }
+    if (!lastFuelSyncAt || Date.now() - lastFuelSyncAt > FUEL_SYNC_INTERVAL_MS) {
+      await syncSamsaraFuelSummaries({ days: 7 });
+      await syncSamsaraFuelSummaries({ days: 30 });
+      lastFuelSyncAt = Date.now();
     }
   } catch (error) {
     console.error("Worker error", error);

@@ -26,6 +26,7 @@ import {
   LegType,
   LegStatus,
   ManifestStatus,
+  LoadAssignmentRole,
   EventType,
   TaskPriority,
   TaskStatus,
@@ -42,6 +43,12 @@ import {
   TrackingProviderType,
   TrackingSessionStatus,
   SettlementStatus,
+  FuelSummarySource,
+  BillingStatus,
+  AccessorialStatus,
+  AccessorialType,
+  VaultDocType,
+  VaultScopeType,
   LearningDomain,
   TeamEntityType,
   add,
@@ -60,6 +67,7 @@ import {
   saveDriverProfilePhoto,
   saveUserProfilePhoto,
   saveLoadConfirmationFile,
+  saveVaultDocumentFile,
   ensureUploadDirs,
   getUploadDir,
   resolveUploadPath,
@@ -76,6 +84,9 @@ import { requireOrgEntity } from "./lib/tenant";
 import { requireOperationalOrg } from "./lib/onboarding";
 import { fetchSamsaraVehicleLocation, fetchSamsaraVehicles, formatSamsaraError, validateSamsaraToken } from "./lib/samsara";
 import { assertLoadStatusTransition, formatLoadStatusLabel, mapExternalLoadStatus } from "./lib/load-status";
+import { buildAssignmentPlan, validateAssignmentDrivers } from "./lib/load-assignment";
+import { evaluateBillingReadiness, evaluateBillingReadinessSnapshot } from "./lib/billing-readiness";
+import { getVaultStatus, DEFAULT_VAULT_EXPIRING_DAYS, VAULT_DOCS_REQUIRING_EXPIRY } from "./lib/vault-status";
 import {
   applyTeamFilterOverride,
   ensureDefaultTeamForOrg,
@@ -356,6 +367,7 @@ async function transitionLoadStatus(params: {
     before: { status: params.load.status },
     after: { status: params.nextStatus },
   });
+  await evaluateBillingReadiness(params.load.id);
   return updated;
 }
 
@@ -862,7 +874,14 @@ async function recordLearningExample(params: {
 }
 
 app.use(helmet());
-const explicitOrigins = [process.env.WEB_ORIGIN].filter(Boolean) as string[];
+const explicitOrigins = Array.from(
+  new Set(
+    [process.env.WEB_ORIGIN, ...(process.env.CORS_ORIGINS || "").split(",")]
+      .map((value) => value?.trim())
+      .filter(Boolean),
+  ),
+);
+const allowedOrigins = explicitOrigins;
 const IS_PROD = process.env.NODE_ENV === "production";
 
 const parseHostname = (value?: string) => {
@@ -1795,7 +1814,7 @@ app.get("/today", requireAuth, async (req, res) => {
             ...loadScopeFilter,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
             loadType: LoadType.BROKERED,
-            docs: { none: { type: DocType.RATECON } },
+            docs: { none: { type: { in: [DocType.RATECON, DocType.RATE_CONFIRMATION] } } },
           },
         }),
         prisma.load.findFirst({
@@ -1805,7 +1824,7 @@ app.get("/today", requireAuth, async (req, res) => {
             ...loadScopeFilter,
             status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
             loadType: LoadType.BROKERED,
-            docs: { none: { type: DocType.RATECON } },
+            docs: { none: { type: { in: [DocType.RATECON, DocType.RATE_CONFIRMATION] } } },
           },
           select: { id: true },
         }),
@@ -1969,6 +1988,21 @@ app.get("/today", requireAuth, async (req, res) => {
           warnings: breakdownMap.get(team.id) ?? { dispatch_unassigned_loads: 0, dispatch_stuck_in_transit: 0 },
         }));
       }
+    }
+  }
+
+  if (role === "ADMIN") {
+    const expiringThreshold = addDays(now, DEFAULT_VAULT_EXPIRING_DAYS);
+    const expiringSoon = await prisma.vaultDocument.count({
+      where: { orgId, expiresAt: { gte: now, lte: expiringThreshold } },
+    });
+    if (expiringSoon > 0) {
+      addInfo({
+        ruleId: "vault_docs_expiring_soon",
+        title: "Documents expiring soon",
+        detail: `${expiringSoon} document${expiringSoon === 1 ? "" : "s"} expiring in the next ${DEFAULT_VAULT_EXPIRING_DAYS} days.`,
+        href: "/admin/documents/vault",
+      });
     }
   }
 
@@ -3175,7 +3209,7 @@ app.get("/loads/export", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLIN
 });
 
 app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
-  const [load, settings] = await Promise.all([
+  const [loadResult, settings] = await Promise.all([
     prisma.load.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId },
       include: {
@@ -3188,6 +3222,12 @@ app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING")
         docs: true,
         tasks: true,
         legs: { orderBy: { sequence: "asc" }, include: { driver: true, truck: true, trailer: true } },
+        accessorials: {
+          include: {
+            createdBy: { select: { id: true, name: true } },
+            approvedBy: { select: { id: true, name: true } },
+          },
+        },
         invoices: true,
       },
     }),
@@ -3196,9 +3236,34 @@ app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING")
       select: { requiredDocs: true, requireRateConBeforeDispatch: true },
     }),
   ]);
+  let load = loadResult;
   if (!load) {
     res.status(404).json({ error: "Load not found" });
     return;
+  }
+  const readiness = evaluateBillingReadinessSnapshot({
+    load,
+    stops: load.stops,
+    docs: load.docs,
+    accessorials: load.accessorials,
+    invoices: load.invoices.map((invoice) => ({ status: invoice.status })),
+  });
+  const reasonsChanged =
+    load.billingStatus !== readiness.billingStatus ||
+    load.billingBlockingReasons.join("||") !== readiness.blockingReasons.join("||");
+  if (reasonsChanged) {
+    await prisma.load.update({
+      where: { id: load.id },
+      data: {
+        billingStatus: readiness.billingStatus,
+        billingBlockingReasons: readiness.blockingReasons,
+      },
+    });
+    load = {
+      ...load,
+      billingStatus: readiness.billingStatus,
+      billingBlockingReasons: readiness.blockingReasons,
+    };
   }
   const loadScope = await getUserTeamScope(req.user!);
   if (!loadScope.canSeeAllTeams) {
@@ -3533,6 +3598,219 @@ app.delete(
   }
 );
 
+app.post(
+  "/loads/:id/accessorials",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      type: z.nativeEnum(AccessorialType),
+      amount: z.union([z.number(), z.string()]),
+      currency: z.string().optional(),
+      requiresProof: z.boolean().optional(),
+      notes: z.string().trim().max(500).optional().nullable(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
+      return;
+    }
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+      select: { id: true, loadNumber: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    const amount = toDecimalFixed(parsed.data.amount, 2);
+    if (!amount) {
+      res.status(400).json({ error: "Amount required" });
+      return;
+    }
+    const requiresProofDefault = [AccessorialType.LUMPER, AccessorialType.DETENTION].includes(parsed.data.type);
+    const requiresProof = parsed.data.requiresProof ?? requiresProofDefault;
+    const status = requiresProof ? AccessorialStatus.NEEDS_PROOF : AccessorialStatus.PENDING_APPROVAL;
+    const accessorial = await prisma.accessorial.create({
+      data: {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        type: parsed.data.type,
+        amount,
+        currency: parsed.data.currency ?? "USD",
+        requiresProof,
+        status,
+        notes: parsed.data.notes ?? null,
+        createdById: req.user!.id,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "ACCESSORIAL_CREATED",
+      entity: "Accessorial",
+      entityId: accessorial.id,
+      summary: `Accessorial added to ${load.loadNumber}`,
+      after: {
+        type: accessorial.type,
+        amount: accessorial.amount,
+        status: accessorial.status,
+        requiresProof: accessorial.requiresProof,
+      },
+    });
+    await evaluateBillingReadiness(load.id);
+    res.json({ accessorial });
+  }
+);
+
+app.patch(
+  "/accessorials/:id",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      type: z.nativeEnum(AccessorialType).optional(),
+      amount: z.union([z.number(), z.string()]).optional(),
+      currency: z.string().optional(),
+      requiresProof: z.boolean().optional(),
+      notes: z.string().trim().max(500).optional().nullable(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
+      return;
+    }
+    const accessorial = await prisma.accessorial.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+    });
+    if (!accessorial) {
+      res.status(404).json({ error: "Accessorial not found" });
+      return;
+    }
+    const amount = parsed.data.amount !== undefined ? toDecimalFixed(parsed.data.amount, 2) : undefined;
+    if (parsed.data.amount !== undefined && !amount) {
+      res.status(400).json({ error: "Amount required" });
+      return;
+    }
+    let nextStatus = accessorial.status;
+    if (parsed.data.requiresProof !== undefined && accessorial.status !== AccessorialStatus.APPROVED) {
+      if (parsed.data.requiresProof && !accessorial.proofDocumentId) {
+        nextStatus = AccessorialStatus.NEEDS_PROOF;
+      } else if (!parsed.data.requiresProof && accessorial.status === AccessorialStatus.NEEDS_PROOF) {
+        nextStatus = AccessorialStatus.PENDING_APPROVAL;
+      }
+    }
+    const updated = await prisma.accessorial.update({
+      where: { id: accessorial.id },
+      data: {
+        type: parsed.data.type ?? undefined,
+        amount: amount ?? undefined,
+        currency: parsed.data.currency ?? undefined,
+        requiresProof: parsed.data.requiresProof ?? undefined,
+        notes: parsed.data.notes === undefined ? undefined : parsed.data.notes ?? null,
+        status: nextStatus,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "ACCESSORIAL_UPDATED",
+      entity: "Accessorial",
+      entityId: updated.id,
+      summary: "Accessorial updated",
+      before: { status: accessorial.status, amount: accessorial.amount, requiresProof: accessorial.requiresProof },
+      after: { status: updated.status, amount: updated.amount, requiresProof: updated.requiresProof },
+    });
+    await evaluateBillingReadiness(updated.loadId);
+    res.json({ accessorial: updated });
+  }
+);
+
+app.post(
+  "/accessorials/:id/approve",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const accessorial = await prisma.accessorial.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+    });
+    if (!accessorial) {
+      res.status(404).json({ error: "Accessorial not found" });
+      return;
+    }
+    if (accessorial.requiresProof && !accessorial.proofDocumentId) {
+      res.status(400).json({ error: "Proof required before approval" });
+      return;
+    }
+    const updated = await prisma.accessorial.update({
+      where: { id: accessorial.id },
+      data: {
+        status: AccessorialStatus.APPROVED,
+        approvedById: req.user!.id,
+        approvedAt: new Date(),
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "ACCESSORIAL_APPROVED",
+      entity: "Accessorial",
+      entityId: updated.id,
+      summary: "Accessorial approved",
+      before: { status: accessorial.status },
+      after: { status: updated.status },
+    });
+    await evaluateBillingReadiness(updated.loadId);
+    res.json({ accessorial: updated });
+  }
+);
+
+app.post(
+  "/accessorials/:id/reject",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({ notes: z.string().trim().max(500).optional().nullable() });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
+      return;
+    }
+    const accessorial = await prisma.accessorial.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+    });
+    if (!accessorial) {
+      res.status(404).json({ error: "Accessorial not found" });
+      return;
+    }
+    const updated = await prisma.accessorial.update({
+      where: { id: accessorial.id },
+      data: {
+        status: AccessorialStatus.REJECTED,
+        approvedById: req.user!.id,
+        approvedAt: new Date(),
+        notes: parsed.data.notes === undefined ? undefined : parsed.data.notes ?? null,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "ACCESSORIAL_REJECTED",
+      entity: "Accessorial",
+      entityId: updated.id,
+      summary: "Accessorial rejected",
+      before: { status: accessorial.status },
+      after: { status: updated.status },
+    });
+    await evaluateBillingReadiness(updated.loadId);
+    res.json({ accessorial: updated });
+  }
+);
+
 app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
   const [load, settings] = await Promise.all([
     prisma.load.findFirst({
@@ -3568,8 +3846,11 @@ app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.
           orderBy: { sequence: "asc" },
           include: { driver: true, truck: true, trailer: true },
         },
+        assignmentMembers: {
+          include: { driver: { select: { id: true, name: true } } },
+        },
         docs: {
-          where: { type: { in: [DocType.POD, DocType.RATECON] } },
+          where: { type: { in: [DocType.POD, DocType.RATECON, DocType.RATE_CONFIRMATION] } },
           select: { id: true, type: true, status: true },
         },
         trackingSessions: {
@@ -4221,7 +4502,7 @@ app.post("/loads/:id/legs", requireAuth, requireCsrf, requirePermission(Permissi
     const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
     if (settings?.requireRateConBeforeDispatch && load.loadType === LoadType.BROKERED) {
       const hasRateCon = await prisma.document.findFirst({
-        where: { orgId: req.user!.orgId, loadId: load.id, type: DocType.RATECON },
+        where: { orgId: req.user!.orgId, loadId: load.id, type: { in: [DocType.RATECON, DocType.RATE_CONFIRMATION] } },
         select: { id: true },
       });
       if (!hasRateCon && (req.user!.role !== "ADMIN" || !parsed.data.overrideReason)) {
@@ -4320,7 +4601,11 @@ app.post("/legs/:id/assign", requireAuth, requireCsrf, requirePermission(Permiss
     const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
     if (settings?.requireRateConBeforeDispatch && leg.load?.loadType === LoadType.BROKERED) {
       const hasRateCon = await prisma.document.findFirst({
-        where: { orgId: req.user!.orgId, loadId: leg.loadId, type: DocType.RATECON },
+        where: {
+          orgId: req.user!.orgId,
+          loadId: leg.loadId,
+          type: { in: [DocType.RATECON, DocType.RATE_CONFIRMATION] },
+        },
         select: { id: true },
       });
       if (!hasRateCon && (req.user!.role !== "ADMIN" || !parsed.data.overrideReason)) {
@@ -4392,7 +4677,11 @@ app.post("/legs/:id/status", requireAuth, requireCsrf, requirePermission(Permiss
     const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
     if (settings?.requireRateConBeforeDispatch && leg.load?.loadType === LoadType.BROKERED) {
       const hasRateCon = await prisma.document.findFirst({
-        where: { orgId: req.user!.orgId, loadId: leg.loadId, type: DocType.RATECON },
+        where: {
+          orgId: req.user!.orgId,
+          loadId: leg.loadId,
+          type: { in: [DocType.RATECON, DocType.RATE_CONFIRMATION] },
+        },
         select: { id: true },
       });
       if (!hasRateCon && (req.user!.role !== "ADMIN" || !parsed.data.overrideReason)) {
@@ -5265,7 +5554,9 @@ app.post(
 
 app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
   const schema = z.object({
-    driverId: z.string(),
+    primaryDriverId: z.string().optional(),
+    coDriverId: z.string().optional().nullable(),
+    driverId: z.string().optional(),
     truckId: z.string().optional(),
     trailerId: z.string().optional(),
     overrideReason: z.string().optional(),
@@ -5275,6 +5566,15 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
+  const primaryDriverId = parsed.data.primaryDriverId ?? parsed.data.driverId ?? "";
+  const coDriverId =
+    parsed.data.coDriverId && parsed.data.coDriverId.trim() ? parsed.data.coDriverId.trim() : null;
+  const validation = validateAssignmentDrivers(primaryDriverId, coDriverId);
+  if (!validation.ok) {
+    res.status(400).json({ error: validation.error });
+    return;
+  }
+  const assignmentPlan = buildAssignmentPlan({ primaryDriverId, coDriverId });
   const load = await prisma.load.findFirst({
     where: { id: req.params.id, orgId: req.user!.orgId },
     select: {
@@ -5294,8 +5594,21 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     res.status(404).json({ error: "Load not found" });
     return;
   }
-  const [driverCheck, truckCheck, trailerCheck, settings] = await Promise.all([
-    prisma.driver.findFirst({ where: { id: parsed.data.driverId, orgId: req.user!.orgId } }),
+  const existingMembers = await prisma.loadAssignmentMember.findMany({
+    where: { loadId: load.id },
+  });
+  const existingPrimaryId =
+    existingMembers.find((member) => member.role === LoadAssignmentRole.PRIMARY)?.driverId ??
+    load.assignedDriverId ??
+    null;
+  const existingCoId =
+    existingMembers.find((member) => member.role === LoadAssignmentRole.CO_DRIVER)?.driverId ?? null;
+
+  const [driverCheck, coDriverCheck, truckCheck, trailerCheck, settings] = await Promise.all([
+    prisma.driver.findFirst({ where: { id: primaryDriverId, orgId: req.user!.orgId } }),
+    coDriverId
+      ? prisma.driver.findFirst({ where: { id: coDriverId, orgId: req.user!.orgId } })
+      : Promise.resolve(null),
     parsed.data.truckId
       ? prisma.truck.findFirst({ where: { id: parsed.data.truckId, orgId: req.user!.orgId } })
       : Promise.resolve(null),
@@ -5304,14 +5617,14 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
       : Promise.resolve(null),
     prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } }),
   ]);
-  if (!driverCheck || (parsed.data.truckId && !truckCheck) || (parsed.data.trailerId && !trailerCheck)) {
+  if (!driverCheck || (coDriverId && !coDriverCheck) || (parsed.data.truckId && !truckCheck) || (parsed.data.trailerId && !trailerCheck)) {
     res.status(400).json({ error: "Invalid asset assignment" });
     return;
   }
 
   if (settings?.requireRateConBeforeDispatch && load.loadType === LoadType.BROKERED) {
     const hasRateCon = await prisma.document.findFirst({
-      where: { orgId: req.user!.orgId, loadId: load.id, type: DocType.RATECON },
+      where: { orgId: req.user!.orgId, loadId: load.id, type: { in: [DocType.RATECON, DocType.RATE_CONFIRMATION] } },
       select: { id: true },
     });
     if (!hasRateCon) {
@@ -5325,6 +5638,9 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
   const availabilityIssues: string[] = [];
   if (driverCheck.status !== DriverStatus.AVAILABLE && load.assignedDriverId !== driverCheck.id) {
     availabilityIssues.push(`Driver status ${driverCheck.status}`);
+  }
+  if (coDriverCheck && coDriverCheck.status !== DriverStatus.AVAILABLE && existingCoId !== coDriverCheck.id) {
+    availabilityIssues.push(`Co-driver status ${coDriverCheck.status}`);
   }
   if (truckCheck && truckCheck.status !== TruckStatus.AVAILABLE && load.truckId !== truckCheck.id) {
     availabilityIssues.push(`Truck status ${truckCheck.status}`);
@@ -5356,7 +5672,7 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
 
   const now = new Date();
   const assignedDriverAt =
-    parsed.data.driverId !== load.assignedDriverId ? now : load.assignedDriverAt ?? null;
+    assignmentPlan.assignedDriverId !== load.assignedDriverId ? now : load.assignedDriverAt ?? null;
   const assignedTruckAt =
     parsed.data.truckId !== load.truckId ? (parsed.data.truckId ? now : null) : load.assignedTruckAt ?? null;
   const assignedTrailerAt =
@@ -5371,7 +5687,7 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
   const updated = await prisma.load.update({
     where: { id: load.id },
     data: {
-      assignedDriverId: parsed.data.driverId,
+      assignedDriverId: assignmentPlan.assignedDriverId,
       truckId: parsed.data.truckId ?? null,
       trailerId: parsed.data.trailerId ?? null,
       assignedDriverAt,
@@ -5382,6 +5698,23 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     },
   });
 
+  await prisma.loadAssignmentMember.upsert({
+    where: { loadId_role: { loadId: updated.id, role: LoadAssignmentRole.PRIMARY } },
+    update: { driverId: assignmentPlan.primaryDriverId },
+    create: { loadId: updated.id, driverId: assignmentPlan.primaryDriverId, role: LoadAssignmentRole.PRIMARY },
+  });
+  if (assignmentPlan.coDriverId) {
+    await prisma.loadAssignmentMember.upsert({
+      where: { loadId_role: { loadId: updated.id, role: LoadAssignmentRole.CO_DRIVER } },
+      update: { driverId: assignmentPlan.coDriverId },
+      create: { loadId: updated.id, driverId: assignmentPlan.coDriverId, role: LoadAssignmentRole.CO_DRIVER },
+    });
+  } else {
+    await prisma.loadAssignmentMember.deleteMany({
+      where: { loadId: updated.id, role: LoadAssignmentRole.CO_DRIVER },
+    });
+  }
+
   const activeLeg = await prisma.loadLeg.findFirst({
     where: { loadId: updated.id, orgId: req.user!.orgId, status: LegStatus.IN_PROGRESS },
     orderBy: { sequence: "desc" },
@@ -5390,7 +5723,7 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     await prisma.loadLeg.update({
       where: { id: activeLeg.id },
       data: {
-        driverId: parsed.data.driverId,
+        driverId: assignmentPlan.primaryDriverId,
         truckId: parsed.data.truckId ?? null,
         trailerId: parsed.data.trailerId ?? null,
       },
@@ -5419,8 +5752,38 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
     }
   };
 
-  if (load.assignedDriverId && load.assignedDriverId !== parsed.data.driverId) {
-    await resetStatusIfIdle("driver", load.assignedDriverId);
+  const resetDriverIfIdle = async (driverId: string | null) => {
+    if (!driverId) return;
+    const otherPrimary = await prisma.load.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        id: { not: load.id },
+        assignedDriverId: driverId,
+        status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
+      },
+      select: { id: true },
+    });
+    const otherMember = await prisma.loadAssignmentMember.findFirst({
+      where: {
+        driverId,
+        loadId: { not: load.id },
+        load: {
+          orgId: req.user!.orgId,
+          status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
+        },
+      },
+      select: { id: true },
+    });
+    if (!otherPrimary && !otherMember) {
+      await prisma.driver.update({ where: { id: driverId }, data: { status: DriverStatus.AVAILABLE } });
+    }
+  };
+
+  if (existingPrimaryId && existingPrimaryId !== primaryDriverId) {
+    await resetDriverIfIdle(existingPrimaryId);
+  }
+  if (existingCoId && existingCoId !== assignmentPlan.coDriverId) {
+    await resetDriverIfIdle(existingCoId);
   }
   if (load.truckId && load.truckId !== (parsed.data.truckId ?? null)) {
     await resetStatusIfIdle("truck", load.truckId);
@@ -5431,6 +5794,9 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
 
   await Promise.all([
     prisma.driver.update({ where: { id: driverCheck.id }, data: { status: DriverStatus.ON_LOAD } }),
+    assignmentPlan.coDriverId
+      ? prisma.driver.update({ where: { id: assignmentPlan.coDriverId }, data: { status: DriverStatus.ON_LOAD } })
+      : Promise.resolve(null),
     parsed.data.truckId ? prisma.truck.update({ where: { id: parsed.data.truckId }, data: { status: TruckStatus.ASSIGNED } }) : Promise.resolve(null),
     parsed.data.trailerId
       ? prisma.trailer.update({ where: { id: parsed.data.trailerId }, data: { status: TrailerStatus.ASSIGNED } })
@@ -5481,7 +5847,11 @@ app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, r
       trailerId: updated.trailerId,
     },
   });
-  res.json({ load: updated });
+  const members = await prisma.loadAssignmentMember.findMany({
+    where: { loadId: updated.id },
+    include: { driver: { select: { id: true, name: true } } },
+  });
+  res.json({ load: updated, assignmentMembers: members });
 });
 
 app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
@@ -5492,6 +5862,15 @@ app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Perm
     res.status(404).json({ error: "Load not found" });
     return;
   }
+  const existingMembers = await prisma.loadAssignmentMember.findMany({
+    where: { loadId: load.id },
+  });
+  const existingPrimaryId =
+    existingMembers.find((member) => member.role === LoadAssignmentRole.PRIMARY)?.driverId ??
+    load.assignedDriverId ??
+    null;
+  const existingCoId =
+    existingMembers.find((member) => member.role === LoadAssignmentRole.CO_DRIVER)?.driverId ?? null;
   let statusResult = { overridden: false };
   if (load.status === LoadStatus.ASSIGNED) {
     try {
@@ -5525,6 +5904,7 @@ app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Perm
       completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
     },
   });
+  await prisma.loadAssignmentMember.deleteMany({ where: { loadId: load.id } });
   const activeLeg = await prisma.loadLeg.findFirst({
     where: { loadId: load.id, orgId: req.user!.orgId, status: LegStatus.IN_PROGRESS },
     orderBy: { sequence: "desc" },
@@ -5560,7 +5940,35 @@ app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Perm
     }
   };
 
-  await resetStatusIfIdle("driver", load.assignedDriverId);
+  const resetDriverIfIdle = async (driverId: string | null) => {
+    if (!driverId) return;
+    const otherPrimary = await prisma.load.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        id: { not: load.id },
+        assignedDriverId: driverId,
+        status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
+      },
+      select: { id: true },
+    });
+    const otherMember = await prisma.loadAssignmentMember.findFirst({
+      where: {
+        driverId,
+        loadId: { not: load.id },
+        load: {
+          orgId: req.user!.orgId,
+          status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
+        },
+      },
+      select: { id: true },
+    });
+    if (!otherPrimary && !otherMember) {
+      await prisma.driver.update({ where: { id: driverId }, data: { status: DriverStatus.AVAILABLE } });
+    }
+  };
+
+  await resetDriverIfIdle(existingPrimaryId);
+  await resetDriverIfIdle(existingCoId);
   await resetStatusIfIdle("truck", load.truckId);
   await resetStatusIfIdle("trailer", load.trailerId);
 
@@ -5774,6 +6182,13 @@ app.get("/dispatch/availability", requireAuth, requirePermission(Permission.LOAD
       stops: { select: { appointmentStart: true, appointmentEnd: true } },
     },
   });
+  const assignmentMembers = await prisma.loadAssignmentMember.findMany({
+    where: {
+      role: LoadAssignmentRole.CO_DRIVER,
+      loadId: { in: activeLoads.map((item) => item.id) },
+    },
+    select: { loadId: true, driverId: true },
+  });
 
   const assignmentMap = new Map<
     string,
@@ -5821,6 +6236,16 @@ app.get("/dispatch/availability", requireAuth, requirePermission(Permission.LOAD
         status: other.status,
       });
     }
+  }
+  const loadById = new Map(activeLoads.map((item) => [item.id, item]));
+  for (const member of assignmentMembers) {
+    const info = loadById.get(member.loadId);
+    if (!info) continue;
+    markUnavailable(`driver:${member.driverId}`, {
+      loadId: info.id,
+      loadNumber: info.loadNumber,
+      status: info.status,
+    });
   }
 
   const [drivers, trucks, trailers] = await Promise.all([
@@ -6321,6 +6746,14 @@ app.post(
   }
 );
 
+async function getDriverAssignmentRole(loadId: string, driverId: string) {
+  const member = await prisma.loadAssignmentMember.findFirst({
+    where: { loadId, driverId },
+    select: { role: true },
+  });
+  return member?.role ?? null;
+}
+
 app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) => {
   const driver = await prisma.driver.findFirst({
     where: { userId: req.user!.id, orgId: req.user!.orgId },
@@ -6332,7 +6765,10 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
   const load = await prisma.load.findFirst({
     where: {
       orgId: req.user!.orgId,
-      assignedDriverId: driver.id,
+      OR: [
+        { assignedDriverId: driver.id },
+        { assignmentMembers: { some: { driverId: driver.id } } },
+      ],
       status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
     },
     include: {
@@ -6340,6 +6776,7 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
       docs: true,
       driver: true,
       customer: true,
+      assignmentMembers: { include: { driver: { select: { id: true, name: true } } } },
     },
     orderBy: { createdAt: "desc" },
   });
@@ -6599,8 +7036,20 @@ app.post("/driver/stops/:stopId/arrive", requireAuth, requireCsrf, requireRole("
       where: { id: req.params.stopId, orgId: req.user!.orgId },
       include: { load: true },
     });
-    if (!stopCheck || stopCheck.load.assignedDriverId !== driver.id) {
+    if (!stopCheck) {
       res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    const assignmentRole =
+      stopCheck.load.assignedDriverId === driver.id
+        ? LoadAssignmentRole.PRIMARY
+        : await getDriverAssignmentRole(stopCheck.load.id, driver.id);
+    if (!assignmentRole) {
+      res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    if (assignmentRole !== LoadAssignmentRole.PRIMARY) {
+      res.status(403).json({ error: "Only the primary driver can update stops" });
       return;
     }
     const stop = await handleArriveStop({
@@ -6628,8 +7077,20 @@ app.post("/driver/stops/:stopId/depart", requireAuth, requireCsrf, requireRole("
       where: { id: req.params.stopId, orgId: req.user!.orgId },
       include: { load: true },
     });
-    if (!stopCheck || stopCheck.load.assignedDriverId !== driver.id) {
+    if (!stopCheck) {
       res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    const assignmentRole =
+      stopCheck.load.assignedDriverId === driver.id
+        ? LoadAssignmentRole.PRIMARY
+        : await getDriverAssignmentRole(stopCheck.load.id, driver.id);
+    if (!assignmentRole) {
+      res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    if (assignmentRole !== LoadAssignmentRole.PRIMARY) {
+      res.status(403).json({ error: "Only the primary driver can update stops" });
       return;
     }
     const stop = await handleDepartStop({
@@ -6661,8 +7122,20 @@ app.post("/driver/note", requireAuth, requireCsrf, requireRole("DRIVER"), async 
   const load = await prisma.load.findFirst({
     where: { id: parsed.data.loadId, orgId: req.user!.orgId },
   });
-  if (!load || load.assignedDriverId !== driver.id) {
+  if (!load) {
     res.status(403).json({ error: "Not assigned to this load" });
+    return;
+  }
+  const assignmentRole =
+    load.assignedDriverId === driver.id
+      ? LoadAssignmentRole.PRIMARY
+      : await getDriverAssignmentRole(load.id, driver.id);
+  if (!assignmentRole) {
+    res.status(403).json({ error: "Not assigned to this load" });
+    return;
+  }
+  if (assignmentRole !== LoadAssignmentRole.PRIMARY) {
+    res.status(403).json({ error: "Only the primary driver can add notes" });
     return;
   }
   await createEvent({
@@ -6707,8 +7180,16 @@ app.post("/driver/undo", requireAuth, requireCsrf, requireRole("DRIVER"), async 
     res.status(404).json({ error: "Load not found" });
     return;
   }
-  if (load.assignedDriverId !== driver.id) {
+  const assignmentRole =
+    load.assignedDriverId === driver.id
+      ? LoadAssignmentRole.PRIMARY
+      : await getDriverAssignmentRole(load.id, driver.id);
+  if (!assignmentRole) {
     res.status(403).json({ error: "Not assigned to this load" });
+    return;
+  }
+  if (assignmentRole !== LoadAssignmentRole.PRIMARY) {
+    res.status(403).json({ error: "Only the primary driver can undo actions" });
     return;
   }
   const recentStops = load.stops
@@ -6774,8 +7255,20 @@ app.post(
     const driver = await prisma.driver.findFirst({
       where: { userId: req.user!.id, orgId: req.user!.orgId },
     });
-    if (!driver || load.assignedDriverId !== driver.id) {
+    if (!driver) {
       res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    const assignmentRole =
+      load.assignedDriverId === driver.id
+        ? LoadAssignmentRole.PRIMARY
+        : await getDriverAssignmentRole(load.id, driver.id);
+    if (!assignmentRole) {
+      res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    if (assignmentRole !== LoadAssignmentRole.PRIMARY) {
+      res.status(403).json({ error: "Only the primary driver can manage tracking" });
       return;
     }
   }
@@ -6833,8 +7326,20 @@ app.post(
     const driver = await prisma.driver.findFirst({
       where: { userId: req.user!.id, orgId: req.user!.orgId },
     });
-    if (!driver || load.assignedDriverId !== driver.id) {
+    if (!driver) {
       res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    const assignmentRole =
+      load.assignedDriverId === driver.id
+        ? LoadAssignmentRole.PRIMARY
+        : await getDriverAssignmentRole(load.id, driver.id);
+    if (!assignmentRole) {
+      res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    if (assignmentRole !== LoadAssignmentRole.PRIMARY) {
+      res.status(403).json({ error: "Only the primary driver can manage tracking" });
       return;
     }
   }
@@ -6909,8 +7414,20 @@ app.post(
     const driver = await prisma.driver.findFirst({
       where: { userId: req.user!.id, orgId: req.user!.orgId },
     });
-    if (!driver || load.assignedDriverId !== driver.id) {
+    if (!driver) {
       res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    const assignmentRole =
+      load.assignedDriverId === driver.id
+        ? LoadAssignmentRole.PRIMARY
+        : await getDriverAssignmentRole(load.id, driver.id);
+    if (!assignmentRole) {
+      res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    if (assignmentRole !== LoadAssignmentRole.PRIMARY) {
+      res.status(403).json({ error: "Only the primary driver can manage tracking" });
       return;
     }
     driverId = driver.id;
@@ -6956,7 +7473,15 @@ app.get("/tracking/load/:loadId/latest", requireAuth, requireRole("ADMIN", "DISP
     const driver = await prisma.driver.findFirst({
       where: { userId: req.user!.id, orgId: req.user!.orgId },
     });
-    if (!driver || load.assignedDriverId !== driver.id) {
+    if (!driver) {
+      res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    const assignmentRole =
+      load.assignedDriverId === driver.id
+        ? LoadAssignmentRole.PRIMARY
+        : await getDriverAssignmentRole(load.id, driver.id);
+    if (!assignmentRole) {
       res.status(403).json({ error: "Not assigned to this load" });
       return;
     }
@@ -7027,7 +7552,15 @@ app.get("/tracking/load/:loadId/history", requireAuth, requireRole("ADMIN", "DIS
     const driver = await prisma.driver.findFirst({
       where: { userId: req.user!.id, orgId: req.user!.orgId },
     });
-    if (!driver || load.assignedDriverId !== driver.id) {
+    if (!driver) {
+      res.status(403).json({ error: "Not assigned to this load" });
+      return;
+    }
+    const assignmentRole =
+      load.assignedDriverId === driver.id
+        ? LoadAssignmentRole.PRIMARY
+        : await getDriverAssignmentRole(load.id, driver.id);
+    if (!assignmentRole) {
       res.status(403).json({ error: "Not assigned to this load" });
       return;
     }
@@ -7056,6 +7589,7 @@ app.post(
     const schema = z.object({
       type: z.nativeEnum(DocType),
       stopId: z.string().optional(),
+      accessorialId: z.string().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -7082,6 +7616,28 @@ app.post(
           return;
         }
       }
+      let accessorial: { id: string; status: AccessorialStatus } | null = null;
+      if (parsed.data.accessorialId) {
+        accessorial = await prisma.accessorial.findFirst({
+          where: { id: parsed.data.accessorialId, orgId: req.user!.orgId, loadId: load.id },
+          select: { id: true, status: true },
+        });
+        if (!accessorial) {
+          res.status(404).json({ error: "Accessorial not found" });
+          return;
+        }
+      }
+      let accessorial: { id: string; status: AccessorialStatus } | null = null;
+      if (parsed.data.accessorialId) {
+        accessorial = await prisma.accessorial.findFirst({
+          where: { id: parsed.data.accessorialId, orgId: req.user!.orgId, loadId: load.id },
+          select: { id: true, status: true },
+        });
+        if (!accessorial) {
+          res.status(404).json({ error: "Accessorial not found" });
+          return;
+        }
+      }
       const { filename } = await saveDocumentFile(req.file, load.id, req.user!.orgId, parsed.data.type);
       const doc = await prisma.document.create({
         data: {
@@ -7098,6 +7654,24 @@ app.post(
           uploadedById: req.user!.id,
         },
       });
+      if (accessorial && parsed.data.type === DocType.ACCESSORIAL_PROOF) {
+        await prisma.accessorial.update({
+          where: { id: accessorial.id },
+          data: {
+            proofDocumentId: doc.id,
+            status: accessorial.status === AccessorialStatus.NEEDS_PROOF ? AccessorialStatus.PENDING_APPROVAL : undefined,
+          },
+        });
+      }
+      if (accessorial && parsed.data.type === DocType.ACCESSORIAL_PROOF) {
+        await prisma.accessorial.update({
+          where: { id: accessorial.id },
+          data: {
+            proofDocumentId: doc.id,
+            status: accessorial.status === AccessorialStatus.NEEDS_PROOF ? AccessorialStatus.PENDING_APPROVAL : undefined,
+          },
+        });
+      }
       await createEvent({
         orgId: req.user!.orgId,
         loadId: load.id,
@@ -7155,6 +7729,7 @@ app.post(
         summary: `Uploaded ${parsed.data.type} for load ${load.loadNumber}`,
         after: { type: doc.type, status: doc.status, stopId: doc.stopId ?? null },
       });
+      await evaluateBillingReadiness(load.id);
       res.json({ doc });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
@@ -7173,7 +7748,12 @@ app.post(
       res.status(400).json({ error: "File required" });
       return;
     }
-    const schema = z.object({ loadId: z.string(), type: z.nativeEnum(DocType), stopId: z.string().optional() });
+    const schema = z.object({
+      loadId: z.string(),
+      type: z.nativeEnum(DocType),
+      stopId: z.string().optional(),
+      accessorialId: z.string().optional(),
+    });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid payload" });
@@ -7191,9 +7771,16 @@ app.post(
       const driver = await prisma.driver.findFirst({
         where: { userId: req.user!.id, orgId: req.user!.orgId },
       });
-      if (!driver || load.assignedDriverId !== driver.id) {
+      if (!driver) {
         res.status(403).json({ error: "Not assigned to this load" });
         return;
+      }
+      if (load.assignedDriverId !== driver.id) {
+        const role = await getDriverAssignmentRole(load.id, driver.id);
+        if (!role) {
+          res.status(403).json({ error: "Not assigned to this load" });
+          return;
+        }
       }
       let stop: { id: string; type: StopType } | null = null;
       if (parsed.data.stopId) {
@@ -7279,6 +7866,7 @@ app.post(
         summary: `Uploaded ${parsed.data.type} for load ${load.loadNumber}`,
         after: { type: doc.type, status: doc.status, stopId: doc.stopId ?? null },
       });
+      await evaluateBillingReadiness(load.id);
       res.json({ doc });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
@@ -7479,6 +8067,7 @@ app.post("/docs/:id/verify", requireAuth, requireCsrf, requirePermission(Permiss
       await completeTask(task.id, req.user!.orgId, req.user!.id);
     }
   }
+  await evaluateBillingReadiness(load.id);
   res.json({
     doc: updated,
     invoice: null,
@@ -7531,24 +8120,170 @@ app.post("/docs/:id/reject", requireAuth, requireCsrf, requirePermission(Permiss
     before: { status: doc.status },
     after: { status: DocStatus.REJECTED },
   });
+  await evaluateBillingReadiness(doc.loadId);
   res.json({ doc: updated });
 });
+
+app.get(
+  "/billing/readiness",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+  const billingStatuses = [
+    LoadStatus.DELIVERED,
+    LoadStatus.POD_RECEIVED,
+    LoadStatus.READY_TO_INVOICE,
+    LoadStatus.INVOICED,
+    LoadStatus.PAID,
+  ];
+  const loads = await prisma.load.findMany({
+    where: { orgId: req.user!.orgId, deletedAt: null, status: { in: billingStatuses } },
+    include: {
+      stops: { orderBy: { sequence: "asc" } },
+      docs: true,
+      accessorials: true,
+      invoices: { select: { status: true } },
+      customer: { select: { name: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const results = [];
+  for (const load of loads) {
+    const readiness = evaluateBillingReadinessSnapshot({
+      load,
+      stops: load.stops,
+      docs: load.docs,
+      accessorials: load.accessorials,
+      invoices: load.invoices,
+    });
+    const reasonsChanged =
+      load.billingStatus !== readiness.billingStatus ||
+      load.billingBlockingReasons.join("||") !== readiness.blockingReasons.join("||");
+    if (reasonsChanged) {
+      await prisma.load.update({
+        where: { id: load.id },
+        data: {
+          billingStatus: readiness.billingStatus,
+          billingBlockingReasons: readiness.blockingReasons,
+        },
+      });
+    }
+    results.push({
+      id: load.id,
+      loadNumber: load.loadNumber,
+      status: load.status,
+      customerName: load.customerName ?? load.customer?.name ?? null,
+      stops: load.stops,
+      billingStatus: readiness.billingStatus,
+      billingBlockingReasons: readiness.blockingReasons,
+    });
+  }
+
+    res.json({ loads: results });
+  }
+);
 
 app.get("/billing/queue", requireAuth, requirePermission(Permission.DOC_VERIFY, Permission.INVOICE_SEND), async (req, res) => {
   const delivered = await prisma.load.findMany({
     where: { orgId: req.user!.orgId, status: { in: [LoadStatus.DELIVERED, LoadStatus.POD_RECEIVED] } },
-    include: { docs: true, stops: true, driver: true, customer: true, operatingEntity: true },
+    include: { docs: true, stops: true, driver: true, customer: true, operatingEntity: true, charges: true },
   });
   const ready = await prisma.load.findMany({
     where: { orgId: req.user!.orgId, status: LoadStatus.READY_TO_INVOICE },
-    include: { docs: true, stops: true, driver: true, customer: true, operatingEntity: true },
+    include: { docs: true, stops: true, driver: true, customer: true, operatingEntity: true, charges: true },
   });
   const invoiced = await prisma.load.findMany({
     where: { orgId: req.user!.orgId, status: LoadStatus.INVOICED },
-    include: { docs: true, stops: true, driver: true, customer: true, operatingEntity: true, invoices: { include: { items: true } } },
+    include: {
+      docs: true,
+      stops: true,
+      driver: true,
+      customer: true,
+      operatingEntity: true,
+      charges: true,
+      invoices: { include: { items: true } },
+    },
   });
   res.json({ delivered, ready, invoiced });
 });
+
+app.post(
+  "/billing/readiness/:loadId/mark-invoiced",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.loadId, orgId: req.user!.orgId },
+      select: { id: true, loadNumber: true, billingStatus: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    if (load.billingStatus !== BillingStatus.READY) {
+      res.status(400).json({ error: "Load is not ready to bill" });
+      return;
+    }
+    const updated = await prisma.load.update({
+      where: { id: load.id },
+      data: {
+        billingStatus: BillingStatus.INVOICED,
+        billingBlockingReasons: [],
+        invoicedAt: new Date(),
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "BILLING_MARK_INVOICED",
+      entity: "Load",
+      entityId: updated.id,
+      summary: `Marked ${load.loadNumber} invoiced`,
+      before: { billingStatus: load.billingStatus },
+      after: { billingStatus: updated.billingStatus, invoicedAt: updated.invoicedAt },
+    });
+    res.json({ load: updated });
+  }
+);
+
+app.post(
+  "/billing/readiness/:loadId/quickbooks",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.loadId, orgId: req.user!.orgId },
+      select: { id: true, loadNumber: true, billingStatus: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    if (load.billingStatus !== BillingStatus.READY) {
+      res.status(400).json({ error: "Load is not ready to bill" });
+      return;
+    }
+    try {
+      const { createInvoiceForLoad } = await import("./integrations/quickbooks");
+      const result = await createInvoiceForLoad(load.id);
+      const updated = await prisma.load.update({
+        where: { id: load.id },
+        data: {
+          billingStatus: BillingStatus.INVOICED,
+          billingBlockingReasons: [],
+          invoicedAt: new Date(),
+          externalInvoiceRef: result.externalInvoiceRef,
+        },
+      });
+      res.json({ load: updated, externalInvoiceRef: result.externalInvoiceRef });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+);
 
 async function generateInvoiceForLoad(params: { orgId: string; loadId: string; userId: string; role: Role }) {
   const load = await prisma.load.findFirst({
@@ -7973,6 +8708,7 @@ app.post(
       after: { status: updated.status },
     });
 
+    await evaluateBillingReadiness(invoice.loadId);
     res.json({ invoice: updated });
   }
 );
@@ -8958,6 +9694,232 @@ app.put("/admin/settings", requireAuth, requireCsrf, requireRole("ADMIN"), async
   res.json({ settings });
 });
 
+app.get("/admin/vault/docs", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+  const typeParam = typeof req.query.type === "string" ? req.query.type.trim() : "";
+  const scopeParam = typeof req.query.scope === "string" ? req.query.scope.trim() : "";
+  const statusParam = typeof req.query.status === "string" ? req.query.status.trim() : "";
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit : "200";
+  const offsetRaw = typeof req.query.offset === "string" ? req.query.offset : "0";
+  const limit = Math.min(200, Math.max(1, parseInt(limitRaw, 10) || 50));
+  const offset = Math.max(0, parseInt(offsetRaw, 10) || 0);
+
+  const docType = Object.values(VaultDocType).includes(typeParam as VaultDocType) ? (typeParam as VaultDocType) : undefined;
+  const scopeType = Object.values(VaultScopeType).includes(scopeParam as VaultScopeType) ? (scopeParam as VaultScopeType) : undefined;
+  const status = statusParam.toUpperCase();
+  const now = new Date();
+  const expiringThreshold = addDays(now, DEFAULT_VAULT_EXPIRING_DAYS);
+
+  const where: Prisma.VaultDocumentWhereInput = {
+    orgId: req.user!.orgId,
+    docType,
+    scopeType,
+  };
+
+  if (search) {
+    where.OR = [
+      { originalName: { contains: search, mode: "insensitive" } },
+      { filename: { contains: search, mode: "insensitive" } },
+      { referenceNumber: { contains: search, mode: "insensitive" } },
+      { notes: { contains: search, mode: "insensitive" } },
+    ];
+  }
+
+  if (status === "EXPIRED") {
+    where.expiresAt = { lt: now };
+  } else if (status === "EXPIRING_SOON") {
+    where.expiresAt = { gte: now, lte: expiringThreshold };
+  } else if (status === "NEEDS_DETAILS") {
+    where.expiresAt = null;
+    where.AND = [...(where.AND ?? []), { docType: { in: VAULT_DOCS_REQUIRING_EXPIRY } }];
+  } else if (status === "VALID") {
+    where.OR = [
+      { expiresAt: { gt: expiringThreshold } },
+      { expiresAt: null, docType: { notIn: VAULT_DOCS_REQUIRING_EXPIRY } },
+    ];
+  }
+
+  const [docs, total] = await Promise.all([
+    prisma.vaultDocument.findMany({
+      where,
+      include: { uploadedBy: { select: { id: true, name: true, email: true } } },
+      orderBy: { updatedAt: "desc" },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.vaultDocument.count({ where }),
+  ]);
+
+  const truckIds = docs.filter((doc) => doc.scopeType === "TRUCK" && doc.scopeId).map((doc) => doc.scopeId!) as string[];
+  const driverIds = docs.filter((doc) => doc.scopeType === "DRIVER" && doc.scopeId).map((doc) => doc.scopeId!) as string[];
+  const [trucks, drivers, org] = await Promise.all([
+    truckIds.length
+      ? prisma.truck.findMany({ where: { orgId: req.user!.orgId, id: { in: truckIds } }, select: { id: true, unit: true } })
+      : Promise.resolve([]),
+    driverIds.length
+      ? prisma.driver.findMany({ where: { orgId: req.user!.orgId, id: { in: driverIds } }, select: { id: true, name: true } })
+      : Promise.resolve([]),
+    prisma.organization.findFirst({ where: { id: req.user!.orgId }, select: { name: true } }),
+  ]);
+  const truckMap = new Map(trucks.map((truck) => [truck.id, truck]));
+  const driverMap = new Map(drivers.map((driver) => [driver.id, driver]));
+  const orgLabel = org?.name ?? "Company";
+
+  const rows = docs.map((doc) => {
+    let scopeLabel = orgLabel;
+    if (doc.scopeType === "TRUCK") {
+      scopeLabel = truckMap.get(doc.scopeId ?? "")?.unit ? `Truck ${truckMap.get(doc.scopeId ?? "")?.unit}` : "Truck";
+    } else if (doc.scopeType === "DRIVER") {
+      scopeLabel = driverMap.get(doc.scopeId ?? "")?.name ?? "Driver";
+    }
+    return {
+      id: doc.id,
+      docType: doc.docType,
+      scopeType: doc.scopeType,
+      scopeId: doc.scopeId,
+      scopeLabel,
+      status: getVaultStatus({ docType: doc.docType, expiresAt: doc.expiresAt }),
+      expiresAt: doc.expiresAt,
+      referenceNumber: doc.referenceNumber,
+      notes: doc.notes,
+      filename: doc.filename,
+      originalName: doc.originalName,
+      mimeType: doc.mimeType,
+      size: doc.size,
+      storageKey: doc.storageKey,
+      uploadedAt: doc.uploadedAt,
+      updatedAt: doc.updatedAt,
+      uploadedBy: doc.uploadedBy,
+    };
+  });
+
+  res.json({ docs: rows, total });
+});
+
+app.get("/admin/vault/stats", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const now = new Date();
+  const expiringThreshold = addDays(now, DEFAULT_VAULT_EXPIRING_DAYS);
+  const [expiringSoon, expired, needsDetails] = await Promise.all([
+    prisma.vaultDocument.count({ where: { orgId: req.user!.orgId, expiresAt: { gte: now, lte: expiringThreshold } } }),
+    prisma.vaultDocument.count({ where: { orgId: req.user!.orgId, expiresAt: { lt: now } } }),
+    prisma.vaultDocument.count({
+      where: { orgId: req.user!.orgId, expiresAt: null, docType: { in: VAULT_DOCS_REQUIRING_EXPIRY } },
+    }),
+  ]);
+  res.json({ expiringSoon, expired, needsDetails });
+});
+
+app.post(
+  "/admin/vault/docs",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN"),
+  upload.single("file"),
+  async (req, res) => {
+    if (!req.file) {
+      res.status(400).json({ error: "File required" });
+      return;
+    }
+    const schema = z.object({
+      docType: z.nativeEnum(VaultDocType),
+      scopeType: z.nativeEnum(VaultScopeType),
+      scopeId: z.string().optional().nullable(),
+      expiresAt: z.string().optional().nullable(),
+      referenceNumber: z.string().optional().nullable(),
+      notes: z.string().optional().nullable(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const scopeType = parsed.data.scopeType;
+    const scopeId = normalizeOptionalText(parsed.data.scopeId);
+    if (scopeType === "TRUCK") {
+      if (!scopeId) {
+        res.status(400).json({ error: "Truck required" });
+        return;
+      }
+      const truck = await prisma.truck.findFirst({ where: { id: scopeId, orgId: req.user!.orgId } });
+      if (!truck) {
+        res.status(404).json({ error: "Truck not found" });
+        return;
+      }
+    }
+    if (scopeType === "DRIVER") {
+      if (!scopeId) {
+        res.status(400).json({ error: "Driver required" });
+        return;
+      }
+      const driver = await prisma.driver.findFirst({ where: { id: scopeId, orgId: req.user!.orgId } });
+      if (!driver) {
+        res.status(404).json({ error: "Driver not found" });
+        return;
+      }
+    }
+    if (scopeType === "ORG" && scopeId) {
+      res.status(400).json({ error: "Company documents cannot target a driver or truck." });
+      return;
+    }
+    const expiresAt = parsed.data.expiresAt ? parseDateInput(parsed.data.expiresAt, "end") : null;
+    if (parsed.data.expiresAt && !expiresAt) {
+      res.status(400).json({ error: "Invalid expiration date" });
+      return;
+    }
+    const docId = crypto.randomUUID();
+    const { filename, storageKey } = await saveVaultDocumentFile(req.file, req.user!.orgId, docId);
+    const doc = await prisma.vaultDocument.create({
+      data: {
+        id: docId,
+        orgId: req.user!.orgId,
+        scopeType,
+        scopeId: scopeId ?? null,
+        docType: parsed.data.docType,
+        filename,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        storageKey,
+        expiresAt,
+        referenceNumber: normalizeOptionalText(parsed.data.referenceNumber),
+        notes: normalizeOptionalText(parsed.data.notes),
+        uploadedById: req.user!.id,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "VAULT_DOC_UPLOADED",
+      entity: "VaultDocument",
+      entityId: doc.id,
+      summary: `Uploaded ${doc.docType} document`,
+      after: { scopeType: doc.scopeType, scopeId: doc.scopeId ?? null },
+    });
+    res.json({ doc });
+  }
+);
+
+app.get("/admin/vault/docs/:id/download", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const doc = await prisma.vaultDocument.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+  let filePath: string;
+  try {
+    filePath = resolveUploadPath(doc.storageKey);
+  } catch {
+    res.status(400).json({ error: "Invalid file path" });
+    return;
+  }
+  if (doc.mimeType) {
+    res.setHeader("Content-Type", doc.mimeType);
+  }
+  res.sendFile(filePath);
+});
+
 app.get("/onboarding/state", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const state = await upsertOnboardingState({ orgId: req.user!.orgId });
   res.json({ state });
@@ -9615,6 +10577,73 @@ app.post("/api/integrations/samsara/map-truck", requireAuth, requireCsrf, requir
     },
   });
   res.json({ mapping });
+});
+
+app.get("/admin/fuel/status", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const [integration, mappedCount, totalTrucks] = await Promise.all([
+    prisma.trackingIntegration.findFirst({
+      where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+    }),
+    prisma.truckTelematicsMapping.count({
+      where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+    }),
+    prisma.truck.count({ where: { orgId: req.user!.orgId } }),
+  ]);
+
+  res.json({
+    status: integration?.status ?? TrackingIntegrationStatus.DISCONNECTED,
+    errorMessage: integration?.errorMessage ?? null,
+    mappedCount,
+    totalTrucks,
+    lastFuelSyncAt: integration?.lastFuelSyncAt ?? null,
+    lastFuelSyncError: integration?.lastFuelSyncError ?? null,
+  });
+});
+
+app.get("/admin/fuel/summary", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const rangeParam = typeof req.query.range === "string" ? req.query.range.trim() : "7d";
+  const periodDays = rangeParam === "30d" ? 30 : 7;
+
+  const latest = await prisma.fuelSummary.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, periodDays },
+    orderBy: { periodEnd: "desc" },
+  });
+
+  if (!latest) {
+    res.json({ rows: [], periodStart: null, periodEnd: null, lastSyncedAt: null });
+    return;
+  }
+
+  const rows = await prisma.fuelSummary.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      providerType: TrackingProviderType.SAMSARA,
+      periodDays,
+      periodStart: latest.periodStart,
+      periodEnd: latest.periodEnd,
+    },
+    include: { truck: true },
+    orderBy: { fuelUsed: "desc" },
+  });
+
+  res.json({
+    rows: rows.map((row) => ({
+      id: row.id,
+      truckId: row.truckId,
+      truckUnit: row.truck.unit,
+      truckVin: row.truck.vin,
+      fuelUsed: row.fuelUsed ? Number(row.fuelUsed) : null,
+      distance: row.distance ? Number(row.distance) : null,
+      fuelEfficiency: row.fuelEfficiency ? Number(row.fuelEfficiency) : null,
+      periodStart: row.periodStart,
+      periodEnd: row.periodEnd,
+      lastSyncedAt: row.lastSyncedAt,
+      source: row.source ?? FuelSummarySource.SAMSARA,
+    })),
+    periodStart: latest.periodStart,
+    periodEnd: latest.periodEnd,
+    lastSyncedAt: latest.lastSyncedAt,
+  });
 });
 
 app.get("/admin/users", requireAuth, requireRole("ADMIN"), async (req, res) => {
@@ -11278,7 +12307,7 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
   res.json({ user });
 });
 
-const port = Number(process.env.API_PORT || 4000);
+const port = Number(process.env.PORT || process.env.API_PORT || 4000);
 const host = process.env.API_HOST || "0.0.0.0";
 ensureUploadDirs().then(() => {
   app.listen(port, host, () => {

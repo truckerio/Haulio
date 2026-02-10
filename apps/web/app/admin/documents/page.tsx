@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -165,6 +166,16 @@ export default function DocumentsSettingsPage() {
           }
         >
           {error ? <ErrorBanner message={error} /> : null}
+
+          <Card className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Document Vault</div>
+              <div className="text-sm text-[color:var(--color-text-muted)]">Company, truck, and driver compliance files.</div>
+            </div>
+            <Button asChild variant="secondary">
+              <Link href="/admin/documents/vault">Open vault</Link>
+            </Button>
+          </Card>
 
           <Card className="space-y-4">
             <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Proof of delivery</div>

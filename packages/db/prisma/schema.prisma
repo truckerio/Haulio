@@ -15,6 +15,11 @@ enum Role {
   DRIVER
 }
 
+enum LoadAssignmentRole {
+  PRIMARY
+  CO_DRIVER
+}
+
 enum LoadStatus {
   DRAFT
   PLANNED
@@ -82,10 +87,29 @@ enum TaskType {
 enum DocType {
   POD
   RATECON
+  RATE_CONFIRMATION
   BOL
   LUMPER
   SCALE
   DETENTION
+  ACCESSORIAL_PROOF
+  OTHER
+}
+
+enum VaultScopeType {
+  ORG
+  TRUCK
+  DRIVER
+}
+
+enum VaultDocType {
+  INSURANCE
+  REGISTRATION
+  PERMIT
+  CARGO_INSURANCE
+  LIABILITY
+  IFTA
+  TITLE
   OTHER
 }
 
@@ -146,6 +170,29 @@ enum InvoiceStatus {
   VOID
 }
 
+enum BillingStatus {
+  BLOCKED
+  READY
+  INVOICED
+}
+
+enum AccessorialType {
+  DETENTION
+  LUMPER
+  TONU
+  REDELIVERY
+  STOP_OFF
+  OTHER
+}
+
+enum AccessorialStatus {
+  PROPOSED
+  NEEDS_PROOF
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
 enum LearningDomain {
   MATCH_CUSTOMER
   MATCH_SHIPPER
@@ -184,6 +231,10 @@ enum TeamEntityType {
 
 enum TrackingProviderType {
   PHONE
+  SAMSARA
+}
+
+enum FuelSummarySource {
   SAMSARA
 }
 
@@ -324,6 +375,7 @@ model Organization {
   operatingEntities OperatingEntity[]
   stops       Stop[]
   documents   Document[]
+  vaultDocuments VaultDocument[]
   loadConfirmationDocuments LoadConfirmationDocument[]
   loadConfirmationExtractEvents LoadConfirmationExtractEvent[]
   loadConfirmationLearningExamples LoadConfirmationLearningExample[]
@@ -336,8 +388,10 @@ model Organization {
   invoices    Invoice[]
   settlements Settlement[]
   loadCharges LoadCharge[]
+  accessorials Accessorial[]
   storage     StorageRecord[]
   trackingIntegrations TrackingIntegration[]
+  fuelSummaries FuelSummary[]
   truckTelematicsMappings TruckTelematicsMapping[]
   trackingSessions LoadTrackingSession[]
   locationPings LocationPing[]
@@ -451,8 +505,11 @@ model User {
   deletedLoads      Load[]                 @relation("DeletedLoads")
   events            Event[]
   documents         Document[]             @relation("UploadedDocs")
+  vaultDocuments    VaultDocument[]        @relation("VaultUploads")
   verifiedDocs      Document[]             @relation("VerifiedDocs")
   rejectedDocs      Document[]             @relation("RejectedDocs")
+  createdAccessorials Accessorial[]        @relation("AccessorialCreatedBy")
+  approvedAccessorials Accessorial[]       @relation("AccessorialApprovedBy")
   loadConfirmationDocuments LoadConfirmationDocument[] @relation("LoadConfirmationUploads")
   audits            AuditLog[]
   assignedTasks     Task[]                 @relation("AssignedTasks")
@@ -537,6 +594,7 @@ model Driver {
   org        Organization      @relation(fields: [orgId], references: [id])
   user       User?             @relation(fields: [userId], references: [id])
   loads      Load[]            @relation("DriverLoads")
+  loadAssignments LoadAssignmentMember[] @relation("DriverLoadAssignments")
   legs       LoadLeg[]
   manifests  TrailerManifest[]
   Task       Task[]
@@ -561,6 +619,7 @@ model Truck {
   legs      LoadLeg[]
   manifests TrailerManifest[]
   telematicsMappings TruckTelematicsMapping[]
+  fuelSummaries FuelSummary[]
   locationPings LocationPing[]
 
   @@unique([orgId, unit])
@@ -619,6 +678,10 @@ model Load {
   plannedAt        DateTime?
   deliveredAt      DateTime?
   podVerifiedAt    DateTime?
+  billingStatus    BillingStatus @default(BLOCKED)
+  billingBlockingReasons String[] @default([])
+  invoicedAt       DateTime?
+  externalInvoiceRef String?
   completedAt      DateTime?  @db.Timestamptz(6)
   lockedAt         DateTime?
   createdById      String?
@@ -641,6 +704,7 @@ model Load {
   assignmentSuggestionLogs AssignmentSuggestionLog[]
   tasks          Task[]
   invoices       Invoice[]
+  accessorials   Accessorial[]
   storage        StorageRecord[]
   trackingSessions LoadTrackingSession[]
   locationPings LocationPing[]
@@ -649,6 +713,7 @@ model Load {
   SettlementItem SettlementItem[]
   loadConfirmationDocuments LoadConfirmationDocument[]
   charges        LoadCharge[]
+  assignmentMembers LoadAssignmentMember[]
 
   @@unique([orgId, loadNumber])
   @@unique([orgId, tripNumber])
@@ -658,6 +723,21 @@ model Load {
   @@index([orgId, status, completedAt])
   @@index([orgId, operatingEntityId])
   @@index([orgId, deletedAt])
+}
+
+model LoadAssignmentMember {
+  id        String             @id @default(cuid())
+  loadId    String
+  driverId  String
+  role      LoadAssignmentRole
+  createdAt DateTime           @default(now())
+
+  load   Load   @relation(fields: [loadId], references: [id])
+  driver Driver @relation("DriverLoadAssignments", fields: [driverId], references: [id])
+
+  @@unique([loadId, role])
+  @@unique([loadId, driverId])
+  @@index([driverId])
 }
 
 model LoadCharge {
@@ -671,6 +751,33 @@ model LoadCharge {
 
   org  Organization @relation(fields: [orgId], references: [id])
   load Load         @relation(fields: [loadId], references: [id])
+
+  @@index([orgId, loadId])
+  @@index([loadId])
+}
+
+model Accessorial {
+  id              String             @id @default(cuid())
+  orgId           String
+  loadId          String
+  type            AccessorialType
+  amount          Decimal            @db.Decimal(12, 2)
+  currency        String             @default("USD")
+  requiresProof   Boolean            @default(false)
+  status          AccessorialStatus  @default(PROPOSED)
+  notes           String?
+  createdById     String?
+  approvedById    String?
+  approvedAt      DateTime?
+  proofDocumentId String?            @unique
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  org          Organization @relation(fields: [orgId], references: [id])
+  load         Load         @relation(fields: [loadId], references: [id])
+  createdBy    User?        @relation("AccessorialCreatedBy", fields: [createdById], references: [id])
+  approvedBy   User?        @relation("AccessorialApprovedBy", fields: [approvedById], references: [id])
+  proofDocument Document?   @relation("AccessorialProofDoc", fields: [proofDocumentId], references: [id])
 
   @@index([orgId, loadId])
   @@index([loadId])
@@ -713,6 +820,8 @@ model TrackingIntegration {
   status       TrackingIntegrationStatus @default(DISCONNECTED)
   configJson   Json?
   errorMessage String?
+  lastFuelSyncAt DateTime?
+  lastFuelSyncError String?
   createdAt    DateTime                  @default(now())
   updatedAt    DateTime                  @updatedAt
 
@@ -736,6 +845,30 @@ model TruckTelematicsMapping {
 
   @@unique([orgId, providerType, externalId])
   @@unique([orgId, truckId, providerType])
+  @@index([orgId, truckId])
+}
+
+model FuelSummary {
+  id             String             @id @default(cuid())
+  orgId          String
+  truckId        String
+  providerType   TrackingProviderType
+  source         FuelSummarySource
+  periodStart    DateTime
+  periodEnd      DateTime
+  periodDays     Int
+  fuelUsed       Decimal?           @db.Decimal(12, 2)
+  distance       Decimal?           @db.Decimal(12, 2)
+  fuelEfficiency Decimal?           @db.Decimal(12, 4)
+  lastSyncedAt   DateTime
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  org   Organization @relation(fields: [orgId], references: [id])
+  truck Truck        @relation(fields: [truckId], references: [id])
+
+  @@unique([orgId, truckId, providerType, periodStart, periodEnd])
+  @@index([orgId, periodStart, periodEnd])
   @@index([orgId, truckId])
 }
 
@@ -901,12 +1034,38 @@ model Document {
   uploadedBy User?        @relation("UploadedDocs", fields: [uploadedById], references: [id])
   verifiedBy User?        @relation("VerifiedDocs", fields: [verifiedById], references: [id])
   rejectedBy User?        @relation("RejectedDocs", fields: [rejectedById], references: [id])
+  accessorialProof Accessorial? @relation("AccessorialProofDoc")
   Event      Event[]
   Task       Task[]
 
   @@index([loadId, type, status], map: "doc_load_type_status_idx")
   @@index([orgId, type, status])
   @@index([stopId])
+}
+
+model VaultDocument {
+  id              String         @id @default(cuid())
+  orgId           String
+  scopeType       VaultScopeType
+  scopeId         String?
+  docType         VaultDocType
+  filename        String
+  originalName    String
+  mimeType        String
+  size            Int
+  storageKey      String
+  expiresAt       DateTime?
+  referenceNumber String?
+  notes           String?
+  uploadedById    String?
+  uploadedAt      DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  uploadedBy User?        @relation("VaultUploads", fields: [uploadedById], references: [id])
+
+  @@index([orgId, scopeType, docType])
+  @@index([orgId, expiresAt])
 }
 
 model LoadConfirmationDocument {

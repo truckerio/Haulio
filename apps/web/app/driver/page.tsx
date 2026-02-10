@@ -76,12 +76,14 @@ type DriverLoad = {
   id: string;
   loadNumber: string;
   status: LoadStatus;
+  assignedDriverId?: string | null;
   customer?: { name: string | null } | null;
   customerName?: string | null;
   deliveredAt?: string | null;
   stops: DriverStop[];
   docs: DriverDoc[];
   driver?: DriverProfile | null;
+  assignmentMembers?: LoadAssignmentMember[];
 };
 
 type DriverSettings = {
@@ -124,6 +126,14 @@ type TodaySummary = {
   blocks: number;
   warnings: number;
   info: number;
+};
+
+type LoadAssignmentRole = "PRIMARY" | "CO_DRIVER";
+
+type LoadAssignmentMember = {
+  role: LoadAssignmentRole;
+  driverId?: string | null;
+  driver?: { id: string; name: string } | null;
 };
 
 type NextActionType =
@@ -245,7 +255,7 @@ export default function DriverPage() {
 
   useEffect(() => {
     setComplianceAcknowledged(false);
-  }, [load?.id]);
+  }, [isCoDriver, load?.id]);
 
   const highlightAnchor = useCallback((hash: string) => {
     if (!hash) return;
@@ -291,6 +301,21 @@ export default function DriverPage() {
   });
   const finalStop = [...stops].reverse().find((stop) => stop.type === "DELIVERY") ?? stops[stops.length - 1];
 
+  const assignmentMembers = load?.assignmentMembers ?? [];
+  const primaryMember = assignmentMembers.find((member) => member.role === "PRIMARY") ?? null;
+  const coDriverMember = assignmentMembers.find((member) => member.role === "CO_DRIVER") ?? null;
+  const currentDriverId = driver?.id ?? null;
+  const currentMember = currentDriverId
+    ? assignmentMembers.find((member) => member.driver?.id === currentDriverId || member.driverId === currentDriverId)
+    : null;
+  const assignmentRole: LoadAssignmentRole | null = currentMember?.role
+    ?? (load?.driver?.id === currentDriverId || load?.assignedDriverId === currentDriverId ? "PRIMARY" : null);
+  const isCoDriver = assignmentRole === "CO_DRIVER";
+  const driverRoleLabel = assignmentRole === "CO_DRIVER" ? "Co-driver" : "Primary";
+  const otherDriverName = isCoDriver
+    ? primaryMember?.driver?.name ?? load?.driver?.name ?? null
+    : coDriverMember?.driver?.name ?? null;
+
   const driverProfile = driver ?? load?.driver ?? null;
   const profileIncomplete =
     !driverProfile?.phone || !driverProfile?.license || !driverProfile?.licenseExpiresAt || !driverProfile?.medCardExpiresAt;
@@ -332,6 +357,21 @@ export default function DriverPage() {
     if (!load) {
       return { label: "Check for assignment", action: "refresh", helper: "No load assigned." };
     }
+    if (isCoDriver) {
+      if (deliveredAt) {
+        if (podRejected) {
+          return { label: "Re-upload POD", action: "reupload", docType: "POD" };
+        }
+        if (podMissing) {
+          return { label: "Upload POD", action: "upload", docType: "POD" };
+        }
+      }
+      return {
+        label: "Refresh status",
+        action: "refresh",
+        helper: "Primary driver updates stop progress. You can upload documents.",
+      };
+    }
     if (complianceGateActive && nextStop && (!nextStop.arrivedAt || !nextStop.departedAt)) {
       return { label: "Acknowledge compliance to continue", action: "acknowledge" };
     }
@@ -358,7 +398,18 @@ export default function DriverPage() {
       return { label: "Enable tracking", action: "enable_tracking" };
     }
     return { label: "Refresh status", action: "refresh" };
-  }, [load, complianceGateActive, nextStop, deliveredAt, podRejected, podMissing, podUploaded, podVerified, trackingOffInTransit]);
+  }, [
+    load,
+    isCoDriver,
+    complianceGateActive,
+    nextStop,
+    deliveredAt,
+    podRejected,
+    podMissing,
+    podUploaded,
+    podVerified,
+    trackingOffInTransit,
+  ]);
 
   const podOverdue = useMemo(() => {
     if (!deliveredAt || podDocs.length > 0) return false;
@@ -437,6 +488,10 @@ export default function DriverPage() {
   ]);
 
   const handleArriveDepart = async () => {
+    if (isCoDriver) {
+      setActionNote("Primary driver updates stop progress.");
+      return;
+    }
     if (!nextAction.stopId) return;
     if (complianceGateActive) {
       setActionNote("Acknowledge compliance to continue.");
@@ -459,6 +514,10 @@ export default function DriverPage() {
   };
 
   const startTracking = async () => {
+    if (isCoDriver) {
+      setTrackingNote("Primary driver controls trip tracking.");
+      return;
+    }
     if (!load?.id) return;
     setTrackingNote(null);
     try {
@@ -474,6 +533,10 @@ export default function DriverPage() {
   };
 
   const stopTracking = async () => {
+    if (isCoDriver) {
+      setTrackingNote("Primary driver controls trip tracking.");
+      return;
+    }
     if (!load?.id) return;
     setTrackingNote(null);
     try {
@@ -485,6 +548,10 @@ export default function DriverPage() {
   };
 
   const sendPing = useCallback(async () => {
+    if (isCoDriver) {
+      setTrackingNote("Primary driver controls trip tracking.");
+      return;
+    }
     if (!load?.id) return;
     if (!navigator.geolocation) {
       setTrackingNote("Location access is not available in this browser.");
@@ -521,6 +588,7 @@ export default function DriverPage() {
 
   useEffect(() => {
     if (!load?.id) return;
+    if (isCoDriver) return;
     if (trackingSession?.status !== "ON") return;
     sendPing();
     const interval = window.setInterval(() => {
@@ -528,7 +596,7 @@ export default function DriverPage() {
       sendPing();
     }, 60000);
     return () => window.clearInterval(interval);
-  }, [load?.id, trackingSession?.status, sendPing]);
+  }, [isCoDriver, load?.id, trackingSession?.status, sendPing]);
 
   const compressIfNeeded = async (file: File) => {
     if (!file.type.startsWith("image/")) return file;
@@ -620,6 +688,10 @@ export default function DriverPage() {
   }, [isOnline, flushQueue]);
 
   const handleUndo = async () => {
+    if (isCoDriver) {
+      setActionNote("Primary driver can undo stop actions.");
+      return;
+    }
     if (!load) return;
     await apiFetch("/driver/undo", {
       method: "POST",
@@ -798,6 +870,14 @@ export default function DriverPage() {
               <div className="text-lg font-semibold">{load.loadNumber}</div>
               <div className="text-sm text-[color:var(--color-text-muted)]">{load.customer?.name ?? load.customerName}</div>
               <div className="text-sm text-[color:var(--color-text-muted)]">Status: {load.status}</div>
+              {assignmentRole ? (
+                <div className="text-sm text-[color:var(--color-text-muted)]">Role: {driverRoleLabel}</div>
+              ) : null}
+              {otherDriverName ? (
+                <div className="text-sm text-[color:var(--color-text-muted)]">
+                  {isCoDriver ? "Primary driver" : "Co-driver"}: {otherDriverName}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -898,7 +978,7 @@ export default function DriverPage() {
               size="lg"
               className="w-full text-xl"
               onClick={handleArriveDepart}
-              disabled={complianceGateActive}
+              disabled={complianceGateActive || isCoDriver}
             >
               {nextAction.label}
             </Button>
@@ -922,7 +1002,7 @@ export default function DriverPage() {
             </div>
           ) : null}
           {nextAction.action === "enable_tracking" ? (
-            <Button size="lg" className="w-full text-lg" onClick={startTracking}>
+            <Button size="lg" className="w-full text-lg" onClick={startTracking} disabled={isCoDriver}>
               Enable tracking
             </Button>
           ) : null}
@@ -931,7 +1011,7 @@ export default function DriverPage() {
               Refresh status
             </Button>
           ) : null}
-          {allowUndo ? (
+          {allowUndo && !isCoDriver ? (
             <Button variant="ghost" onClick={handleUndo}>
               Undo last action (5 min)
             </Button>
@@ -950,16 +1030,16 @@ export default function DriverPage() {
           </div>
           <div className="flex flex-wrap gap-2">
             {trackingSession?.status === "ON" ? (
-              <Button variant="secondary" onClick={stopTracking} disabled={!hasLoad}>
+              <Button variant="secondary" onClick={stopTracking} disabled={!hasLoad || isCoDriver}>
                 Stop tracking
               </Button>
             ) : (
-              <Button variant="secondary" onClick={startTracking} disabled={!hasLoad}>
+              <Button variant="secondary" onClick={startTracking} disabled={!hasLoad || isCoDriver}>
                 Start trip tracking
               </Button>
             )}
             {trackingSession?.status === "ON" ? (
-              <Button variant="ghost" onClick={sendPing} disabled={!hasLoad}>
+              <Button variant="ghost" onClick={sendPing} disabled={!hasLoad || isCoDriver}>
                 Send ping
               </Button>
             ) : null}
