@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -22,7 +24,7 @@ const SORT_OPTIONS = [
   { value: "recent", label: "Recently created" },
 ] as const;
 
-export default function DriversPage() {
+function DriversPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [drivers, setDrivers] = useState<any[]>([]);
@@ -464,5 +466,13 @@ export default function DriversPage() {
         </AdminDrawer>
       </RouteGuard>
     </AppShell>
+  );
+}
+
+export default function DriversPage() {
+  return (
+    <Suspense fallback={null}>
+      <DriversPageContent />
+    </Suspense>
   );
 }

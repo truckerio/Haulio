@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -59,7 +59,7 @@ export default function CompanySettingsPage() {
   const [visibleEntityCount, setVisibleEntityCount] = useState(5);
   const [visibleCustomerCount, setVisibleCustomerCount] = useState(5);
 
-  const loadSettings = async () => {
+  const loadSettings = useCallback(async () => {
     try {
       const settingsData = await apiFetch<{ settings: any }>("/admin/settings");
       setSettings(settingsData.settings ?? null);
@@ -78,9 +78,9 @@ export default function CompanySettingsPage() {
       setSettingsDraft(null);
       setError((err as Error).message || "Failed to load company settings.");
     }
-  };
+  }, []);
 
-  const loadSequences = async () => {
+  const loadSequences = useCallback(async () => {
     try {
       const data = await apiFetch<{ sequence: any }>("/admin/sequences");
       setSequence(data.sequence);
@@ -91,9 +91,9 @@ export default function CompanySettingsPage() {
       setSequenceDraft(null);
       setSequenceError((err as Error).message || "Failed to load numbering settings.");
     }
-  };
+  }, []);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     await loadSettings();
     await loadSequences();
     const results = await Promise.allSettled([
@@ -108,11 +108,11 @@ export default function CompanySettingsPage() {
     if (entitiesResult.status === "fulfilled") {
       setOperatingEntities(entitiesResult.value.entities ?? []);
     }
-  };
+  }, [loadSequences, loadSettings]);
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [loadData]);
 
   useEffect(() => {
     return () => {

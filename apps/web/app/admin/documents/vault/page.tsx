@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -104,7 +106,7 @@ const formatStatusLabel = (value: string) => {
     .join(" ");
 };
 
-export default function VaultPage() {
+function VaultPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [docs, setDocs] = useState<VaultDoc[]>([]);
@@ -504,5 +506,13 @@ export default function VaultPage() {
         </div>
       </AdminDrawer>
     </AppShell>
+  );
+}
+
+export default function VaultPage() {
+  return (
+    <Suspense fallback={null}>
+      <VaultPageContent />
+    </Suspense>
   );
 }

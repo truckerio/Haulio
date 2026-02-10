@@ -584,7 +584,7 @@ export default function DriverPage() {
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
     );
-  }, [load?.id]);
+  }, [isCoDriver, load?.id]);
 
   useEffect(() => {
     if (!load?.id) return;

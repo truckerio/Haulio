@@ -251,11 +251,11 @@ export default function LoadDetailsPage() {
     }
   }, [activeTab, pendingAnchor, loadId, load?.docs?.length]);
 
-  const docTypeOptions = useMemo(() => {
+  const docTypeOptions = useMemo<(typeof DOC_TYPES)[number][]>(() => {
     if (load?.loadType === "COMPANY") {
-      return DOC_TYPES.filter((type) => type !== "RATECON");
+      return DOC_TYPES.filter((type) => type !== "RATECON") as (typeof DOC_TYPES)[number][];
     }
-    return DOC_TYPES;
+    return [...DOC_TYPES];
   }, [load?.loadType]);
 
   useEffect(() => {
@@ -932,7 +932,7 @@ export default function LoadDetailsPage() {
       });
     }
     return items;
-  }, [rateConMissing, assignmentMissing, canUpload, canEditLoad, load?.id]);
+  }, [rateConMissing, assignmentMissing, canEditLoad, load?.id, load?.status]);
 
   const docsBlockerCard = useMemo(() => {
     if (!docsBlocker || !load?.id) return null;

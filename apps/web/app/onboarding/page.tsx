@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { UserProvider } from "@/components/auth/user-context";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -163,7 +163,7 @@ function OnboardingWizard() {
     }
   }, []);
 
-  const loadOnboarding = async () => {
+  const loadOnboarding = useCallback(async () => {
     setLoading(true);
     try {
       const [stateData, settingsData, entitiesData, usersData, driversData, trucksData, trailersData] =
@@ -190,11 +190,11 @@ function OnboardingWizard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadOnboarding();
-  }, []);
+  }, [loadOnboarding]);
 
   useEffect(() => {
     if (!settings) return;
@@ -327,7 +327,7 @@ function OnboardingWizard() {
     setCurrentStep((step) => Math.max(1, step - 1));
   };
 
-  const addOperatingEntity = async () => {
+  const addOperatingEntity = useCallback(async () => {
     setSaving(true);
     setError(null);
     try {
@@ -352,9 +352,9 @@ function OnboardingWizard() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [entityForm, loadOnboarding]);
 
-  const addTeamMember = async () => {
+  const addTeamMember = useCallback(async () => {
     setSaving(true);
     setError(null);
     try {
@@ -370,9 +370,9 @@ function OnboardingWizard() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [teamForm, loadOnboarding]);
 
-  const addDriver = async () => {
+  const addDriver = useCallback(async () => {
     setSaving(true);
     setError(null);
     try {
@@ -396,9 +396,9 @@ function OnboardingWizard() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [driverForm, loadOnboarding]);
 
-  const addTruck = async () => {
+  const addTruck = useCallback(async () => {
     setSaving(true);
     setError(null);
     try {
@@ -414,9 +414,9 @@ function OnboardingWizard() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [truckForm, loadOnboarding]);
 
-  const addTrailer = async () => {
+  const addTrailer = useCallback(async () => {
     setSaving(true);
     setError(null);
     try {
@@ -432,7 +432,7 @@ function OnboardingWizard() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [trailerForm, loadOnboarding]);
 
   const stepContent = useMemo(() => {
     if (!current) return null;
@@ -1006,10 +1006,17 @@ function OnboardingWizard() {
     trackingChoice,
     financeForm,
     entities,
+    trailers,
     users,
     drivers,
     trucks,
     saving,
+    loadOnboarding,
+    addDriver,
+    addOperatingEntity,
+    addTeamMember,
+    addTrailer,
+    addTruck,
   ]);
 
   return (

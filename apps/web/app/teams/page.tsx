@@ -114,7 +114,7 @@ function TeamsOpsContent() {
     return () => {
       active = false;
     };
-  }, [canAccess, teams]);
+  }, [canAccess, teams, teamsEnabled]);
 
   const showManageLink = Boolean(user?.role === "ADMIN");
 
@@ -166,7 +166,7 @@ function TeamsOpsContent() {
         ) : null}
       </div>
     );
-  }, [loading, loadingTeams, canAccess, teams, counts, error, loadingCounts]);
+  }, [loading, loadingTeams, canAccess, teamsEnabled, teams, counts, error, loadingCounts]);
 
   return (
     <>

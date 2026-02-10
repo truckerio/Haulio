@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -61,7 +61,7 @@ export default function FuelSummaryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [summaryRes, statusRes] = await Promise.all([
@@ -76,11 +76,11 @@ export default function FuelSummaryPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [range]);
 
   useEffect(() => {
     loadData();
-  }, [range]);
+  }, [loadData]);
 
   const rows = summary?.rows ?? [];
   const lastFuelSyncAt = status?.lastFuelSyncAt ? new Date(status.lastFuelSyncAt) : null;

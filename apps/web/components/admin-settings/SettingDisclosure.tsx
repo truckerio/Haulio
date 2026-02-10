@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 export function SettingDisclosure({
   id,
@@ -15,11 +15,14 @@ export function SettingDisclosure({
   defaultOpen?: boolean;
   children: ReactNode;
 }) {
+  const [isOpen, setIsOpen] = useState(Boolean(defaultOpen));
+
   return (
     <details
       id={id}
       className="group rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/80"
-      defaultOpen={defaultOpen}
+      open={isOpen}
+      onToggle={(event) => setIsOpen((event.currentTarget as HTMLDetailsElement).open)}
     >
       <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3">
         <div>

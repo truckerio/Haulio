@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -30,7 +32,7 @@ const SORT_OPTIONS = [
   { value: "role", label: "Role" },
 ] as const;
 
-export default function EmployeesPage() {
+function EmployeesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [users, setUsers] = useState<any[]>([]);
@@ -543,4 +545,12 @@ export default function EmployeesPage() {
   );
 
   return content;
+}
+
+export default function EmployeesPage() {
+  return (
+    <Suspense fallback={null}>
+      <EmployeesPageContent />
+    </Suspense>
+  );
 }

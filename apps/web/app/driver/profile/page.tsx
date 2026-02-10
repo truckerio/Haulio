@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
 import { DriverShell } from "@/components/driver/driver-shell";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -125,7 +126,9 @@ export default function DriverProfilePage() {
         <div className="text-sm font-semibold">Profile photo</div>
         <div className="flex items-center gap-4">
           <div className="h-16 w-16 overflow-hidden rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)]">
-            {photoUrl ? <img src={photoUrl} alt="Driver profile" className="h-full w-full object-cover" /> : null}
+            {photoUrl ? (
+              <Image src={photoUrl} alt="Driver profile" className="h-full w-full object-cover" width={64} height={64} unoptimized />
+            ) : null}
           </div>
           <label className="cursor-pointer text-sm font-semibold text-[color:var(--color-accent)]">
             <input

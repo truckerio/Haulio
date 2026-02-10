@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
@@ -115,7 +117,7 @@ const defaultFilters = {
 type Filters = typeof defaultFilters;
 type QueueView = "active" | "recent" | "history";
 
-export default function DispatchPage() {
+function DispatchPageContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -526,7 +528,7 @@ export default function DispatchPage() {
     return () => {
       active = false;
     };
-  }, [selectedLoadId, canDispatch, isQueueReadOnly]);
+  }, [selectedLoadId, selectedLoadInView, canDispatch, isQueueReadOnly]);
 
   useEffect(() => {
     setConfirmReassign(false);
@@ -1221,5 +1223,13 @@ export default function DispatchPage() {
       </div>
 
     </AppShell>
+  );
+}
+
+export default function DispatchPage() {
+  return (
+    <Suspense fallback={null}>
+      <DispatchPageContent />
+    </Suspense>
   );
 }

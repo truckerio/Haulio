@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
@@ -85,7 +87,7 @@ const defaultRefine: RefineState = {
   maxRate: "",
 };
 
-export default function LoadsPage() {
+function LoadsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [loads, setLoads] = useState<any[]>([]);
@@ -1834,5 +1836,13 @@ export default function LoadsPage() {
         </div>
       )}
     </AppShell>
+  );
+}
+
+export default function LoadsPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoadsPageContent />
+    </Suspense>
   );
 }
