@@ -23,9 +23,6 @@ FROM deps AS build
 COPY . .
 
 RUN pnpm --filter @truckerio/db exec prisma generate
-RUN pnpm --filter @truckerio/shared exec tsc -p tsconfig.json
-RUN pnpm --filter @truckerio/db exec tsc -p tsconfig.json
-RUN pnpm --filter @truckerio/api exec tsc -p tsconfig.json --module CommonJS
 
 FROM node:20-bookworm-slim AS runtime
 
@@ -75,14 +72,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   wget \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=deps /app/node_modules /app/node_modules
-COPY --from=build /app/apps/api/dist /app/apps/api/dist
-COPY --from=build /app/packages/db/dist /app/packages/db/dist
-COPY --from=build /app/packages/shared/dist /app/packages/shared/dist
-COPY apps/api/package.json apps/api/package.json
-COPY packages/db/package.json packages/db/package.json
-COPY packages/shared/package.json packages/shared/package.json
+COPY --from=build /app /app
 
 EXPOSE 4000
 
-CMD ["node", "apps/api/dist/index.js"]
+CMD ["pnpm", "--filter", "@truckerio/api", "exec", "tsx", "src/index.ts"]
