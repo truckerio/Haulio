@@ -1,5 +1,6 @@
 {
-  "buildCommand": "pnpm --filter @truckerio/web build",
-  "outputDirectory": "apps/web/.next",
+  "builds": [
+    { "src": "apps/web/package.json", "use": "@vercel/next" }
+  ],
   "installCommand": "pnpm install --frozen-lockfile"
 }
