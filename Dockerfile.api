@@ -11,12 +11,12 @@ FROM base AS deps
 
 ENV PUPPETEER_SKIP_DOWNLOAD=1
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/shared/package.json packages/shared/package.json
 
-RUN pnpm install --frozen-lockfile --filter @truckerio/api...
+RUN pnpm install --frozen-lockfile --prod=false --filter @truckerio/api... --filter @truckerio/db... --filter @truckerio/shared...
 
 FROM deps AS build
 
@@ -25,6 +25,8 @@ COPY packages/db packages/db
 COPY packages/shared packages/shared
 
 RUN pnpm --filter @truckerio/db exec prisma generate
+RUN pnpm --filter @truckerio/shared build
+RUN pnpm --filter @truckerio/db build
 RUN pnpm prune --prod
 
 FROM node:20-bookworm-slim AS runtime
