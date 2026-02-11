@@ -7627,17 +7627,6 @@ app.post(
           return;
         }
       }
-      let accessorial: { id: string; status: AccessorialStatus } | null = null;
-      if (parsed.data.accessorialId) {
-        accessorial = await prisma.accessorial.findFirst({
-          where: { id: parsed.data.accessorialId, orgId: req.user!.orgId, loadId: load.id },
-          select: { id: true, status: true },
-        });
-        if (!accessorial) {
-          res.status(404).json({ error: "Accessorial not found" });
-          return;
-        }
-      }
       const { filename } = await saveDocumentFile(req.file, load.id, req.user!.orgId, parsed.data.type);
       const doc = await prisma.document.create({
         data: {
@@ -7654,15 +7643,6 @@ app.post(
           uploadedById: req.user!.id,
         },
       });
-      if (accessorial && parsed.data.type === DocType.ACCESSORIAL_PROOF) {
-        await prisma.accessorial.update({
-          where: { id: accessorial.id },
-          data: {
-            proofDocumentId: doc.id,
-            status: accessorial.status === AccessorialStatus.NEEDS_PROOF ? AccessorialStatus.PENDING_APPROVAL : undefined,
-          },
-        });
-      }
       if (accessorial && parsed.data.type === DocType.ACCESSORIAL_PROOF) {
         await prisma.accessorial.update({
           where: { id: accessorial.id },
