@@ -4,8 +4,11 @@ WORKDIR /app
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
+ENV PRISMA_CLI_BINARY_TARGETS="debian-openssl-3.0.x"
 
 RUN corepack enable
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+  && rm -rf /var/lib/apt/lists/*
 
 FROM base AS deps
 
