@@ -6,7 +6,7 @@ WORKDIR /app
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-ENV PRISMA_CLI_BINARY_TARGETS="debian-openssl-3.0.x"
+ENV PRISMA_CLI_BINARY_TARGETS="debian-openssl-3.0.x,debian-openssl-1.1.x"
 
 RUN corepack enable
 RUN set -euo pipefail; \
@@ -38,39 +38,43 @@ RUN set -euo pipefail; \
     find . -maxdepth 6 -type d -name ".prisma" -print || true; \
     exit 1; \
   }
-RUN pnpm --filter @truckerio/db build
 RUN set -euo pipefail; \
-  cd /app; \
-  find . -type d -name ".prisma" -path "*/node_modules/.prisma" -print > /tmp/prisma_dirs.txt || true; \
-  if [ ! -s /tmp/prisma_dirs.txt ]; then \
-    echo "ERROR: Prisma engines not found." >&2; \
-    find . -maxdepth 6 -type d -name ".prisma" -print || true; \
-    ls -la node_modules/@prisma || true; \
+  PRISMA_DIR=""; \
+  if [ -d /app/node_modules/.prisma/client ]; then \
+    PRISMA_DIR="/app/node_modules/.prisma/client"; \
+  elif [ -d /app/packages/db/node_modules/.prisma/client ]; then \
+    PRISMA_DIR="/app/packages/db/node_modules/.prisma/client"; \
+  fi; \
+  if [ -z "$PRISMA_DIR" ]; then \
+    PRISMA_DIR="$(find /app -maxdepth 8 -path '*/node_modules/.prisma/client' -type d | head -n 1 || true)"; \
+  fi; \
+  if [ -z "$PRISMA_DIR" ]; then \
+    echo "ERROR: Prisma engines not found after generate." >&2; \
+    find /app -maxdepth 8 -path "*/node_modules/.prisma/client" -type d -print || true; \
     exit 1; \
   fi; \
-  tar -cf /tmp/prisma.tar -T /tmp/prisma_dirs.txt
-RUN pnpm prune --prod
-RUN tar -xf /tmp/prisma.tar -C /app
-RUN set -euo pipefail; \
-  if [ -d /app/node_modules/.prisma ]; then \
-    echo "Prisma engines present at /app/node_modules/.prisma"; \
-  elif [ -d /app/packages/db/node_modules/.prisma ]; then \
-    mkdir -p /app/node_modules; \
-    cp -R /app/packages/db/node_modules/.prisma /app/node_modules/.prisma; \
-  else \
-    PRISMA_SRC="$(find /app/node_modules -type d -path "*/node_modules/.prisma" | head -n 1 || true)"; \
-    if [ -n "$PRISMA_SRC" ]; then \
-      mkdir -p /app/node_modules; \
-      cp -R "$PRISMA_SRC" /app/node_modules/.prisma; \
-    else \
-      echo "ERROR: Prisma engines not found after restore." >&2; \
-      find /app -maxdepth 6 -type d -name ".prisma" -print || true; \
-      ls -la /app/node_modules/@prisma || true; \
-      ls -la /app/packages/db/node_modules/@prisma || true; \
-      exit 1; \
-    fi; \
+  if ! find "$PRISMA_DIR" -maxdepth 1 -type f -name '*query_engine*' -print | grep -q 'debian-openssl-3.0.x'; then \
+    echo "ERROR: Missing Prisma engine for debian-openssl-3.0.x after generate." >&2; \
+    exit 1; \
+  fi; \
+  if ! find "$PRISMA_DIR" -maxdepth 1 -type f -name '*query_engine*' -print | grep -q 'debian-openssl-1.1.x'; then \
+    echo "ERROR: Missing Prisma engine for debian-openssl-1.1.x after generate." >&2; \
+    exit 1; \
   fi
-RUN node -e "require('/app/packages/db/node_modules/@prisma/client'); console.log('prisma client ok')"
+RUN pnpm --filter @truckerio/db build
+RUN pnpm prune --prod
+RUN node -e "try{require('@prisma/client');console.log('prisma client load ok');}catch(e){require('/app/packages/db/node_modules/@prisma/client');console.log('prisma client load ok (db)');}"
+RUN set -euo pipefail; \
+  ENGINE_LIST="$(find /app -maxdepth 8 -path '*/node_modules/.prisma/client/*query_engine*' -type f -print || true)"; \
+  printf '%s\n' "$ENGINE_LIST"; \
+  if ! printf '%s\n' "$ENGINE_LIST" | grep -q 'debian-openssl-3.0.x'; then \
+    echo "ERROR: Missing Prisma engine for debian-openssl-3.0.x after prune." >&2; \
+    exit 1; \
+  fi; \
+  if ! printf '%s\n' "$ENGINE_LIST" | grep -q 'debian-openssl-1.1.x'; then \
+    echo "ERROR: Missing Prisma engine for debian-openssl-1.1.x after prune." >&2; \
+    exit 1; \
+  fi
 
 FROM node:20-bookworm-slim AS runtime
 
