@@ -131,6 +131,8 @@ RUN set -euo pipefail; \
   libc6 \
   libgcc1 \
   libstdc++6 \
+  openssl \
+  libssl3 \
   lsb-release \
   xdg-utils \
   wget \
