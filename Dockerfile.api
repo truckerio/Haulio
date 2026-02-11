@@ -23,9 +23,9 @@ FROM deps AS build
 COPY . .
 
 RUN pnpm --filter @truckerio/db exec prisma generate
-RUN pnpm --filter @truckerio/shared exec tsc -p packages/shared/tsconfig.json
-RUN pnpm --filter @truckerio/db exec tsc -p packages/db/tsconfig.json
-RUN pnpm --filter @truckerio/api exec tsc -p apps/api/tsconfig.json --module CommonJS
+RUN pnpm --filter @truckerio/shared exec tsc -p tsconfig.json
+RUN pnpm --filter @truckerio/db exec tsc -p tsconfig.json
+RUN pnpm --filter @truckerio/api exec tsc -p tsconfig.json --module CommonJS
 
 FROM node:20-bookworm-slim AS runtime
 
