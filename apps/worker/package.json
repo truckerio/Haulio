@@ -10,11 +10,11 @@
     "@truckerio/db": "workspace:*",
     "date-fns": "^3.6.0",
     "dotenv": "^16.4.5",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
     "@types/pdf-parse": "^1.1.5",
-    "tsx": "^4.19.0",
     "typescript": "^5.5.4"
   }
 }
