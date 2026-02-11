@@ -32,4 +32,4 @@ ENV NODE_ENV=production
 
 COPY --from=build /app /app
 
-CMD ["pnpm", "--filter", "@truckerio/worker", "exec", "tsx", "src/index.ts"]
+CMD ["node", "node_modules/.bin/tsx", "apps/worker/src/index.ts"]

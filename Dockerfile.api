@@ -76,4 +76,4 @@ COPY --from=build /app /app
 
 EXPOSE 4000
 
-CMD ["pnpm", "--filter", "@truckerio/api", "exec", "tsx", "src/index.ts"]
+CMD ["node", "node_modules/.bin/tsx", "apps/api/src/index.ts"]
