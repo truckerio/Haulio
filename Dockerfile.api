@@ -44,7 +44,6 @@ RUN set -euo pipefail; \
   }
 RUN pnpm --filter @truckerio/shared build
 RUN pnpm --filter @truckerio/db build
-RUN pnpm --filter @truckerio/api exec tsc -p tsconfig.json --module CommonJS
 RUN set -euo pipefail; \
   cd /app; \
   find . -type d -name ".prisma" -path "*/node_modules/.prisma" -print > /tmp/prisma_dirs.txt || true; \
