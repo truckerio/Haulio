@@ -25,7 +25,7 @@ COPY packages/db packages/db
 
 RUN pnpm --filter @truckerio/db exec prisma generate
 RUN pnpm --filter @truckerio/db build
-RUN PRISMA_DIR="$(find node_modules -type d -path \"*/node_modules/.prisma\" | head -n 1)" \
+RUN PRISMA_DIR="$(find . -type d -path \"*/node_modules/.prisma\" | head -n 1)" \
   && test -n "$PRISMA_DIR" \
   && echo "$PRISMA_DIR" > /tmp/prisma_dir \
   && cp -R "$PRISMA_DIR" /tmp/prisma
