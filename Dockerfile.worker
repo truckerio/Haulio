@@ -41,4 +41,9 @@ COPY --from=build /app/node_modules /app/node_modules
 COPY --from=build /app/apps/worker /app/apps/worker
 COPY --from=build /app/packages/db /app/packages/db
 
+# Ensure worker resolves @truckerio/db to the built workspace package.
+RUN rm -rf /app/apps/worker/node_modules/@truckerio/db && \
+  mkdir -p /app/apps/worker/node_modules/@truckerio && \
+  ln -s /app/packages/db /app/apps/worker/node_modules/@truckerio/db
+
 CMD ["pnpm", "--filter", "@truckerio/worker", "exec", "tsx", "src/index.ts"]
