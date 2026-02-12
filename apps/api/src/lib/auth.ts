@@ -24,6 +24,7 @@ export type AuthRequest = {
 const SESSION_COOKIE = "session";
 const SESSION_TTL_DAYS = 14;
 const IS_PROD = process.env.NODE_ENV === "production";
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN?.trim() || undefined;
 
 function hashToken(token: string) {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -52,11 +53,14 @@ export function setSessionCookie(res: Response, token: string, expiresAt: Date) 
     sameSite: "lax",
     secure: IS_PROD,
     expires: expiresAt,
+    domain: COOKIE_DOMAIN,
   });
 }
 
 export function clearSessionCookie(res: Response) {
-  res.clearCookie(SESSION_COOKIE);
+  res.clearCookie(SESSION_COOKIE, {
+    domain: COOKIE_DOMAIN,
+  });
 }
 
 export async function requireAuth(req: AuthRequest & { headers: any }, res: Response, next: NextFunction) {

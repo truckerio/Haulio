@@ -3,6 +3,7 @@ import type { Response, NextFunction } from "express";
 
 const CSRF_COOKIE = "csrf";
 const IS_PROD = process.env.NODE_ENV === "production";
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN?.trim() || undefined;
 
 export function createCsrfToken() {
   return crypto.randomBytes(24).toString("hex");
@@ -13,6 +14,7 @@ export function setCsrfCookie(res: Response, token: string) {
     httpOnly: false,
     sameSite: "lax",
     secure: IS_PROD,
+    domain: COOKIE_DOMAIN,
   });
 }
 
