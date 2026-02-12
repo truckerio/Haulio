@@ -30,6 +30,18 @@ pnpm dev:api   # Express API on http://localhost:4000
 pnpm dev:worker # Task automation worker
 ```
 
+## Prisma client generation (deploy)
+
+Prisma Client must be generated during the build in the target environment
+(Railway, Docker, CI). Run from repo root:
+
+```bash
+pnpm -w prisma:generate
+```
+
+Docker builds for API/worker run this automatically. Do not generate locally
+and commit `node_modules`.
+
 ## Reset for a new company
 
 This wipes all data, clears uploads, and creates a fresh company + admin.

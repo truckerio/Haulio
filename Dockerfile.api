@@ -6,7 +6,6 @@ WORKDIR /app
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-ENV PRISMA_CLI_BINARY_TARGETS="debian-openssl-3.0.x,debian-openssl-1.1.x"
 
 RUN corepack enable
 RUN set -euo pipefail; \
@@ -37,7 +36,7 @@ COPY packages/db packages/db
 COPY packages/shared packages/shared
 
 RUN set -euo pipefail; \
-  pnpm --filter @truckerio/db exec prisma generate || { \
+  pnpm -w prisma:generate || { \
     pnpm --filter @truckerio/db exec prisma -v || true; \
     find . -maxdepth 6 -type d -name ".prisma" -print || true; \
     exit 1; \
