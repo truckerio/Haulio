@@ -144,6 +144,7 @@ import path from "path";
 
 const app = express();
 app.set("etag", false);
+app.set("trust proxy", 1);
 const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 const DEV_ERRORS = process.env.NODE_ENV !== "production";
 const DEFAULT_TEAM_NAME = "Default";
