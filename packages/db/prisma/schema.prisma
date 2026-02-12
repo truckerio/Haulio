@@ -16,6 +16,23 @@ enum Role {
   DRIVER
 }
 
+enum UserStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+}
+
+enum AuthProvider {
+  MICROSOFT
+  GOOGLE
+  EMAIL
+}
+
+enum MfaChallengePurpose {
+  LOGIN
+  SETUP
+}
+
 enum LoadAssignmentRole {
   PRIMARY
   CO_DRIVER
@@ -368,6 +385,7 @@ model Organization {
   createdAt DateTime @default(now())
 
   users       User[]
+  identities UserIdentity[]
   drivers     Driver[]
   trucks      Truck[]
   trailers    Trailer[]
@@ -487,6 +505,7 @@ model User {
   email        String       @db.Citext
   passwordHash String
   role         Role
+  status       UserStatus   @default(ACTIVE)
   name         String?
   phone        String?
   profilePhotoUrl String?
@@ -496,12 +515,18 @@ model User {
   defaultTeamId String?
   timezone     String?
   lastLoginAt  DateTime?
+  mfaEnabled   Boolean      @default(false)
+  mfaTotpSecretEncrypted String?
+  mfaRecoveryCodesHash String?
+  mfaEnforced  Boolean      @default(false)
   createdAt    DateTime     @default(now())
 
   org               Organization           @relation(fields: [orgId], references: [id])
   defaultTeam       Team?                  @relation("UserDefaultTeam", fields: [defaultTeamId], references: [id])
   sessions          Session[]
+  mfaChallenges     MfaChallenge[]
   driver            Driver?
+  identities        UserIdentity[]
   createdLoads      Load[]                 @relation("CreatedLoads")
   deletedLoads      Load[]                 @relation("DeletedLoads")
   events            Event[]
@@ -518,7 +543,7 @@ model User {
   completedTasks    Task[]                 @relation("CompletedTasks")
   trackingSessionsStarted LoadTrackingSession[] @relation("TrackingSessionsStarted")
   notificationPrefs UserNotificationPref[]
-  invites           UserInvite[]
+  invitesSent       UserInvite[]           @relation("InvitedByUser")
   passwordResets    PasswordReset[]
   teamMemberships   TeamMember[]
   assignmentSuggestionLogs AssignmentSuggestionLog[] @relation("AssignmentSuggestionDispatcher")
@@ -529,17 +554,19 @@ model User {
 model UserInvite {
   id        String   @id @default(cuid())
   orgId     String
-  userId    String
+  email     String   @db.Citext
+  role      Role
   tokenHash String
   createdAt DateTime @default(now())
   expiresAt DateTime
-  usedAt    DateTime?
+  acceptedAt DateTime?
+  invitedByUserId String?
 
-  org  Organization @relation(fields: [orgId], references: [id])
-  user User         @relation(fields: [userId], references: [id])
+  org        Organization @relation(fields: [orgId], references: [id])
+  invitedBy  User?        @relation("InvitedByUser", fields: [invitedByUserId], references: [id])
 
-  @@index([orgId, userId])
-  @@unique([tokenHash])
+  @@index([orgId, email])
+  @@index([tokenHash])
 }
 
 model PasswordReset {
@@ -574,6 +601,36 @@ model Session {
 
   @@index([tokenHash])
   @@index([userId, expiresAt])
+}
+
+model MfaChallenge {
+  id        String              @id @default(cuid())
+  userId    String
+  tokenHash String
+  purpose   MfaChallengePurpose
+  createdAt DateTime            @default(now())
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([tokenHash])
+  @@index([userId])
+}
+
+model UserIdentity {
+  id                String       @id @default(cuid())
+  orgId             String
+  userId            String
+  provider          AuthProvider
+  providerAccountId String
+  createdAt         DateTime     @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerAccountId])
+  @@index([orgId])
+  @@index([userId])
 }
 
 model Driver {

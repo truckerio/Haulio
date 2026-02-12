@@ -80,7 +80,7 @@ export default function ResetPasswordPage() {
             </Button>
           </form>
           {status ? <div className="text-sm text-[color:var(--color-text-muted)]">{status}</div> : null}
-          <Button variant="ghost" size="sm" className="w-full" onClick={() => router.push("/")}>
+          <Button variant="ghost" size="sm" className="w-full" onClick={() => router.push("/login")}>
             Back to login
           </Button>
         </Card>

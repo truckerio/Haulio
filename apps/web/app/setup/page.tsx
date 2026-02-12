@@ -8,6 +8,12 @@ import { Card } from "@/components/ui/card";
 import { FormField } from "@/components/ui/form-field";
 import { apiFetch, setCsrfToken } from "@/lib/api";
 
+function getRoleRedirect(role?: string | null) {
+  if (role === "DRIVER") return "/driver";
+  if (role === "DISPATCHER" || role === "HEAD_DISPATCHER") return "/dispatch";
+  return "/today";
+}
+
 export default function SetupPage() {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
@@ -54,6 +60,7 @@ export default function SetupPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code }),
+        credentials: "include",
       });
       if (!data.valid) {
         setError("That setup code is invalid or already used.");
@@ -72,7 +79,7 @@ export default function SetupPage() {
     setError(null);
     setLoading(true);
     try {
-      const data = await apiFetch<{ csrfToken?: string }>("/setup/consume-and-create-org", {
+      const data = await apiFetch<{ csrfToken?: string; user?: { role?: string } }>("/setup/consume-and-create-org", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -84,11 +91,12 @@ export default function SetupPage() {
             password: adminPassword,
           },
         }),
+        credentials: "include",
       });
-      if (data?.csrfToken) {
+      if (data.csrfToken) {
         setCsrfToken(data.csrfToken);
       }
-      router.replace("/onboarding");
+      router.replace(getRoleRedirect(data.user?.role));
     } catch (err) {
       setError((err as Error).message);
     } finally {

@@ -1,9 +1,15 @@
 import crypto from "crypto";
 import type { Response, NextFunction } from "express";
-import { prisma } from "@truckerio/db";
+import { prisma, UserStatus } from "@truckerio/db";
 import { parse } from "cookie";
 
 export type AuthRequest = {
+  auth?: {
+    userId: string;
+    orgId: string;
+    role: string;
+    status: string;
+  };
   user?: {
     id: string;
     orgId: string;
@@ -70,7 +76,7 @@ export async function requireAuth(req: AuthRequest & { headers: any }, res: Resp
     res.status(401).json({ error: "Session expired" });
     return;
   }
-  if (!session.user.isActive) {
+  if (!session.user.isActive || session.user.status !== UserStatus.ACTIVE) {
     res.status(403).json({ error: "User is inactive" });
     return;
   }

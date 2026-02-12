@@ -3,6 +3,11 @@ import { API_BASE } from "@/lib/apiBase";
 const DEV_ERRORS = process.env.NEXT_PUBLIC_DEV_ERRORS === "true" || process.env.NODE_ENV !== "production";
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
 
+export type ApiFetchOptions = RequestInit & {
+  skipAuthRedirect?: boolean;
+  retryOnCsrf?: boolean;
+};
+
 export function getApiBase() {
   return API_BASE;
 }
@@ -15,27 +20,36 @@ export function getCsrfToken() {
 export function setCsrfToken(token: string) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem("csrfToken", token);
-  window.dispatchEvent(new Event("csrf-token-changed"));
+}
+
+export function clearCsrfToken() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem("csrfToken");
 }
 
 async function refreshCsrfToken() {
   try {
-    const res = await fetch(`${getApiBase()}/auth/csrf`, { credentials: "include" });
+    const res = await fetch(`${getApiBase()}/auth/csrf`, {
+      credentials: "include",
+      cache: "no-store",
+    });
     if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
+    const data = await res.json();
     if (data?.csrfToken) {
       setCsrfToken(data.csrfToken);
       return data.csrfToken as string;
     }
   } catch {
-    return null;
+    // ignore
   }
   return null;
 }
 
-export async function apiFetch<T>(path: string, options: RequestInit = {}, retryOnCsrf = true): Promise<T> {
-  const headers = new Headers(options.headers || {});
-  if (options.method && options.method !== "GET") {
+export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
+  const { skipAuthRedirect, retryOnCsrf = true, ...fetchOptions } = options;
+  const headers = new Headers(fetchOptions.headers || {});
+  const method = (fetchOptions.method ?? "GET").toUpperCase();
+  if (!["GET", "HEAD"].includes(method) && !headers.has("x-csrf-token")) {
     const csrf = getCsrfToken();
     if (csrf) {
       headers.set("x-csrf-token", csrf);
@@ -44,9 +58,9 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}, retry
   let res: Response;
   try {
     res = await fetch(`${getApiBase()}${path}`, {
-      ...options,
+      ...fetchOptions,
       headers,
-      credentials: "include",
+      credentials: fetchOptions.credentials ?? "include",
       cache: "no-store",
     });
   } catch (error) {
@@ -56,24 +70,22 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}, retry
     throw new Error("We couldn't reach the server. Please try again.");
   }
   if (!res.ok) {
-    if (res.status === 401 && typeof window !== "undefined") {
-      window.location.href = "/";
+    if (res.status === 401 && typeof window !== "undefined" && !skipAuthRedirect) {
+      window.location.href = "/login";
       return new Promise<T>(() => {});
     }
-    const error = await res.json().catch(() => ({}));
-    if (res.status === 403) {
-      const message = error?.error || error?.message || "";
-      if (retryOnCsrf && message.toLowerCase().includes("csrf")) {
-        const token = await refreshCsrfToken();
-        if (token) {
-          return apiFetch<T>(path, options, false);
+    if (res.status === 403 && retryOnCsrf && !["GET", "HEAD"].includes(method)) {
+      const error = await res.json().catch(() => ({}));
+      if (String(error?.error || "").toLowerCase().includes("csrf")) {
+        const refreshed = await refreshCsrfToken();
+        if (refreshed) {
+          return apiFetch<T>(path, { ...options, retryOnCsrf: false });
         }
       }
-      if (typeof window !== "undefined" && message.toLowerCase().includes("not authenticated")) {
-        window.location.href = "/";
-        return new Promise<T>(() => {});
-      }
+      const message = error?.error || error?.message || "Request failed";
+      throw new Error(message);
     }
+    const error = await res.json().catch(() => ({}));
     const message =
       error?.error ||
       error?.message ||

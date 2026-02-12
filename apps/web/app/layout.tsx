@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { IdleLogout } from "@/components/idle-logout";
 import { CanonicalHost } from "@/components/canonical-host";
-import { AuthKeepalive } from "@/components/auth-keepalive";
 
 export const metadata: Metadata = {
   title: "Haulio",
@@ -19,7 +18,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body className="min-h-screen">
         <CanonicalHost />
-        <AuthKeepalive />
         <IdleLogout />
         {children}
       </body>

@@ -10,6 +10,8 @@ export type CurrentUser = {
   canSeeAllTeams?: boolean;
   name?: string | null;
   email?: string | null;
+  mfaEnabled?: boolean;
+  mfaEnforced?: boolean;
 };
 
 type UserContextValue = {
@@ -31,16 +33,14 @@ export function UserProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await apiFetch<{ user: CurrentUser; org?: { id: string; name: string; companyDisplayName?: string | null } | null }>(
-        "/auth/me"
-      );
+      const data = await apiFetch<{ user: CurrentUser; org?: { id: string; name: string; companyDisplayName?: string | null } | null }>("/auth/me");
       setUser(data.user ?? null);
       setOrg(data.org ?? null);
       setError(null);
     } catch (err) {
       setUser(null);
       setOrg(null);
-      setError((err as Error).message);
+      setError((err as Error).message || null);
     } finally {
       setLoading(false);
     }

@@ -16,6 +16,7 @@ import {
 const ORG_NAME = process.env.DEMO_ORG_NAME || "Haulio Demo Logistics";
 const ADMIN_EMAIL = process.env.DEMO_ADMIN_EMAIL || "karan@admin.com";
 const ADMIN_PASSWORD = process.env.DEMO_ADMIN_PASSWORD || "password123";
+const INVITE_EMAIL = process.env.DEMO_INVITE_EMAIL || "";
 
 const LOAD_COUNT = Number(process.env.DEMO_LOAD_COUNT || "50");
 const DRIVER_COUNT = Number(process.env.DEMO_DRIVER_COUNT || "55");
@@ -64,6 +65,10 @@ function toDecimal(value: number) {
 
 function pick<T>(list: T[], index: number) {
   return list[index % list.length];
+}
+
+function hashInviteToken(token: string) {
+  return crypto.createHash("sha256").update(token).digest("hex");
 }
 
 async function getRepoRoot() {
@@ -126,6 +131,22 @@ async function main() {
       canSeeAllTeams: true,
     },
   });
+
+  if (INVITE_EMAIL) {
+    const token = crypto.randomBytes(32).toString("hex");
+    const tokenHash = hashInviteToken(token);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await prisma.userInvite.create({
+      data: {
+        orgId: org.id,
+        email: INVITE_EMAIL.toLowerCase(),
+        role: "DISPATCHER",
+        tokenHash,
+        expiresAt,
+        invitedByUserId: admin.id,
+      },
+    });
+  }
 
   const headDispatchers = await Promise.all(
     ["head.dispatch1@demo.com", "head.dispatch2@demo.com"].map((email, index) =>

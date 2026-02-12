@@ -16,6 +16,7 @@ import { ImportWizard } from "@/components/ImportWizard";
 import { apiFetch } from "@/lib/api";
 import { AdminSettingsShell } from "@/components/admin-settings/AdminSettingsShell";
 import { AdminDrawer } from "@/components/admin-settings/AdminDrawer";
+import { useUser } from "@/components/auth/user-context";
 
 const EMPLOYEE_TEMPLATE = "email,role,name,phone,timezone\n";
 const ROLE_OPTIONS = [
@@ -35,6 +36,7 @@ const SORT_OPTIONS = [
 function EmployeesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { user: currentUser } = useUser();
   const [users, setUsers] = useState<any[]>([]);
   const [teams, setTeams] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -44,6 +46,8 @@ function EmployeesPageContent() {
   const [employeeError, setEmployeeError] = useState<string | null>(null);
   const [employeeInviteUrl, setEmployeeInviteUrl] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null);
+  const [mfaResetError, setMfaResetError] = useState<string | null>(null);
+  const [mfaResettingId, setMfaResettingId] = useState<string | null>(null);
   const [employeeImportResult, setEmployeeImportResult] = useState<any | null>(null);
   const [employeeInvites, setEmployeeInvites] = useState<any[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -59,11 +63,7 @@ function EmployeesPageContent() {
 
   const [employeeForm, setEmployeeForm] = useState({
     email: "",
-    name: "",
     role: "DISPATCHER",
-    password: "",
-    phone: "",
-    timezone: "",
   });
 
   useEffect(() => {
@@ -140,11 +140,7 @@ function EmployeesPageContent() {
   const resetDrawer = () => {
     setEmployeeForm({
       email: "",
-      name: "",
       role: "DISPATCHER",
-      password: "",
-      phone: "",
-      timezone: "",
     });
     setEmployeeInviteUrl(null);
     setEmployeeError(null);
@@ -161,27 +157,18 @@ function EmployeesPageContent() {
     setEmployeeError(null);
     setEmployeeInviteUrl(null);
     try {
-      const data = await apiFetch<{ user: any }>("/admin/users", {
+      const data = await apiFetch<{ invite: { inviteUrl?: string } }>("/admin/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: employeeForm.email,
-          name: employeeForm.name || undefined,
           role: employeeForm.role,
-          password: employeeForm.password,
-          phone: employeeForm.phone || undefined,
-          timezone: employeeForm.timezone || undefined,
         }),
       });
-      if (copyInvite) {
-        const inviteData = await apiFetch<{ invites: any[] }>("/users/invite-bulk", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userIds: [data.user.id] }),
-        });
-        const inviteUrl = inviteData.invites?.[0]?.inviteUrl;
-        if (inviteUrl) {
-          setEmployeeInviteUrl(inviteUrl);
+      const inviteUrl = data.invite?.inviteUrl;
+      if (inviteUrl) {
+        setEmployeeInviteUrl(inviteUrl);
+        if (copyInvite) {
           try {
             await navigator.clipboard.writeText(inviteUrl);
           } catch {
@@ -189,11 +176,9 @@ function EmployeesPageContent() {
           }
         }
       }
-      resetDrawer();
-      const refreshed = await apiFetch<{ users: any[] }>("/admin/users");
-      setUsers(refreshed.users);
+      setEmployeeForm({ email: "", role: "DISPATCHER" });
     } catch (err) {
-      setEmployeeError((err as Error).message || "Failed to create employee.");
+      setEmployeeError((err as Error).message || "Failed to create invite.");
     } finally {
       setEmployeeSaving(false);
     }
@@ -224,31 +209,52 @@ function EmployeesPageContent() {
     setUsers(refreshed.users);
   };
 
-  const sendInvite = async (userId: string) => {
+  const sendInvite = async (user: { email: string; role: string }) => {
     setInviteError(null);
     try {
-      const data = await apiFetch<{ invites: any[] }>("/users/invite-bulk", {
+      const data = await apiFetch<{ invite: { inviteUrl?: string } }>("/admin/invites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userIds: [userId] }),
+        body: JSON.stringify({ email: user.email, role: user.role }),
       });
-      if (data.invites?.[0]?.inviteUrl) {
-        await navigator.clipboard.writeText(data.invites[0].inviteUrl);
+      if (data.invite?.inviteUrl) {
+        await navigator.clipboard.writeText(data.invite.inviteUrl);
       }
     } catch (err) {
       setInviteError((err as Error).message || "Failed to copy invite.");
     }
   };
 
+  const resetUserMfa = async (userId: string) => {
+    if (!window.confirm("Reset two-factor authentication for this user?")) return;
+    setMfaResetError(null);
+    setMfaResettingId(userId);
+    try {
+      await apiFetch(`/admin/users/${userId}/mfa/reset`, { method: "POST" });
+    } catch (err) {
+      setMfaResetError((err as Error).message || "Failed to reset 2FA.");
+    } finally {
+      setMfaResettingId(null);
+    }
+  };
+
   const generateEmployeeInvites = async () => {
     if (!employeeImportResult?.created?.length) return;
-    const userIds = employeeImportResult.created.map((item: any) => item.id);
-    const data = await apiFetch<{ invites: any[] }>("/users/invite-bulk", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userIds }),
-    });
-    setEmployeeInvites(data.invites ?? []);
+    try {
+      const invites = await Promise.all(
+        employeeImportResult.created.map(async (item: any) => {
+          const data = await apiFetch<{ invite: any }>("/admin/invites", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: item.email, role: item.role || "DISPATCHER" }),
+          });
+          return data.invite;
+        })
+      );
+      setEmployeeInvites(invites.filter(Boolean));
+    } catch (err) {
+      setInviteError((err as Error).message || "Failed to generate invites.");
+    }
   };
 
   const copyInviteLinks = async () => {
@@ -273,7 +279,7 @@ function EmployeesPageContent() {
           }
           actions={
             <Button variant="primary" onClick={() => setDrawerOpen(true)}>
-              Add employee
+              Invite employee
             </Button>
           }
         >
@@ -336,6 +342,7 @@ function EmployeesPageContent() {
 
             {roleError ? <ErrorBanner message={roleError} /> : null}
             {inviteError ? <ErrorBanner message={inviteError} /> : null}
+            {mfaResetError ? <ErrorBanner message={mfaResetError} /> : null}
 
             <div className="overflow-x-auto">
               <table className="min-w-full border-separate border-spacing-0 text-[13px]">
@@ -385,7 +392,7 @@ function EmployeesPageContent() {
                         <td className="px-3 py-3">{teamNames.length ? teamNames.join(", ") : "-"}</td>
                         <td className="px-3 py-3">
                           <div className="flex flex-wrap gap-2">
-                            <Button variant="ghost" size="sm" onClick={() => sendInvite(user.id)}>
+                            <Button variant="ghost" size="sm" onClick={() => sendInvite(user)}>
                               Copy invite
                             </Button>
                             <Button
@@ -395,6 +402,16 @@ function EmployeesPageContent() {
                             >
                               {user.isActive ? "Deactivate" : "Reactivate"}
                             </Button>
+                            {currentUser?.id && currentUser.id !== user.id ? (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => resetUserMfa(user.id)}
+                                disabled={mfaResettingId === user.id}
+                              >
+                                {mfaResettingId === user.id ? "Resetting 2FA..." : "Reset 2FA"}
+                              </Button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -440,7 +457,7 @@ function EmployeesPageContent() {
               {employeeInvites.length ? (
                 <div className="grid gap-2">
                   {employeeInvites.map((invite) => (
-                    <div key={invite.userId} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-2 text-sm">
+                    <div key={invite.id ?? invite.email} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-2 text-sm">
                       <div className="font-semibold">{invite.email}</div>
                       <div className="text-xs text-[color:var(--color-text-muted)]">{invite.inviteUrl}</div>
                     </div>
@@ -454,22 +471,22 @@ function EmployeesPageContent() {
         <AdminDrawer
           open={drawerOpen}
           onClose={closeDrawer}
-          title="Add employee"
-          subtitle="Create an employee login and assign a role."
+          title="Invite employee"
+          subtitle="Invite an employee and assign a role."
           footer={
             <div className="flex flex-wrap gap-2">
               <Button
                 onClick={() => createEmployee(false)}
-                disabled={employeeSaving || !employeeForm.email || !employeeForm.password}
+                disabled={employeeSaving || !employeeForm.email}
               >
-                {employeeSaving ? "Saving..." : "Create"}
+                {employeeSaving ? "Saving..." : "Create invite"}
               </Button>
               <Button
                 variant="secondary"
                 onClick={() => createEmployee(true)}
-                disabled={employeeSaving || !employeeForm.email || !employeeForm.password}
+                disabled={employeeSaving || !employeeForm.email}
               >
-                Create and copy invite
+                Create & copy invite
               </Button>
             </div>
           }
@@ -481,13 +498,6 @@ function EmployeesPageContent() {
                   id="employeeEmail"
                   value={employeeForm.email}
                   onChange={(event) => setEmployeeForm({ ...employeeForm, email: event.target.value })}
-                />
-              </FormField>
-              <FormField label="Full name" htmlFor="employeeName">
-                <Input
-                  id="employeeName"
-                  value={employeeForm.name}
-                  onChange={(event) => setEmployeeForm({ ...employeeForm, name: event.target.value })}
                 />
               </FormField>
               <FormField label="Role" htmlFor="employeeRole">
@@ -503,34 +513,7 @@ function EmployeesPageContent() {
                   ))}
                 </Select>
               </FormField>
-              <FormField label="Temporary password" htmlFor="employeePassword" hint="Share securely with the employee.">
-                <Input
-                  id="employeePassword"
-                  value={employeeForm.password}
-                  onChange={(event) => setEmployeeForm({ ...employeeForm, password: event.target.value })}
-                />
-              </FormField>
             </div>
-
-            <details className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-3 py-2">
-              <summary className="cursor-pointer list-none text-sm font-semibold text-ink">More details</summary>
-              <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                <FormField label="Phone" htmlFor="employeePhone">
-                  <Input
-                    id="employeePhone"
-                    value={employeeForm.phone}
-                    onChange={(event) => setEmployeeForm({ ...employeeForm, phone: event.target.value })}
-                  />
-                </FormField>
-                <FormField label="Timezone" htmlFor="employeeTimezone">
-                  <Input
-                    id="employeeTimezone"
-                    value={employeeForm.timezone}
-                    onChange={(event) => setEmployeeForm({ ...employeeForm, timezone: event.target.value })}
-                  />
-                </FormField>
-              </div>
-            </details>
 
             {employeeError ? <ErrorBanner message={employeeError} /> : null}
             {employeeInviteUrl ? (

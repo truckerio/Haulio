@@ -3,93 +3,121 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { apiFetch } from "@/lib/api";
+import { Input } from "@/components/ui/input";
 import { FormField } from "@/components/ui/form-field";
+import { apiFetch } from "@/lib/api";
+
+type InviteInfo = {
+  email: string;
+  role: string;
+  expiresAt: string;
+  org?: { id: string; name: string };
+};
 
 export default function InviteAcceptPage() {
   const params = useParams();
   const router = useRouter();
   const token = params?.token as string;
-  const [invite, setInvite] = useState<any | null>(null);
+  const [invite, setInvite] = useState<InviteInfo | null>(null);
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [done, setDone] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) return;
-    apiFetch<{ invite: any }>(`/invite/${token}`)
-      .then((data) => {
-        setInvite(data.invite);
-        setName(data.invite.user.name ?? "");
-      })
-      .catch((err) => setError((err as Error).message));
+    apiFetch<{ invite: InviteInfo }>(`/invite/${encodeURIComponent(token)}`, { skipAuthRedirect: true })
+      .then((data) => setInvite(data.invite))
+      .catch((err) => setStatus((err as Error).message));
   }, [token]);
 
-  const acceptInvite = async () => {
-    setError(null);
-    if (!password || password.length < 8) {
-      setError("Password must be at least 8 characters.");
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setStatus(null);
+    if (!token) {
+      setStatus("Invite token is missing.");
+      return;
+    }
+    if (password.length < 8) {
+      setStatus("Password must be at least 8 characters.");
       return;
     }
     if (password !== confirm) {
-      setError("Passwords do not match.");
+      setStatus("Passwords do not match.");
       return;
     }
     setLoading(true);
     try {
-      await apiFetch(`/invite/${token}/accept`, {
+      await apiFetch(`/invite/${encodeURIComponent(token)}/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password, name: name || undefined }),
+        body: JSON.stringify({ name, password }),
+        skipAuthRedirect: true,
       });
-      setDone(true);
+      setStatus("Invite accepted. You can sign in now.");
     } catch (err) {
-      setError((err as Error).message);
+      setStatus((err as Error).message || "Unable to accept invite.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-[color:var(--color-bg-muted)] px-6 py-12">
+    <div className="min-h-screen px-6 py-12">
       <div className="mx-auto max-w-lg">
         <Card className="space-y-4">
           <div>
-            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Welcome</div>
-            <h1 className="text-2xl font-semibold">Set your password</h1>
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Invite</div>
+            <h1 className="text-2xl font-semibold">Activate your account</h1>
             {invite ? (
               <div className="text-sm text-[color:var(--color-text-muted)]">
-                {invite.org?.name} · {invite.user?.email}
+                {invite.org?.name ?? "Organization"} · {invite.email}
               </div>
             ) : null}
           </div>
-          {done ? (
-            <div className="space-y-3">
-              <div className="text-sm text-[color:var(--color-success)]">Password set. You can sign in now.</div>
-              <Button onClick={() => router.push("/")}>Go to login</Button>
-            </div>
-          ) : (
-            <>
+          {status ? <div className="text-sm text-[color:var(--color-text-muted)]">{status}</div> : null}
+          {invite && (!status || !status.startsWith("Invite accepted")) ? (
+            <form className="space-y-3" onSubmit={handleSubmit}>
               <FormField label="Full name" htmlFor="inviteName">
-                <Input placeholder="Taylor Johnson" value={name} onChange={(e) => setName(e.target.value)} />
+                <Input
+                  id="inviteName"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="e.g., Jordan Lee"
+                />
               </FormField>
-              <FormField label="New password" htmlFor="invitePassword">
-                <Input type="password" placeholder="At least 8 characters" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <FormField label="Password" htmlFor="invitePassword">
+                <Input
+                  id="invitePassword"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Create a password"
+                  type="password"
+                />
               </FormField>
               <FormField label="Confirm password" htmlFor="inviteConfirm">
-                <Input type="password" placeholder="Re-enter password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+                <Input
+                  id="inviteConfirm"
+                  value={confirm}
+                  onChange={(event) => setConfirm(event.target.value)}
+                  placeholder="Confirm password"
+                  type="password"
+                />
               </FormField>
-              {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}
-              <Button onClick={acceptInvite} disabled={loading}>
-                {loading ? "Saving..." : "Set password"}
+              <Button type="submit" size="lg" className="w-full" disabled={loading}>
+                {loading ? "Activating..." : "Activate account"}
               </Button>
-            </>
-          )}
+              <Button variant="ghost" size="sm" className="w-full" type="button" onClick={() => router.push("/login")}>
+                Back to login
+              </Button>
+            </form>
+          ) : status && status.startsWith("Invite accepted") ? (
+            <Button size="lg" className="w-full" onClick={() => router.push("/login")}>
+              Continue to login
+            </Button>
+          ) : null}
         </Card>
       </div>
     </div>

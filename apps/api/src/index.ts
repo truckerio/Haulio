@@ -47,6 +47,8 @@ import {
   BillingStatus,
   AccessorialStatus,
   AccessorialType,
+  MfaChallengePurpose,
+  UserStatus,
   VaultDocType,
   VaultScopeType,
   LearningDomain,
@@ -95,6 +97,7 @@ import {
   getScopedEntityIds,
   getUserTeamScope,
 } from "./lib/team-scope";
+import { parseDeleteOrgAllowlist, performOrganizationDelete } from "./lib/org-delete";
 import { buildAssignmentSuggestions } from "./modules/assignmentAssist/data";
 import { ASSIST_MODEL_VERSION, ASSIST_WEIGHTS_VERSION } from "./modules/assignmentAssist/scoring";
 import { parseSuggestionLogPayload } from "./modules/assignmentAssist/validation";
@@ -105,6 +108,16 @@ import {
 } from "./modules/dispatch/queue-view";
 import { assignTeamEntities } from "./modules/teams/assign";
 import { canAssignTeams } from "./modules/teams/access";
+import {
+  buildOtpAuthUrl,
+  consumeRecoveryCode,
+  decryptSecret,
+  encryptSecret,
+  generateRecoveryCodes,
+  generateTotpSecret,
+  verifyRecoveryCode,
+  verifyTotp,
+} from "./lib/mfa";
 import { getTodayScope } from "./modules/today/scope";
 import { isWarningType, WARNING_TYPE_MAP } from "./modules/today/warnings";
 import {
@@ -1262,6 +1275,11 @@ const loginLimiter = rateLimit({
   max: 10,
 });
 
+const mfaLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+});
+
 app.post("/auth/login", loginLimiter, async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
@@ -1272,23 +1290,32 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
     res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
     return;
   }
-  const users = await prisma.user.findMany({ where: { email: parsed.data.email } });
-  if (users.length === 0) {
+  const email = normalizeEmail(parsed.data.email);
+  const users = await prisma.user.findMany({ where: { email } });
+  if (users.length !== 1) {
     res.status(401).json({ error: "Invalid credentials" });
     return;
   }
-  if (users.length > 1) {
-    res.status(400).json({ error: "Multiple orgs found for this email. Ask your admin to reset login." });
-    return;
-  }
   const user = users[0];
-  if (!user.isActive) {
-    res.status(403).json({ error: "User is inactive" });
+  if (!user.isActive || user.status !== UserStatus.ACTIVE || !user.passwordHash) {
+    res.status(401).json({ error: "Invalid credentials" });
     return;
   }
   const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
   if (!ok) {
     res.status(401).json({ error: "Invalid credentials" });
+    return;
+  }
+  const enforceMfa =
+    user.mfaEnforced || (((process.env.MFA_ENFORCE_ADMIN || "").toLowerCase() === "true") && user.role === "ADMIN");
+  if (user.mfaEnabled) {
+    const tempToken = await createMfaChallenge(user.id, MfaChallengePurpose.LOGIN);
+    res.json({ mfaRequired: true, tempToken });
+    return;
+  }
+  if (enforceMfa) {
+    const tempToken = await createMfaChallenge(user.id, MfaChallengePurpose.SETUP);
+    res.json({ mfaSetupRequired: true, tempToken });
     return;
   }
   const ipAddress =
@@ -1316,6 +1343,73 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
   });
 });
 
+app.post("/auth/login/mfa", mfaLimiter, async (req, res) => {
+  const schema = z.object({
+    tempToken: z.string().min(20),
+    code: z.string().optional(),
+    recoveryCode: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success || (!parsed.data.code && !parsed.data.recoveryCode)) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const challenge = await getMfaChallenge(parsed.data.tempToken, MfaChallengePurpose.LOGIN);
+  if (!challenge) {
+    res.status(401).json({ error: "Invalid or expired MFA token" });
+    return;
+  }
+  const user = challenge.user;
+  if (!user.isActive || user.status !== UserStatus.ACTIVE || !user.mfaEnabled) {
+    res.status(403).json({ error: "Access denied" });
+    return;
+  }
+  const recoveryHashes = parseRecoveryHashes(user.mfaRecoveryCodesHash);
+  let verified = false;
+  let nextRecoveryHashes = recoveryHashes;
+  if (parsed.data.code && user.mfaTotpSecretEncrypted) {
+    const secret = decryptSecret(user.mfaTotpSecretEncrypted);
+    verified = verifyTotp(parsed.data.code, secret);
+  }
+  if (!verified && parsed.data.recoveryCode) {
+    verified = verifyRecoveryCode(parsed.data.recoveryCode, recoveryHashes);
+    if (verified) {
+      nextRecoveryHashes = consumeRecoveryCode(parsed.data.recoveryCode, recoveryHashes);
+    }
+  }
+  if (!verified) {
+    res.status(401).json({ error: "Invalid MFA code" });
+    return;
+  }
+  const ipAddress =
+    (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
+    req.socket.remoteAddress ||
+    null;
+  const userAgent = req.headers["user-agent"] || null;
+  const session = await createSession({ userId: user.id, ipAddress, userAgent: userAgent ? String(userAgent) : null });
+  setSessionCookie(res, session.token, session.expiresAt);
+  const csrfToken = createCsrfToken();
+  setCsrfCookie(res, csrfToken);
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      lastLoginAt: new Date(),
+      mfaRecoveryCodesHash: JSON.stringify(nextRecoveryHashes),
+    },
+  });
+  await prisma.mfaChallenge.delete({ where: { id: challenge.id } });
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.name,
+      permissions: user.permissions,
+    },
+    csrfToken,
+  });
+});
+
 app.post("/auth/forgot", async (req, res) => {
   const schema = z.object({ email: z.string().email() });
   const parsed = schema.safeParse(req.body);
@@ -1325,18 +1419,15 @@ app.post("/auth/forgot", async (req, res) => {
   }
   const allowResetUrl =
     (process.env.RETURN_RESET_URL || "").toLowerCase() === "true" || process.env.NODE_ENV !== "production";
-  const users = await prisma.user.findMany({ where: { email: parsed.data.email } });
-  if (users.length === 0) {
+  const email = normalizeEmail(parsed.data.email);
+  const users = await prisma.user.findMany({ where: { email } });
+  if (users.length !== 1) {
     res.json({ message: "If an account exists, a reset link will be sent to the email address." });
     return;
   }
-  if (users.length > 1) {
-    res.status(400).json({ error: "Multiple accounts found for this email. Contact your admin." });
-    return;
-  }
   const user = users[0];
-  if (!user.isActive) {
-    res.status(403).json({ error: "User is inactive" });
+  if (!user.isActive || user.status !== UserStatus.ACTIVE) {
+    res.json({ message: "If an account exists, a reset link will be sent to the email address." });
     return;
   }
   const token = crypto.randomBytes(32).toString("hex");
@@ -1413,6 +1504,180 @@ app.post("/auth/reset", async (req, res) => {
   res.json({ message: "Password updated. You can sign in now." });
 });
 
+app.post("/auth/mfa/setup/start", mfaLimiter, async (req, res) => {
+  const schema = z.object({ tempToken: z.string().optional() });
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  let user = null as Awaited<ReturnType<typeof resolveSessionUser>> | null;
+  let challengeId: string | null = null;
+  if (parsed.data.tempToken) {
+    const challenge = await getMfaChallenge(parsed.data.tempToken, MfaChallengePurpose.SETUP);
+    if (!challenge) {
+      res.status(401).json({ error: "Invalid or expired MFA token" });
+      return;
+    }
+    user = challenge.user;
+    challengeId = challenge.id;
+  } else {
+    user = await resolveSessionUser(req);
+    if (user && !requireSessionCsrf(req, res)) {
+      return;
+    }
+  }
+  if (!user) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+  if (!user.isActive || user.status !== UserStatus.ACTIVE) {
+    res.status(403).json({ error: "Access denied" });
+    return;
+  }
+  const secret = generateTotpSecret();
+  const otpauthUrl = buildOtpAuthUrl(user.email, secret);
+  const { codes, hashes } = generateRecoveryCodes();
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      mfaTotpSecretEncrypted: encryptSecret(secret),
+      mfaRecoveryCodesHash: JSON.stringify(hashes),
+    },
+  });
+  if (challengeId) {
+    await prisma.mfaChallenge.update({
+      where: { id: challengeId },
+      data: { expiresAt: new Date(Date.now() + MFA_CHALLENGE_TTL_MINUTES * 60 * 1000) },
+    });
+  }
+  res.json({ otpauthUrl, secret, recoveryCodes: codes });
+});
+
+app.post("/auth/mfa/setup/verify", mfaLimiter, async (req, res) => {
+  const schema = z.object({
+    code: z.string().min(6),
+    tempToken: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  let user = null as Awaited<ReturnType<typeof resolveSessionUser>> | null;
+  let challenge: Awaited<ReturnType<typeof getMfaChallenge>> | null = null;
+  if (parsed.data.tempToken) {
+    challenge = await getMfaChallenge(parsed.data.tempToken, MfaChallengePurpose.SETUP);
+    if (!challenge) {
+      res.status(401).json({ error: "Invalid or expired MFA token" });
+      return;
+    }
+    user = challenge.user;
+  } else {
+    user = await resolveSessionUser(req);
+    if (user && !requireSessionCsrf(req, res)) {
+      return;
+    }
+  }
+  if (!user) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+  if (!user.isActive || user.status !== UserStatus.ACTIVE) {
+    res.status(403).json({ error: "Access denied" });
+    return;
+  }
+  if (!user.mfaTotpSecretEncrypted) {
+    res.status(400).json({ error: "MFA setup not started" });
+    return;
+  }
+  const secret = decryptSecret(user.mfaTotpSecretEncrypted);
+  if (!verifyTotp(parsed.data.code, secret)) {
+    res.status(401).json({ error: "Invalid MFA code" });
+    return;
+  }
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { mfaEnabled: true },
+  });
+  if (challenge) {
+    await prisma.mfaChallenge.delete({ where: { id: challenge.id } });
+    const ipAddress =
+      (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
+      req.socket.remoteAddress ||
+      null;
+    const userAgent = req.headers["user-agent"] || null;
+    const session = await createSession({ userId: user.id, ipAddress, userAgent: userAgent ? String(userAgent) : null });
+    setSessionCookie(res, session.token, session.expiresAt);
+    const csrfToken = createCsrfToken();
+    setCsrfCookie(res, csrfToken);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    });
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        name: user.name,
+        permissions: user.permissions,
+      },
+      csrfToken,
+    });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.post("/auth/mfa/disable", requireAuth, requireCsrf, mfaLimiter, async (req, res) => {
+  const schema = z.object({
+    password: z.string().min(6),
+    code: z.string().optional(),
+    recoveryCode: z.string().optional(),
+  });
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success || (!parsed.data.code && !parsed.data.recoveryCode)) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const user = await prisma.user.findFirst({
+    where: { id: req.user!.id, orgId: req.user!.orgId },
+  });
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+  const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
+  if (!ok) {
+    res.status(401).json({ error: "Invalid credentials" });
+    return;
+  }
+  let verified = false;
+  const recoveryHashes = parseRecoveryHashes(user.mfaRecoveryCodesHash);
+  if (parsed.data.code && user.mfaTotpSecretEncrypted) {
+    const secret = decryptSecret(user.mfaTotpSecretEncrypted);
+    verified = verifyTotp(parsed.data.code, secret);
+  }
+  if (!verified && parsed.data.recoveryCode) {
+    verified = verifyRecoveryCode(parsed.data.recoveryCode, recoveryHashes);
+  }
+  if (!verified) {
+    res.status(401).json({ error: "Invalid MFA code" });
+    return;
+  }
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      mfaEnabled: false,
+      mfaTotpSecretEncrypted: null,
+      mfaRecoveryCodesHash: null,
+      mfaEnforced: false,
+    },
+  });
+  res.json({ ok: true });
+});
+
 app.get("/auth/me", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
   const [org, userRecord] = await Promise.all([
     prisma.organization.findFirst({
@@ -1425,14 +1690,19 @@ app.get("/auth/me", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "
     }),
     prisma.user.findFirst({
       where: { id: req.user!.id, orgId: req.user!.orgId },
-      select: { canSeeAllTeams: true },
+      select: { canSeeAllTeams: true, mfaEnabled: true, mfaEnforced: true },
     }),
   ]);
   res.json({
-    user: { ...req.user, canSeeAllTeams: userRecord?.canSeeAllTeams ?? false },
+    user: {
+      ...req.user,
+      canSeeAllTeams: userRecord?.canSeeAllTeams ?? false,
+      mfaEnabled: userRecord?.mfaEnabled ?? false,
+      mfaEnforced: userRecord?.mfaEnforced ?? false,
+    },
     org: org
       ? {
-          id: org.id,
+        id: org.id,
           name: org.name,
           companyDisplayName: org.settings?.companyDisplayName ?? null,
           operatingMode: org.settings?.operatingMode ?? null,
@@ -8164,6 +8434,13 @@ app.get(
   }
 );
 
+app.get("/integrations/quickbooks/status", requireAuth, requireRole("ADMIN", "BILLING"), async (_req, res) => {
+  const enabledFlag = String(process.env.QUICKBOOKS_ENABLED || "").toLowerCase() === "true";
+  const companyId = process.env.QUICKBOOKS_COMPANY_ID || null;
+  const hasToken = Boolean(process.env.QUICKBOOKS_ACCESS_TOKEN);
+  res.json({ enabled: Boolean(enabledFlag && companyId && hasToken), companyId });
+});
+
 app.get("/billing/queue", requireAuth, requirePermission(Permission.DOC_VERIFY, Permission.INVOICE_SEND), async (req, res) => {
   const delivered = await prisma.load.findMany({
     where: { orgId: req.user!.orgId, status: { in: [LoadStatus.DELIVERED, LoadStatus.POD_RECEIVED] } },
@@ -9297,6 +9574,23 @@ app.get("/audit", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
 app.get("/admin/settings", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
   res.json({ settings });
+});
+
+app.delete("/admin/organizations/:orgId", requireAuth, requireCsrf, async (req, res) => {
+  const allowlist = parseDeleteOrgAllowlist(process.env.ADMIN_DELETE_ORG_ALLOWLIST);
+  const result = await performOrganizationDelete({
+    prisma,
+    audit: logAudit,
+    actor: req.user!,
+    orgId: req.params.orgId,
+    payload: req.body,
+    allowlist,
+  });
+  if (result.status === 204) {
+    res.sendStatus(204);
+    return;
+  }
+  res.status(result.status).json(result.body);
 });
 
 app.get("/teams", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
@@ -10681,7 +10975,7 @@ app.post("/admin/users/:id/deactivate", requireAuth, requireCsrf, requireRole("A
   }
   const updated = await prisma.user.update({
     where: { id: user.id },
-    data: { isActive: false },
+    data: { isActive: false, status: UserStatus.SUSPENDED },
   });
   await logAudit({
     orgId: req.user!.orgId,
@@ -10702,7 +10996,7 @@ app.post("/admin/users/:id/reactivate", requireAuth, requireCsrf, requireRole("A
   }
   const updated = await prisma.user.update({
     where: { id: user.id },
-    data: { isActive: true },
+    data: { isActive: true, status: UserStatus.ACTIVE },
   });
   await logAudit({
     orgId: req.user!.orgId,
@@ -10713,6 +11007,36 @@ app.post("/admin/users/:id/reactivate", requireAuth, requireCsrf, requireRole("A
     summary: `Reactivated user ${updated.email}`,
   });
   res.json({ user: updated });
+});
+
+app.post("/admin/users/:id/mfa/reset", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  if (req.params.id === req.user!.id) {
+    res.status(400).json({ error: "You cannot reset your own MFA from here." });
+    return;
+  }
+  const user = await prisma.user.findFirst({ where: { id: req.params.id, orgId: req.user!.orgId } });
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      mfaEnabled: false,
+      mfaTotpSecretEncrypted: null,
+      mfaRecoveryCodesHash: null,
+      mfaEnforced: false,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "USER_MFA_RESET",
+    entity: "User",
+    entityId: user.id,
+    summary: `Reset MFA for ${user.email}`,
+  });
+  res.json({ ok: true });
 });
 
 app.get("/admin/drivers", requireAuth, requireRole("ADMIN"), async (req, res) => {
@@ -11815,6 +12139,61 @@ app.post("/imports/commit", requireAuth, async (req, res) => {
   res.json({ created, updated, skipped, errors });
 });
 
+async function createInvite(params: { orgId: string; email: string; role: Role; invitedByUserId?: string | null }) {
+  const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashInviteToken(token);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await prisma.userInvite.deleteMany({
+    where: {
+      orgId: params.orgId,
+      email: params.email,
+      acceptedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+  });
+  const invite = await prisma.userInvite.create({
+    data: {
+      orgId: params.orgId,
+      email: params.email,
+      role: params.role,
+      tokenHash,
+      expiresAt,
+      invitedByUserId: params.invitedByUserId ?? null,
+    },
+  });
+  const inviteBase = process.env.WEB_ORIGIN || "http://localhost:3000";
+  const inviteUrl = `${inviteBase}/invite/${token}`;
+  return { invite, inviteUrl };
+}
+
+app.post("/admin/invites", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    email: z.string().email(),
+    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
+    return;
+  }
+  const email = normalizeEmail(parsed.data.email);
+  const { invite, inviteUrl } = await createInvite({
+    orgId: req.user!.orgId,
+    email,
+    role: parsed.data.role,
+    invitedByUserId: req.user!.id,
+  });
+  res.json({
+    invite: {
+      id: invite.id,
+      email: invite.email,
+      role: invite.role,
+      expiresAt: invite.expiresAt,
+      inviteUrl,
+    },
+  });
+});
+
 app.post("/users/invite-bulk", requireAuth, requirePermission(Permission.ADMIN_SETTINGS), async (req, res) => {
   const schema = z.object({ userIds: z.array(z.string()).min(1) });
   const parsed = schema.safeParse(req.body);
@@ -11825,29 +12204,29 @@ app.post("/users/invite-bulk", requireAuth, requirePermission(Permission.ADMIN_S
   const users = await prisma.user.findMany({
     where: { id: { in: parsed.data.userIds }, orgId: req.user!.orgId },
   });
-  const inviteBase = process.env.WEB_ORIGIN || "http://localhost:3000";
   const invites = [];
   for (const user of users) {
-    const token = crypto.randomBytes(32).toString("hex");
-    const tokenHash = hashInviteToken(token);
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    await prisma.userInvite.create({
-      data: { orgId: req.user!.orgId, userId: user.id, tokenHash, expiresAt },
+    const { inviteUrl } = await createInvite({
+      orgId: req.user!.orgId,
+      email: normalizeEmail(user.email),
+      role: user.role as Role,
+      invitedByUserId: req.user!.id,
     });
     invites.push({
       userId: user.id,
       email: user.email,
-      inviteUrl: `${inviteBase}/invite/${token}`,
+      inviteUrl,
     });
   }
   res.json({ invites });
 });
 
+
 app.get("/invite/:token", async (req, res) => {
   const tokenHash = hashInviteToken(req.params.token);
   const invite = await prisma.userInvite.findFirst({
-    where: { tokenHash, expiresAt: { gt: new Date() }, usedAt: null },
-    include: { user: true, org: true },
+    where: { tokenHash, expiresAt: { gt: new Date() }, acceptedAt: null },
+    include: { org: true },
   });
   if (!invite) {
     res.status(404).json({ error: "Invite not found" });
@@ -11857,7 +12236,8 @@ app.get("/invite/:token", async (req, res) => {
     invite: {
       id: invite.id,
       expiresAt: invite.expiresAt,
-      user: { id: invite.user.id, email: invite.user.email, name: invite.user.name },
+      email: invite.email,
+      role: invite.role,
       org: { id: invite.org.id, name: invite.org.name },
     },
   });
@@ -11875,22 +12255,36 @@ app.post("/invite/:token/accept", async (req, res) => {
   }
   const tokenHash = hashInviteToken(req.params.token);
   const invite = await prisma.userInvite.findFirst({
-    where: { tokenHash, expiresAt: { gt: new Date() }, usedAt: null },
+    where: { tokenHash, expiresAt: { gt: new Date() }, acceptedAt: null },
   });
   if (!invite) {
     res.status(404).json({ error: "Invite not found" });
     return;
   }
   const passwordHash = await bcrypt.hash(parsed.data.password, 10);
-  await prisma.user.update({
-    where: { id: invite.userId },
-    data: { passwordHash, isActive: true, name: parsed.data.name ?? undefined },
+  const user = await prisma.user.upsert({
+    where: { orgId_email: { orgId: invite.orgId, email: invite.email } },
+    create: {
+      orgId: invite.orgId,
+      email: invite.email,
+      name: parsed.data.name ?? null,
+      role: invite.role,
+      status: UserStatus.ACTIVE,
+      isActive: true,
+      passwordHash,
+    },
+    update: {
+      passwordHash,
+      status: UserStatus.ACTIVE,
+      isActive: true,
+      name: parsed.data.name ?? undefined,
+    },
   });
   await prisma.userInvite.update({
     where: { id: invite.id },
-    data: { usedAt: new Date() },
+    data: { acceptedAt: new Date() },
   });
-  res.json({ ok: true });
+  res.json({ ok: true, user: { id: user.id, email: user.email } });
 });
 
 function parseCsvLine(line: string) {
@@ -11982,6 +12376,77 @@ function getWeekLabel(date: Date) {
 
 function hashInviteToken(token: string) {
   return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+async function resolveSessionUser(req: { headers: any; cookies?: Record<string, string> }) {
+  const cookies = req.cookies ?? parse(req.headers.cookie || "");
+  req.cookies = cookies;
+  const token = cookies.session;
+  if (!token) return null;
+  const tokenHash = hashToken(token);
+  const session = await prisma.session.findFirst({
+    where: { tokenHash, expiresAt: { gt: new Date() }, revokedAt: null },
+    include: { user: true },
+  });
+  if (!session) return null;
+  if (!session.user.isActive || session.user.status !== UserStatus.ACTIVE) return null;
+  const now = Date.now();
+  if (!session.lastUsedAt || now - session.lastUsedAt.getTime() > 15 * 60 * 1000) {
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { lastUsedAt: new Date() },
+    });
+  }
+  return session.user;
+}
+
+function requireSessionCsrf(req: { headers: any; cookies?: Record<string, string> }, res: Response) {
+  const csrfCookie = req.cookies?.csrf;
+  const csrfHeader = req.headers["x-csrf-token"];
+  if (!csrfCookie || !csrfHeader || csrfCookie !== csrfHeader) {
+    res.status(403).json({ error: "Invalid CSRF token" });
+    return false;
+  }
+  return true;
+}
+
+const MFA_CHALLENGE_TTL_MINUTES = 10;
+
+function parseRecoveryHashes(value?: string | null) {
+  if (!value) return [] as string[];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((item) => typeof item === "string");
+    }
+  } catch {
+    // fall through
+  }
+  return [];
+}
+
+async function createMfaChallenge(userId: string, purpose: MfaChallengePurpose) {
+  const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + MFA_CHALLENGE_TTL_MINUTES * 60 * 1000);
+  await prisma.mfaChallenge.deleteMany({ where: { userId, purpose } });
+  await prisma.mfaChallenge.create({
+    data: {
+      userId,
+      tokenHash,
+      purpose,
+      expiresAt,
+    },
+  });
+  return token;
+}
+
+async function getMfaChallenge(token: string, purpose: MfaChallengePurpose) {
+  const tokenHash = hashToken(token);
+  return prisma.mfaChallenge.findFirst({
+    where: { tokenHash, purpose, expiresAt: { gt: new Date() } },
+    include: { user: true },
+  });
 }
 
 function toNumber(value: string) {
@@ -12257,34 +12722,36 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
     role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]),
     phone: z.string().optional(),
     timezone: z.string().optional(),
-    password: z.string().min(6),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
-  const passwordHash = await bcrypt.hash(parsed.data.password, 10);
-  const user = await prisma.user.create({
-    data: {
-      orgId: req.user!.orgId,
-      email: parsed.data.email,
-      name: parsed.data.name,
-      role: parsed.data.role,
-      phone: normalizeOptionalText(parsed.data.phone),
-      timezone: normalizeOptionalText(parsed.data.timezone),
-      passwordHash,
-    },
+  const email = normalizeEmail(parsed.data.email);
+  const { invite, inviteUrl } = await createInvite({
+    orgId: req.user!.orgId,
+    email,
+    role: parsed.data.role,
+    invitedByUserId: req.user!.id,
   });
   await logAudit({
     orgId: req.user!.orgId,
     userId: req.user!.id,
-    action: "USER_CREATED",
-    entity: "User",
-    entityId: user.id,
-    summary: `Created user ${user.email}`,
+    action: "USER_INVITED",
+    entity: "UserInvite",
+    entityId: invite.id,
+    summary: `Invited user ${email}`,
   });
-  res.json({ user });
+  res.json({
+    invite: {
+      id: invite.id,
+      email: invite.email,
+      role: invite.role,
+      expiresAt: invite.expiresAt,
+      inviteUrl,
+    },
+  });
 });
 
 const port = Number(process.env.PORT || process.env.API_PORT || 4000);

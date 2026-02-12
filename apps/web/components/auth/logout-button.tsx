@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { apiFetch, setCsrfToken } from "@/lib/api";
 import { Button, type ButtonProps } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { apiFetch, clearCsrfToken } from "@/lib/api";
 
 type LogoutButtonProps = {
   label?: string;
@@ -24,12 +24,13 @@ export function LogoutButton({
     if (busy) return;
     setBusy(true);
     try {
-      await apiFetch("/auth/logout", { method: "POST" });
+      await apiFetch("/auth/logout", { method: "POST", skipAuthRedirect: true });
     } catch {
-      // Ignore logout failures; still force local sign-out.
+      // ignore
     } finally {
-      setCsrfToken("");
-      window.location.href = "/";
+      clearCsrfToken();
+      window.location.href = "/login";
+      setBusy(false);
     }
   };
 

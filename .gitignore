@@ -8,19 +8,73 @@ out/
 
 # Secrets (ignore all env files, but keep examples)
 .env
+.env.local
+.env.*.local
+.env.prod.local
+.env.production
 .env.*
+apps/**/.env
+apps/**/.env.local
+apps/**/.env.*.local
+packages/**/.env
+packages/**/.env.local
+packages/**/.env.*.local
 !.env.example
-!.env.docker.example
+!.env.*.example
+!apps/**/.env.example
+!packages/**/.env.example
 
-# Uploads (local user data) - keep ignored if it's runtime-generated
+# Uploads / storage / temp
 uploads/
+**/uploads/
+storage/
+**/storage/
+tmp/
+**/tmp/
 
-# OS junk
-.DS_Store
+# Logs
+*.log
+logs/
+**/logs/
 
-# TypeScript / build caches
+# Build artifacts / caches
 *.tsbuildinfo
 dist/
 build/
 coverage/
-*.log
+.turbo/
+.cache/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local tooling / runtime junk
+.envrc
+.direnv/
+.vercel/
+.railway/
+.history/
+.eslintcache
+.stylelintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local secrets / certs / dbs
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.bak
