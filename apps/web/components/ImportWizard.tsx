@@ -87,17 +87,34 @@ export function ImportWizard({
     URL.revokeObjectURL(url);
   };
 
-  const handleFile = (file: File | null) => {
+  const handleFile = async (file: File | null) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setCsvText(String(reader.result || ""));
+    const isXlsx =
+      file.name.toLowerCase().endsWith(".xlsx") ||
+      file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    try {
+      if (isXlsx) {
+        const buffer = await file.arrayBuffer();
+        const XLSX = await import("xlsx");
+        const workbook = XLSX.read(buffer, { type: "array" });
+        const firstSheet = workbook.SheetNames[0];
+        const sheet = firstSheet ? workbook.Sheets[firstSheet] : null;
+        const csv = sheet ? XLSX.utils.sheet_to_csv(sheet) : "";
+        setCsvText(csv);
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          setCsvText(String(reader.result || ""));
+        };
+        reader.readAsText(file);
+      }
       setPreview(null);
       setResult(null);
       setError(null);
       setColumnMapping({});
-    };
-    reader.readAsText(file);
+    } catch (err) {
+      setError((err as Error).message || "Unable to read file.");
+    }
   };
 
   const runPreview = async () => {
@@ -177,8 +194,12 @@ export function ImportWizard({
         <Button variant="secondary" onClick={downloadTemplate}>Download template</Button>
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
-        <FormField label="Upload CSV" htmlFor="importCsv" hint="Upload a CSV file from the template">
-          <Input type="file" accept=".csv" onChange={(e) => handleFile(e.target.files?.[0] ?? null)} />
+        <FormField label="Upload file" htmlFor="importCsv" hint="Upload a CSV or XLSX file from the template">
+          <Input
+            type="file"
+            accept=".csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+          />
         </FormField>
         <FormField label="Or paste CSV" htmlFor="csvPaste" hint="Paste rows directly if needed">
           <Textarea
