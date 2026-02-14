@@ -1331,6 +1331,16 @@ export default function LoadDetailsPage() {
                     Download PDF
                   </Button>
                 ) : null}
+                {invoice?.packetPath ? (
+                  <Button
+                    variant="secondary"
+                    onClick={() =>
+                      window.open(`${API_BASE}/files/packets/${invoice.packetPath.split("/").pop()}`, "_blank")
+                    }
+                  >
+                    Download Packet
+                  </Button>
+                ) : null}
               </div>
               {billingActionError ? (
                 <div className="text-xs text-[color:var(--color-danger)]">{billingActionError}</div>
@@ -1832,6 +1842,15 @@ export default function LoadDetailsPage() {
               {invoice?.pdfPath ? (
                 <Button size="sm" variant="secondary" onClick={() => window.open(`${API_BASE}/invoices/${invoice.id}/pdf`, "_blank")}>
                   Download PDF
+                </Button>
+              ) : null}
+              {invoice?.packetPath ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => window.open(`${API_BASE}/files/packets/${invoice.packetPath.split("/").pop()}`, "_blank")}
+                >
+                  Download Packet
                 </Button>
               ) : null}
             </Card>

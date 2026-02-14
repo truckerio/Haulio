@@ -13,8 +13,9 @@ export async function generatePacketZip(params: {
 }) {
   await ensureUploadDirs();
   const filename = `${params.invoiceNumber}.zip`;
-  const relativePath = path.posix.join("packets", filename);
+  const relativePath = path.posix.join("org", params.orgId, "packets", filename);
   const filePath = resolveUploadPath(relativePath);
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 
   const docRecords = await prisma.document.findMany({
     where: { loadId: params.loadId, orgId: params.orgId },

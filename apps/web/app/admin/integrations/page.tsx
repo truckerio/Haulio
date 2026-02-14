@@ -21,6 +21,7 @@ export default function IntegrationsSettingsPage() {
   const [truckMappings, setTruckMappings] = useState<any[]>([]);
   const [trucks, setTrucks] = useState<any[]>([]);
   const [mappingEdits, setMappingEdits] = useState<Record<string, string>>({});
+  const [quickbooksStatus, setQuickbooksStatus] = useState<{ enabled: boolean; companyId: string | null } | null>(null);
   const [fuelStatus, setFuelStatus] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visibleTruckCount, setVisibleTruckCount] = useState(5);
@@ -32,13 +33,15 @@ export default function IntegrationsSettingsPage() {
         apiFetch<{ mappings: any[] }>("/api/integrations/samsara/truck-mappings"),
         apiFetch<{ trucks: any[] }>("/admin/trucks"),
         apiFetch<{ status: string }>("/admin/fuel/status"),
+        apiFetch<{ enabled: boolean; companyId: string | null }>("/integrations/quickbooks/status"),
       ]);
-      const [samsaraResult, mappingResult, trucksResult, fuelResult] = results;
+      const [samsaraResult, mappingResult, trucksResult, fuelResult, quickbooksResult] = results;
 
       if (samsaraResult.status === "fulfilled") setSamsaraStatus(samsaraResult.value.integration ?? null);
       if (mappingResult.status === "fulfilled") setTruckMappings(mappingResult.value.mappings ?? []);
       if (trucksResult.status === "fulfilled") setTrucks(trucksResult.value.trucks ?? []);
       if (fuelResult.status === "fulfilled") setFuelStatus(fuelResult.value ?? null);
+      if (quickbooksResult.status === "fulfilled") setQuickbooksStatus(quickbooksResult.value ?? null);
       setError(null);
     } catch (err) {
       setError((err as Error).message || "Failed to load integrations.");
@@ -181,6 +184,33 @@ export default function IntegrationsSettingsPage() {
                     Load more
                   </Button>
                 ) : null}
+              </div>
+            </div>
+          </Card>
+
+          <Card className="space-y-4">
+            <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Accounting</div>
+            <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-lg font-semibold">QuickBooks</div>
+                  <div className="text-sm text-[color:var(--color-text-muted)]">
+                    Status: {quickbooksStatus?.enabled ? "ENABLED" : "DISABLED"}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
+                    <StatusChip label={quickbooksStatus?.enabled ? "Configured" : "Needs setup"} tone={quickbooksStatus?.enabled ? "success" : "warning"} />
+                    <span>Company ID: {quickbooksStatus?.companyId ?? "Not configured"}</span>
+                  </div>
+                  <div className="mt-3 text-xs text-[color:var(--color-text-muted)]">
+                    Configure via env vars: <code>QUICKBOOKS_ENABLED</code>, <code>QUICKBOOKS_COMPANY_ID</code>,{" "}
+                    <code>QUICKBOOKS_ACCESS_TOKEN</code>.
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => router.push("/finance")}>
+                    Open Finance settings
+                  </Button>
+                </div>
               </div>
             </div>
           </Card>

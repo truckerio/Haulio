@@ -125,6 +125,7 @@ export function renderInvoiceHtml(params: {
 }
 
 export async function generateInvoicePdf(params: {
+  orgId: string;
   invoiceNumber: string;
   load: Load & { customer?: Customer | null };
   stops: Stop[];
@@ -136,8 +137,9 @@ export async function generateInvoicePdf(params: {
   await ensureUploadDirs();
   const html = renderInvoiceHtml(params);
   const filename = `${params.invoiceNumber}.pdf`;
-  const relativePath = path.posix.join("invoices", filename);
+  const relativePath = path.posix.join("org", params.orgId, "invoices", filename);
   const filePath = resolveUploadPath(relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
 
   const launchArgs =
     process.env.PUPPETEER_NO_SANDBOX === "true"

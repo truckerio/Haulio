@@ -63,33 +63,93 @@ type HeaderKey =
 
 const normalizedHeaderToKey: Record<string, HeaderKey> = {
   load: "load",
+  loadnumber: "load",
+  loadno: "load",
   trip: "trip",
+  tripnumber: "trip",
+  tripno: "trip",
   status: "status",
+  loadstatus: "status",
   customer: "customer",
+  customername: "customer",
   custref: "custref",
+  customerref: "custref",
+  customerreference: "custref",
   unit: "unit",
+  truck: "unit",
+  truckunit: "unit",
+  tractor: "unit",
+  powerunit: "unit",
   trailer: "trailer",
+  trailerno: "trailer",
+  trailernumber: "trailer",
   aswgt: "aswgt",
+  weight: "aswgt",
+  weightlbs: "aswgt",
+  weightlb: "aswgt",
   totalrev: "totalrev",
+  totalrevenue: "totalrev",
+  revenue: "totalrev",
+  rate: "totalrev",
   pudatef: "pudatef",
+  pudate: "pudatef",
+  pickupdate: "pudatef",
+  pickupdatefrom: "pudatef",
   putimef: "putimef",
+  putime: "putimef",
+  pickuptime: "putimef",
+  pickuptimefrom: "putimef",
   putimet: "putimet",
+  pickuptimeto: "putimet",
+  pickuptimeend: "putimet",
   shipper: "shipper",
+  shippername: "shipper",
+  pickupname: "shipper",
   shipcity: "shipcity",
+  pickupcity: "shipcity",
   shipst: "shipst",
+  pickupstate: "shipst",
   deldatef: "deldatef",
+  deldate: "deldatef",
+  deliverydate: "deldatef",
+  deliverydatefrom: "deldatef",
   deltimet: "deltimet",
+  deltime: "deltimet",
+  deliverytime: "deltimet",
   consignee: "consignee",
+  consigneename: "consignee",
+  receiver: "consignee",
+  deliveryname: "consignee",
   conscity: "conscity",
+  consigneecity: "conscity",
+  receivercity: "conscity",
+  deliverycity: "conscity",
   consst: "consst",
+  consigneestate: "consst",
+  receiverstate: "consst",
+  deliverystate: "consst",
   sales: "sales",
+  salesrep: "sales",
+  salesrepname: "sales",
   dropname: "dropname",
+  drop: "dropname",
+  dropoff: "dropname",
+  dropoffname: "dropname",
   loadnotesshipper: "loadnotesshipper",
+  pickupnotes: "loadnotesshipper",
+  shippernotes: "loadnotesshipper",
   loadnotesconsignee: "loadnotesconsignee",
+  deliverynotes: "loadnotesconsignee",
+  consigneenotes: "loadnotesconsignee",
+  receivernotes: "loadnotesconsignee",
   loadnotes: "loadnotesshipper",
   invdate: "invdate",
+  invoicedate: "invdate",
   deldatet: "deldatet",
+  deliverydateto: "deldatet",
+  deliverydateend: "deldatet",
   type: "type",
+  loadtype: "type",
 };
 
 const requiredKeys: HeaderKey[] = [
@@ -246,17 +306,22 @@ export function parseCsvText(content: string) {
 }
 
 export function validateTmsHeaders(columns: string[]) {
-  const headerMap = new Map(columns.map((header) => [normalizeHeader(header), header]));
-  const missing: string[] = [];
-  for (const header of TMS_LOAD_SHEET_HEADERS) {
-    if (!headerMap.has(normalizeHeader(header))) {
-      missing.push(header);
-    }
-  }
-  const unexpected = columns.filter(
-    (header) => !TMS_LOAD_SHEET_HEADERS.some((expected) => normalizeHeader(expected) === normalizeHeader(header))
+  const columnMap = buildColumnMap(columns);
+  const presentKeys = new Set(columnMap.keys());
+  const missingRequired = requiredKeys.filter((key) => !presentKeys.has(key));
+  const allKeys = Array.from(
+    new Set(
+      TMS_LOAD_SHEET_HEADERS.map((header) => normalizedHeaderToKey[normalizeHeader(header)]).filter(
+        (key): key is HeaderKey => Boolean(key)
+      )
+    )
   );
-  return { missing, unexpected };
+  const missingOptional = allKeys
+    .filter((key) => !requiredKeys.includes(key) && !presentKeys.has(key))
+    .map((key) => keyLabels[key]);
+  const unexpected = columns.filter((header) => !normalizedHeaderToKey[normalizeHeader(header)]);
+  const missingRequiredLabels = missingRequired.map((key) => keyLabels[key]);
+  return { missingRequired, missingRequiredLabels, missingOptional, unexpected };
 }
 
 function parseDateParts(value: string) {
@@ -617,15 +682,18 @@ export function evaluateTmsRow(params: {
 
 export function previewTmsLoadSheet(params: { csvText: string; context: TmsLoadSheetContext }) {
   const { columns, rows } = parseCsvText(params.csvText);
-  const { missing, unexpected } = validateTmsHeaders(columns);
+  const { missingRequired, missingRequiredLabels, missingOptional, unexpected } = validateTmsHeaders(columns);
   const headerWarnings: string[] = [];
-  if (missing.length > 0) {
-    headerWarnings.push(`Missing headers: ${missing.join(", ")}`);
+  if (missingRequired.length > 0) {
+    headerWarnings.push(`Missing required headers: ${missingRequiredLabels.join(", ")}`);
+  }
+  if (missingOptional.length > 0) {
+    headerWarnings.push(`Missing optional headers: ${missingOptional.join(", ")}`);
   }
   if (unexpected.length > 0) {
     headerWarnings.push(`Unexpected headers: ${unexpected.join(", ")}`);
   }
-  if (missing.length > 0) {
+  if (missingRequired.length > 0) {
     return {
       columns,
       rows: [] as TmsPreviewRow[],

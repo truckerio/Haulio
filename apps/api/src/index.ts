@@ -8679,6 +8679,7 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
   });
 
   const { filePath } = await generateInvoicePdf({
+    orgId: params.orgId,
     invoiceNumber: invoiceResult.invoiceNumber,
     load,
     stops: load.stops,
@@ -8988,7 +8989,7 @@ app.get("/invoices/:id/pdf", requireAuth, requireRole("ADMIN", "DISPATCHER", "BI
     res.status(404).json({ error: "Invoice PDF not found" });
     return;
   }
-  if (!relativePath.startsWith("invoices/")) {
+  if (!relativePath.startsWith("invoices/") && !relativePath.startsWith("org/")) {
     relativePath = path.posix.join("invoices", path.basename(relativePath));
   }
   const baseDir = getUploadDir();
@@ -9375,6 +9376,7 @@ app.get("/files/:type/:name", requireAuth, requireRole("ADMIN", "DISPATCHER", "B
     return;
   }
   let allowed = false;
+  let invoice: { pdfPath?: string | null; packetPath?: string | null; load?: { assignedDriverId: string | null } } | null = null;
   const isDriver = req.user!.role === "DRIVER";
   let driverId: string | null = null;
   if (isDriver) {
@@ -9402,7 +9404,7 @@ app.get("/files/:type/:name", requireAuth, requireRole("ADMIN", "DISPATCHER", "B
     }
   } else if (type === "invoices") {
     const relPath = `${type}/${name}`;
-    const invoice = await prisma.invoice.findFirst({
+    invoice = await prisma.invoice.findFirst({
       where: {
         orgId: req.user!.orgId,
         OR: [{ pdfPath: relPath }, { pdfPath: { endsWith: `/${type}/${name}` } }],
@@ -9418,7 +9420,7 @@ app.get("/files/:type/:name", requireAuth, requireRole("ADMIN", "DISPATCHER", "B
     }
   } else if (type === "packets") {
     const relPath = `${type}/${name}`;
-    const invoice = await prisma.invoice.findFirst({
+    invoice = await prisma.invoice.findFirst({
       where: {
         orgId: req.user!.orgId,
         OR: [{ packetPath: relPath }, { packetPath: { endsWith: `/${type}/${name}` } }],
@@ -9472,9 +9474,19 @@ app.get("/files/:type/:name", requireAuth, requireRole("ADMIN", "DISPATCHER", "B
     res.status(404).json({ error: "File not found" });
     return;
   }
+  let relativePath = `${type}/${name}`;
+  if (type === "invoices" || type === "packets") {
+    const targetPath = type === "invoices" ? invoice?.pdfPath : invoice?.packetPath;
+    if (targetPath) {
+      const resolved = toRelativeUploadPath(targetPath);
+      if (resolved) {
+        relativePath = resolved;
+      }
+    }
+  }
   let filePath: string;
   try {
-    filePath = resolveUploadPath(`${type}/${name}`);
+    filePath = resolveUploadPath(relativePath);
   } catch {
     res.status(400).json({ error: "Invalid file path" });
     return;
@@ -11728,9 +11740,9 @@ app.post("/imports/commit", requireAuth, async (req, res) => {
     }
     const orgId = req.user.orgId;
     const { columns, rows } = parseTmsCsvText(parsed.data.csvText);
-    const { missing } = validateTmsHeaders(columns);
-    if (missing.length > 0) {
-      res.status(400).json({ error: `Missing required headers: ${missing.join(", ")}` });
+    const { missingRequired, missingRequiredLabels } = validateTmsHeaders(columns);
+    if (missingRequired.length > 0) {
+      res.status(400).json({ error: `Missing required headers: ${missingRequiredLabels.join(", ")}` });
       return;
     }
 
