@@ -10510,10 +10510,18 @@ app.post("/admin/teams", requireAuth, requireCsrf, requireRole("ADMIN"), async (
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
-  const team = await prisma.team.create({
-    data: { orgId: req.user!.orgId, name: parsed.data.name, active: true },
-  });
-  res.json({ team: { id: team.id, name: team.name, active: team.active } });
+  try {
+    const team = await prisma.team.create({
+      data: { orgId: req.user!.orgId, name: parsed.data.name, active: true },
+    });
+    res.json({ team: { id: team.id, name: team.name, active: team.active } });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      res.status(409).json({ error: "Team name already exists" });
+      return;
+    }
+    sendServerError(res, "Failed to create team", error);
+  }
 });
 
 app.patch("/admin/teams/:id", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
@@ -10533,14 +10541,30 @@ app.patch("/admin/teams/:id", requireAuth, requireCsrf, requireRole("ADMIN"), as
     res.status(404).json({ error: "Team not found" });
     return;
   }
-  const team = await prisma.team.update({
-    where: { id: existing.id },
-    data: {
-      name: parsed.data.name ?? existing.name,
-      active: parsed.data.active ?? existing.active,
-    },
-  });
-  res.json({ team: { id: team.id, name: team.name, active: team.active } });
+  if (existing.name === DEFAULT_TEAM_NAME && parsed.data.name && parsed.data.name !== DEFAULT_TEAM_NAME) {
+    res.status(400).json({ error: "Default team name cannot be changed" });
+    return;
+  }
+  if (existing.name === DEFAULT_TEAM_NAME && parsed.data.active === false) {
+    res.status(400).json({ error: "Default team cannot be deactivated" });
+    return;
+  }
+  try {
+    const team = await prisma.team.update({
+      where: { id: existing.id },
+      data: {
+        name: parsed.data.name ?? existing.name,
+        active: parsed.data.active ?? existing.active,
+      },
+    });
+    res.json({ team: { id: team.id, name: team.name, active: team.active } });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      res.status(409).json({ error: "Team name already exists" });
+      return;
+    }
+    sendServerError(res, "Failed to update team", error);
+  }
 });
 
 app.post("/admin/teams/:id/members", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
@@ -10588,6 +10612,89 @@ app.delete("/admin/teams/:id/members/:userId", requireAuth, requireCsrf, require
     where: { orgId: req.user!.orgId, teamId: team.id, userId: req.params.userId },
   });
   res.json({ ok: true });
+});
+
+app.delete("/admin/teams/:id", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const orgId = req.user!.orgId;
+  const existing = await prisma.team.findFirst({
+    where: { id: req.params.id, orgId },
+    select: { id: true, name: true, active: true },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Team not found" });
+    return;
+  }
+
+  const defaultTeam = await ensureDefaultTeamForOrg(orgId);
+  if (existing.id === defaultTeam.id || existing.name === DEFAULT_TEAM_NAME) {
+    res.status(400).json({ error: "Default team cannot be deleted" });
+    return;
+  }
+
+  try {
+    const before = await prisma.team.findFirst({
+      where: { id: existing.id, orgId },
+      include: {
+        members: { select: { userId: true } },
+        assignments: { select: { id: true, entityType: true, entityId: true } },
+      },
+    });
+    if (!before) {
+      res.status(404).json({ error: "Team not found" });
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.user.updateMany({
+        where: { orgId, defaultTeamId: existing.id },
+        data: { defaultTeamId: defaultTeam.id },
+      });
+
+      const assignments = await tx.teamAssignment.findMany({
+        where: { orgId, teamId: existing.id },
+        select: { entityType: true, entityId: true },
+      });
+      if (assignments.length > 0) {
+        await tx.teamAssignment.createMany({
+          data: assignments.map((assignment) => ({
+            orgId,
+            teamId: defaultTeam.id,
+            entityType: assignment.entityType,
+            entityId: assignment.entityId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      await tx.teamAssignment.deleteMany({ where: { orgId, teamId: existing.id } });
+      await tx.teamMember.deleteMany({ where: { orgId, teamId: existing.id } });
+      await tx.team.delete({ where: { id: existing.id } });
+    });
+
+    await logAudit({
+      orgId,
+      userId: req.user!.id,
+      action: "TEAM_DELETED",
+      entity: "Team",
+      entityId: existing.id,
+      summary: `Deleted team ${existing.name}`,
+      before: {
+        id: before.id,
+        name: before.name,
+        active: before.active,
+        members: before.members.length,
+        assignments: before.assignments.length,
+      },
+      after: {
+        deleted: true,
+        reassignedToDefaultTeamId: defaultTeam.id,
+      },
+    });
+
+    res.json({ ok: true, reassignedToTeamId: defaultTeam.id, reassignedToTeamName: defaultTeam.name });
+  } catch (error) {
+    sendServerError(res, "Failed to delete team", error);
+  }
 });
 
 app.post("/admin/teams/assign", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {

@@ -176,9 +176,9 @@ function TeamsOpsContent() {
           <div className="text-lg font-semibold text-ink">Team distribution</div>
         </div>
         {showManageLink ? (
-          <Link href="/admin">
+          <Link href="/teams/settings">
             <Button size="sm" variant="secondary">
-              Manage teams
+              Team settings
             </Button>
           </Link>
         ) : null}
