@@ -2,7 +2,6 @@ export type BlockerType =
   | "POD_MISSING"
   | "DOCS_REJECTED"
   | "DOCS_UNDER_REVIEW"
-  | "RATECON_MISSING"
   | "TRACKING_OFF_IN_TRANSIT"
   | "NEEDS_DISPATCH";
 
@@ -28,15 +27,6 @@ export type PrimaryAction = {
 
 export function deriveOpsStatus(load: any) {
   return load?.status ?? "PLANNED";
-}
-
-export function deriveBillingStatus(load: any) {
-  if (!load?.status) return null;
-  if (load.status === "PAID") return "PAID";
-  if (load.status === "INVOICED") return "INVOICED";
-  if (load.status === "READY_TO_INVOICE") return "READY_TO_INVOICE";
-  if (load.status === "DELIVERED" || load.status === "POD_RECEIVED") return "DOCS_NEEDED";
-  return null;
 }
 
 function formatAge(dateValue?: string | null) {
@@ -182,7 +172,6 @@ export function derivePrimaryAction(
   const canUpload = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER";
   const canTrack = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER" || role === "DRIVER";
   const podLink = `/loads/${load.id}?tab=documents&docType=POD#pod`;
-  const rateconLink = `/loads/${load.id}?tab=documents&docType=RATECON#ratecon`;
 
   if (blocker?.type === "POD_MISSING") {
     if (canUpload) {
@@ -201,12 +190,6 @@ export function derivePrimaryAction(
       return { label: "Review POD", href: podLink };
     }
     return { label: "Open documents", href: podLink };
-  }
-  if (blocker?.type === "RATECON_MISSING") {
-    if (canUpload) {
-      return { label: "Upload RateCon", href: rateconLink };
-    }
-    return { label: "Open documents", href: rateconLink };
   }
   if (load?.status === "READY_TO_INVOICE") {
     if (canBilling) {

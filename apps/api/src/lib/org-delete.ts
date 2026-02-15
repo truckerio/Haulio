@@ -56,7 +56,7 @@ export async function deleteOrganizationData(tx: Prisma.TransactionClient, orgId
   await tx.driverStats.deleteMany({ where: { orgId } });
   await tx.trailerManifest.deleteMany({ where: { orgId } });
   await tx.auditLog.deleteMany({ where: { orgId } });
-  await tx.userNotificationPref.deleteMany({ where: { orgId } });
+  await tx.userNotificationPref.deleteMany({ where: { user: { orgId } } });
   await tx.userInvite.deleteMany({ where: { orgId } });
   await tx.passwordReset.deleteMany({ where: { orgId } });
   await tx.session.deleteMany({ where: { user: { orgId } } });

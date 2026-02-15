@@ -12,6 +12,7 @@ type Session = {
 };
 
 const statePath = path.resolve(repoRoot, "scripts/qa/qa-state.json");
+const qaApiLogPath = path.resolve(repoRoot, "scripts/qa/qa-api.log");
 
 function readState() {
   if (!fs.existsSync(statePath)) {
@@ -34,17 +35,67 @@ async function waitForHealth(baseUrl: string, timeoutMs = 15000) {
   throw new Error("API health check failed");
 }
 
+function readApiLogTail(lines = 80) {
+  try {
+    if (!fs.existsSync(qaApiLogPath)) return "";
+    const text = fs.readFileSync(qaApiLogPath, "utf8");
+    return text.split(/\r?\n/).slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function detectSchemaMismatch(logTail: string) {
+  return (
+    logTail.includes("PrismaClientKnownRequestError") &&
+    logTail.includes("does not exist in the current database")
+  );
+}
+
+async function fetchWithContext(url: string, init?: RequestInit) {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    const method = init?.method || "GET";
+    const tail = readApiLogTail(60);
+    const schemaHint = detectSchemaMismatch(tail)
+      ? "\nDetected API crash due to schema mismatch. Run `pnpm qa:setup` to rebuild QA DB schema."
+      : "";
+    const logHint = tail ? `\nqa-api.log tail:\n${tail}` : "";
+    throw new Error(`Network error during ${method} ${url}: ${(error as Error).message}${schemaHint}${logHint}`);
+  }
+}
+
 async function startApi(baseUrl: string, qaUrl: string) {
   const logPath = path.resolve(repoRoot, "scripts/qa/qa-api.log");
   const logStream = fs.createWriteStream(logPath, { flags: "w" });
   const port = process.env.QA_API_PORT || "4010";
+  const uploadDir = process.env.QA_UPLOAD_DIR || path.resolve(repoRoot, "uploads", "qa");
+  fs.mkdirSync(uploadDir, { recursive: true });
   const child = spawn("pnpm", ["--filter", "@truckerio/api", "dev"], {
-    env: { ...process.env, DATABASE_URL: qaUrl, API_PORT: port },
+    env: {
+      ...process.env,
+      DATABASE_URL: qaUrl,
+      API_PORT: port,
+      UPLOAD_DIR: uploadDir,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.pipe(logStream);
   child.stderr?.pipe(logStream);
-  await waitForHealth(baseUrl, 60000);
+  try {
+    await waitForHealth(baseUrl, 60000);
+  } catch {
+    child.kill("SIGTERM");
+    let tail = "";
+    try {
+      const text = fs.readFileSync(logPath, "utf8");
+      tail = text.split(/\r?\n/).slice(-40).join("\n");
+    } catch {
+      // ignore log read failure
+    }
+    throw new Error(`API health check failed after auto-start. Log: ${logPath}\n${tail}`);
+  }
   return { child, logPath };
 }
 
@@ -67,7 +118,7 @@ function parseCookies(headers: Headers) {
 }
 
 async function login(baseUrl: string, email: string, password: string): Promise<Session> {
-  const res = await fetch(`${baseUrl}/auth/login`, {
+  const res = await fetchWithContext(`${baseUrl}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
@@ -92,10 +143,11 @@ async function apiJson<T>(baseUrl: string, session: Session, path: string, init:
   if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(`${baseUrl}${path}`, { ...init, headers });
+  const res = await fetchWithContext(`${baseUrl}${path}`, { ...init, headers });
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(payload.error || `Request failed (${res.status})`);
+    const message = payload.error || payload.message || payload.code || `Request failed (${res.status})`;
+    throw new Error(`${message} [${init.method || "GET"} ${path}]`);
   }
   return payload as T;
 }
@@ -104,12 +156,20 @@ async function apiForm<T>(baseUrl: string, session: Session, path: string, form:
   const headers = new Headers();
   headers.set("Cookie", session.cookie);
   headers.set("x-csrf-token", session.csrfToken);
-  const res = await fetch(`${baseUrl}${path}`, { method: "POST", headers, body: form });
+  const res = await fetchWithContext(`${baseUrl}${path}`, { method: "POST", headers, body: form });
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(payload.error || `Request failed (${res.status})`);
+    const message = payload.error || payload.message || payload.code || `Request failed (${res.status})`;
+    throw new Error(`${message} [POST ${path}]`);
   }
   return payload as T;
+}
+
+async function findLoadIdsByFilter(baseUrl: string, session: Session, key: string, value: string) {
+  const params = new URLSearchParams();
+  params.set(key, value);
+  const list = await apiJson<{ loads: Array<{ id: string }> }>(baseUrl, session, `/loads?${params.toString()}`);
+  return (list.loads || []).map((load) => load.id);
 }
 
 function buildStops() {
@@ -169,6 +229,23 @@ async function main() {
     let stopIds: string[] = [];
     let podDocId = "";
     let invoiceId = "";
+
+    await runStep("qa.smoke.cleanup.assignments", async () => {
+      const loadIds = new Set<string>();
+      for (const id of await findLoadIdsByFilter(baseUrl, dispatcherA, "driverId", state.orgA.driverId)) {
+        loadIds.add(id);
+      }
+      for (const id of await findLoadIdsByFilter(baseUrl, dispatcherA, "truckId", state.orgA.truckId)) {
+        loadIds.add(id);
+      }
+      for (const id of await findLoadIdsByFilter(baseUrl, dispatcherA, "trailerId", state.orgA.trailerId)) {
+        loadIds.add(id);
+      }
+      for (const loadId of loadIds) {
+        await apiJson(baseUrl, dispatcherA, `/loads/${loadId}/unassign`, { method: "POST" });
+      }
+      return { details: `Unassigned ${loadIds.size} existing load(s) for QA seed assets` };
+    });
 
     await runStep("qa.smoke.multitenant", async () => {
       const loadA = await apiJson<{ load: any }>(baseUrl, adminA, "/loads", {
@@ -238,10 +315,7 @@ async function main() {
 
     for (const stopId of stopIds) {
       await apiJson(baseUrl, driverA, `/driver/stops/${stopId}/arrive`, { method: "POST" });
-      const stop = load.load.stops.find((s: any) => s.id === stopId);
-      if (stop.type !== "DELIVERY") {
-        await apiJson(baseUrl, driverA, `/driver/stops/${stopId}/depart`, { method: "POST" });
-      }
+      await apiJson(baseUrl, driverA, `/driver/stops/${stopId}/depart`, { method: "POST" });
     }
 
     const updated = await apiJson<{ load: any }>(baseUrl, dispatcherA, `/loads/${loadAId}`);
@@ -255,7 +329,8 @@ async function main() {
     const podForm = new FormData();
     podForm.append("file", new Blob([Buffer.from("QA POD")], { type: "application/pdf" }), "pod.pdf");
     podForm.append("type", "POD");
-    const upload = await apiForm<{ doc: any }>(baseUrl, driverA, `/loads/${loadAId}/docs`, podForm);
+    podForm.append("loadId", loadAId);
+    const upload = await apiForm<{ doc: any }>(baseUrl, driverA, "/driver/docs", podForm);
     podDocId = upload.doc.id;
 
     await apiJson(baseUrl, billingA, `/docs/${podDocId}/reject`, {
@@ -266,7 +341,8 @@ async function main() {
     const podForm2 = new FormData();
     podForm2.append("file", new Blob([Buffer.from("QA POD 2")], { type: "application/pdf" }), "pod2.pdf");
     podForm2.append("type", "POD");
-    const upload2 = await apiForm<{ doc: any }>(baseUrl, driverA, `/loads/${loadAId}/docs`, podForm2);
+    podForm2.append("loadId", loadAId);
+    const upload2 = await apiForm<{ doc: any }>(baseUrl, driverA, "/driver/docs", podForm2);
     podDocId = upload2.doc.id;
 
     const verify = await apiJson<{ doc: any; invoice: any }>(baseUrl, billingA, `/docs/${podDocId}/verify`, {
@@ -279,18 +355,27 @@ async function main() {
 
   await runStep("qa.smoke.billing.queue", async () => {
     const queue = await apiJson<{ delivered: any[]; ready: any[]; invoiced: any[] }>(baseUrl, billingA, "/billing/queue");
-    const found = queue.invoiced.some((load) => load.id === loadAId) || queue.ready.some((load) => load.id === loadAId);
+    const inDelivered = queue.delivered.some((load) => load.id === loadAId);
+    const inReady = queue.ready.some((load) => load.id === loadAId);
+    const inInvoiced = queue.invoiced.some((load) => load.id === loadAId);
+    const found = inDelivered || inReady || inInvoiced;
     if (!found) {
-      throw new Error("Load not present in billing queue");
+      throw new Error(
+        `Load not present in billing queue (delivered=${queue.delivered.length}, ready=${queue.ready.length}, invoiced=${queue.invoiced.length})`
+      );
     }
-    return { details: "Load visible in billing queue" };
+    const bucket = inInvoiced ? "invoiced" : inReady ? "ready" : "delivered";
+    return { details: `Load visible in billing queue (${bucket})` };
   });
 
   await runStep("qa.smoke.invoicing", async () => {
-    if (!invoiceId) {
-      const load = await apiJson<{ load: any }>(baseUrl, billingA, `/loads/${loadAId}`);
-      invoiceId = load.load.invoices?.[0]?.id ?? "";
-    }
+    const generated = await apiJson<{ invoice?: { id: string }; missingDocs?: string[] }>(
+      baseUrl,
+      billingA,
+      `/billing/invoices/${loadAId}/generate`,
+      { method: "POST" }
+    );
+    invoiceId = generated.invoice?.id ?? invoiceId;
     if (!invoiceId) {
       throw new Error("Invoice not found after POD verify");
     }
@@ -304,12 +389,10 @@ async function main() {
   });
 
   await runStep("qa.smoke.settlements", async () => {
-    const today = new Date();
-    const start = new Date(today);
-    start.setDate(start.getDate() - 2);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(today);
-    end.setHours(23, 59, 59, 999);
+    // Use a per-run time window to avoid duplicate (driverId, periodStart, periodEnd)
+    // conflicts when smoke is re-run repeatedly on the same QA seed data.
+    const end = new Date();
+    const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
     const settlement = await apiJson<{ settlement: any }>(baseUrl, billingA, "/settlements/generate", {
       method: "POST",
       body: JSON.stringify({
@@ -340,7 +423,10 @@ async function main() {
     if (!errorOk) {
       throw new Error("CSV preview should fail on missing columns");
     }
-    const csvText = "name,phone,license,payRatePerMile,licenseExpiresAt,medCardExpiresAt\nQA Driver B,5551239999,D999,0.5,2027-01-01,2027-01-01\n";
+    const suffix = String(Date.now()).slice(-6);
+    const csvText = `name,phone,license,payRatePerMile,licenseExpiresAt,medCardExpiresAt
+QA Driver ${suffix},55512${suffix},D${suffix},0.5,2027-01-01,2027-01-01
+`;
     const preview = await apiJson<any>(baseUrl, adminA, "/imports/preview", {
       method: "POST",
       body: JSON.stringify({ type: "drivers", csvText }),
@@ -352,8 +438,13 @@ async function main() {
       method: "POST",
       body: JSON.stringify({ type: "drivers", csvText }),
     });
-    if (!Array.isArray(commit.created) || commit.created.length < 1) {
-      throw new Error("CSV commit did not create driver");
+    const createdCount = Array.isArray(commit.created) ? commit.created.length : 0;
+    const updatedCount = Array.isArray(commit.updated) ? commit.updated.length : 0;
+    if (createdCount + updatedCount < 1) {
+      throw new Error("CSV commit did not create or update any driver");
+    }
+    if (Array.isArray(commit.errors) && commit.errors.length > 0) {
+      throw new Error("CSV commit returned row errors");
     }
     return { details: "CSV import preview + commit ok" };
   });
@@ -363,25 +454,51 @@ async function main() {
     form.append("files", new Blob([pngBuffer()], { type: "image/png" }), "qa-confirmation.png");
     const upload = await apiForm<{ docs: any[] }>(baseUrl, adminA, "/load-confirmations/upload", form);
     const docId = upload.docs[0].id;
+    const pickupStart = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const pickupEnd = new Date(pickupStart.getTime() + 60 * 60 * 1000);
+    const deliveryStart = new Date(Date.now() + 6 * 60 * 60 * 1000);
+    const deliveryEnd = new Date(deliveryStart.getTime() + 60 * 60 * 1000);
 
     const draft = {
       loadNumber: `QA-LC-${runId}`,
+      customerName: "QA Customer",
       shipperReferenceNumber: "QA-SHIP",
       consigneeReferenceNumber: "QA-CONS",
       palletCount: 5,
       weightLbs: 500,
       stops: [
-        { type: "PICKUP", name: "QA Shipper", address1: "1 QA St", city: "Austin", state: "TX", zip: "78701" },
-        { type: "DELIVERY", name: "QA Consignee", address1: "2 QA Ave", city: "Dallas", state: "TX", zip: "75201" },
+        {
+          type: "PICKUP",
+          name: "QA Shipper",
+          address1: "1 QA St",
+          city: "Austin",
+          state: "TX",
+          zip: "78701",
+          apptStart: pickupStart.toISOString(),
+          apptEnd: pickupEnd.toISOString(),
+        },
+        {
+          type: "DELIVERY",
+          name: "QA Consignee",
+          address1: "2 QA Ave",
+          city: "Dallas",
+          state: "TX",
+          zip: "75201",
+          apptStart: deliveryStart.toISOString(),
+          apptEnd: deliveryEnd.toISOString(),
+        },
       ],
     };
 
-    const draftUpdate = await apiJson<{ doc: any }>(baseUrl, adminA, `/load-confirmations/${docId}/draft`, {
+    const draftUpdate = await apiJson<{ doc: any; ready?: boolean }>(baseUrl, adminA, `/load-confirmations/${docId}/draft`, {
       method: "PATCH",
       body: JSON.stringify({ draft }),
     });
     if (!draftUpdate.doc?.normalizedDraft) {
       throw new Error("Load confirmation draft not saved");
+    }
+    if (draftUpdate.ready === false) {
+      throw new Error("Load confirmation draft not marked ready");
     }
 
     const created = await apiJson<{ loadId: string }>(baseUrl, adminA, `/load-confirmations/${docId}/create-load`, {

@@ -141,10 +141,9 @@ export async function generateInvoicePdf(params: {
   const filePath = resolveUploadPath(relativePath);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 
-  const launchArgs =
-    process.env.PUPPETEER_NO_SANDBOX === "true"
-      ? ["--no-sandbox", "--disable-setuid-sandbox"]
-      : [];
+  const runningAsRoot = typeof process.getuid === "function" ? process.getuid() === 0 : false;
+  const disableSandbox = process.env.PUPPETEER_NO_SANDBOX === "true" || runningAsRoot;
+  const launchArgs = disableSandbox ? ["--no-sandbox", "--disable-setuid-sandbox"] : [];
   const browser = await puppeteer.launch({
     headless: "new",
     args: launchArgs,

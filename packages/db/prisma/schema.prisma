@@ -379,6 +379,59 @@ enum SettlementSchedule {
   MONTHLY
 }
 
+enum FinanceRateConRequirement {
+  ALWAYS
+  BROKERED_ONLY
+  NEVER
+}
+
+enum FinanceDeliveredDocRequirement {
+  ALWAYS
+  DELIVERED_ONLY
+  NEVER
+}
+
+enum FinanceAccessorialProofRequirement {
+  ALWAYS
+  WHEN_ACCESSORIAL_PRESENT
+  NEVER
+}
+
+enum FactoringAttachmentMode {
+  ZIP
+  PDFS
+  LINK_ONLY
+}
+
+enum BillingSubmissionChannel {
+  FACTORING
+}
+
+enum BillingSubmissionStatus {
+  SENT
+  FAILED
+}
+
+enum PayableRunStatus {
+  PAYABLE_READY
+  RUN_DRAFT
+  RUN_PREVIEWED
+  RUN_FINALIZED
+  PAID
+}
+
+enum PayablePartyType {
+  DRIVER
+  CARRIER
+  VENDOR
+}
+
+enum PayableLineItemType {
+  EARNING
+  DEDUCTION
+  REIMBURSEMENT
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
@@ -426,6 +479,10 @@ model Organization {
   teamAssignments TeamAssignment[]
   assignmentSuggestionLogs AssignmentSuggestionLog[]
   driverStats DriverStats[]
+  billingSubmissions BillingSubmission[]
+  payableRuns PayableRun[]
+  payableLineItems PayableLineItem[]
+  settlementPolicyVersions SettlementPolicyVersion[]
 }
 
 model SetupCode {
@@ -547,6 +604,9 @@ model User {
   passwordResets    PasswordReset[]
   teamMemberships   TeamMember[]
   assignmentSuggestionLogs AssignmentSuggestionLog[] @relation("AssignmentSuggestionDispatcher")
+  billingSubmissions BillingSubmission[] @relation("BillingSubmissionCreatedBy")
+  payableRunsCreated PayableRun[] @relation("PayableRunCreatedBy")
+  settlementPolicyVersionsCreated SettlementPolicyVersion[] @relation("SettlementPolicyVersionCreatedBy")
 
   @@unique([orgId, email])
 }
@@ -772,6 +832,8 @@ model Load {
   loadConfirmationDocuments LoadConfirmationDocument[]
   charges        LoadCharge[]
   assignmentMembers LoadAssignmentMember[]
+  billingSubmissions BillingSubmission[]
+  payableLineItems PayableLineItem[]
 
   @@unique([orgId, loadNumber])
   @@unique([orgId, tripNumber])
@@ -1371,6 +1433,19 @@ model OrgSettings {
   missingPodAfterMinutes       Int
   reminderFrequencyMinutes     Int
   requireRateConBeforeDispatch Boolean         @default(false)
+  requireRateCon               FinanceRateConRequirement @default(BROKERED_ONLY)
+  requireBOL                   FinanceDeliveredDocRequirement @default(DELIVERED_ONLY)
+  requireSignedPOD             FinanceDeliveredDocRequirement @default(DELIVERED_ONLY)
+  requireAccessorialProof      FinanceAccessorialProofRequirement @default(WHEN_ACCESSORIAL_PRESENT)
+  requireInvoiceBeforeSend     Boolean         @default(true)
+  requireInvoiceBeforeReady    Boolean         @default(true)
+  allowReadinessOverride       Boolean         @default(false)
+  overrideRoles                Role[]          @default([])
+  factoringEnabled             Boolean         @default(false)
+  factoringEmail               String?
+  factoringCcEmails            String[]        @default([])
+  factoringAttachmentMode      FactoringAttachmentMode @default(LINK_ONLY)
+  defaultPaymentTermsDays      Int?
   trackingPreference           TrackingPreference @default(MANUAL)
   settlementSchedule           SettlementSchedule @default(WEEKLY)
   settlementTemplate           Json?
@@ -1412,6 +1487,7 @@ model Invoice {
   items InvoiceLineItem[]
   Event Event[]
   Task  Task[]
+  billingSubmissions BillingSubmission[]
 
   @@unique([orgId, invoiceNumber])
 }
@@ -1428,6 +1504,91 @@ model InvoiceLineItem {
   invoice Invoice @relation(fields: [invoiceId], references: [id])
 
   @@index([invoiceId])
+}
+
+model BillingSubmission {
+  id             String                   @id @default(cuid())
+  orgId          String
+  loadId         String
+  invoiceId      String?
+  channel        BillingSubmissionChannel
+  status         BillingSubmissionStatus
+  toEmail        String
+  ccEmails       String[]                 @default([])
+  attachmentMode FactoringAttachmentMode
+  packetPath     String?
+  packetLink     String?
+  errorMessage   String?
+  createdById    String
+  createdAt      DateTime                 @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  load      Load         @relation(fields: [loadId], references: [id])
+  invoice   Invoice?     @relation(fields: [invoiceId], references: [id])
+  createdBy User         @relation("BillingSubmissionCreatedBy", fields: [createdById], references: [id])
+
+  @@index([orgId, loadId, createdAt])
+  @@index([orgId, channel, status, createdAt])
+}
+
+model PayableRun {
+  id               String          @id @default(cuid())
+  orgId            String
+  periodStart      DateTime
+  periodEnd        DateTime
+  status           PayableRunStatus @default(RUN_DRAFT)
+  previewChecksum  String?
+  finalizedChecksum String?
+  createdById      String
+  finalizedAt      DateTime?
+  paidAt           DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  org       Organization     @relation(fields: [orgId], references: [id])
+  createdBy User             @relation("PayableRunCreatedBy", fields: [createdById], references: [id])
+  lineItems PayableLineItem[]
+
+  @@index([orgId, status, createdAt])
+  @@index([orgId, periodStart, periodEnd])
+}
+
+model PayableLineItem {
+  id          String             @id @default(cuid())
+  orgId       String
+  runId       String
+  partyType   PayablePartyType
+  partyId     String
+  loadId      String?
+  type        PayableLineItemType
+  amountCents Int
+  memo        String?
+  source      Json?
+  createdAt   DateTime           @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  run  PayableRun   @relation(fields: [runId], references: [id])
+  load Load?        @relation(fields: [loadId], references: [id])
+
+  @@index([orgId, runId])
+  @@index([runId, partyType, partyId])
+  @@index([orgId, partyType, partyId])
+}
+
+model SettlementPolicyVersion {
+  id           String   @id @default(cuid())
+  orgId        String
+  version      Int
+  effectiveFrom DateTime
+  rulesJson    Json
+  createdById  String?
+  createdAt    DateTime @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  createdBy User?        @relation("SettlementPolicyVersionCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([orgId, version])
+  @@index([orgId, effectiveFrom])
 }
 
 enum SettlementStatus {

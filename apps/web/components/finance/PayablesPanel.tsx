@@ -1,341 +1,295 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { SectionHeader } from "@/components/ui/section-header";
 import { StatusChip } from "@/components/ui/status-chip";
-import { RefinePanel } from "@/components/ui/refine-panel";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FormField } from "@/components/ui/form-field";
-import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { RouteGuard } from "@/components/rbac/route-guard";
-import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
-import { formatSettlementStatusLabel } from "@/lib/status-format";
+
+type PayableRun = {
+  id: string;
+  periodStart: string;
+  periodEnd: string;
+  status: "PAYABLE_READY" | "RUN_DRAFT" | "RUN_PREVIEWED" | "RUN_FINALIZED" | "PAID";
+  previewChecksum: string | null;
+  finalizedChecksum: string | null;
+  finalizedAt: string | null;
+  paidAt: string | null;
+  createdAt: string;
+  createdBy?: { id: string; name?: string | null; email?: string | null } | null;
+  totals: {
+    earningsCents: number;
+    deductionsCents: number;
+    reimbursementsCents: number;
+    netCents: number;
+  };
+  lineItemCount: number;
+};
+
+type PayableLineItem = {
+  id: string;
+  partyType: "DRIVER" | "CARRIER" | "VENDOR";
+  partyId: string;
+  loadId: string | null;
+  type: "EARNING" | "DEDUCTION" | "REIMBURSEMENT";
+  amountCents: number;
+  memo: string | null;
+};
+
+type Statement = {
+  partyId: string;
+  partyName: string;
+  totals: {
+    earningsCents: number;
+    deductionsCents: number;
+    reimbursementsCents: number;
+    netCents: number;
+  };
+  items: PayableLineItem[];
+};
+
+function formatCurrency(cents: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
+}
+
+function runStatusTone(status: PayableRun["status"]) {
+  if (status === "PAID") return "success" as const;
+  if (status === "RUN_FINALIZED") return "info" as const;
+  if (status === "RUN_PREVIEWED") return "warning" as const;
+  if (status === "PAYABLE_READY") return "neutral" as const;
+  if (status === "RUN_DRAFT") return "neutral" as const;
+  return "neutral" as const;
+}
+
+function runStatusLabel(status: PayableRun["status"]) {
+  return status.replaceAll("_", " ");
+}
 
 export function PayablesPanel() {
-  const { user } = useUser();
-  const canAccess = Boolean(user && (user.role === "ADMIN" || user.role === "BILLING"));
-  const [settlements, setSettlements] = useState<any[]>([]);
-  const [groups, setGroups] = useState<any[]>([]);
-  const [weeks, setWeeks] = useState<any[]>([]);
-  const [totals, setTotals] = useState<{ count: number; net: string } | null>(null);
-  const [drivers, setDrivers] = useState<any[]>([]);
-  const [userRole, setUserRole] = useState<string | null>(null);
-  const [form, setForm] = useState({ driverId: "", periodStart: "", periodEnd: "" });
-  const [formError, setFormError] = useState<string | null>(null);
-  const [filters, setFilters] = useState({
-    status: "ALL",
-    from: "",
-    to: "",
-    week: "",
-    groupBy: "week",
-    driverId: "",
-  });
-  const [selected, setSelected] = useState<any | null>(null);
+  const [runs, setRuns] = useState<PayableRun[]>([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const startDate = form.periodStart ? new Date(form.periodStart) : null;
-  const endDate = form.periodEnd ? new Date(form.periodEnd) : null;
-  const invalidRange = Boolean(startDate && endDate && startDate.getTime() > endDate.getTime());
+  const [note, setNote] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [previewItems, setPreviewItems] = useState<PayableLineItem[]>([]);
+  const [statements, setStatements] = useState<Statement[]>([]);
+  const [form, setForm] = useState({ periodStart: "", periodEnd: "" });
 
-  const settlementTone = (status?: string | null) => {
-    if (status === "PAID") return "success" as const;
-    if (status === "FINALIZED") return "success" as const;
-    if (status === "DRAFT") return "warning" as const;
-    return "neutral" as const;
-  };
+  const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
 
-  const buildParams = useCallback(() => {
-    const params = new URLSearchParams();
-    if (filters.status) params.set("status", filters.status);
-    if (filters.from) params.set("from", filters.from);
-    if (filters.to) params.set("to", filters.to);
-    if (filters.week) params.set("week", filters.week);
-    if (filters.groupBy) params.set("groupBy", filters.groupBy);
-    if (filters.driverId) params.set("driverId", filters.driverId);
-    return params.toString();
-  }, [filters]);
-
-  const loadData = useCallback(async () => {
+  const loadRuns = useCallback(async () => {
+    setLoading(true);
     try {
-      const query = buildParams();
-      const meData = await apiFetch<{ user: { role: string } }>("/auth/me");
-      setUserRole(meData.user.role);
-      const settlementData = await apiFetch<any>(`/settlements${query ? `?${query}` : ""}`);
-      setSettlements(settlementData.settlements ?? []);
-      setGroups(settlementData.groups ?? []);
-      setTotals(settlementData.totals ?? null);
-      setWeeks(settlementData.weeks ?? []);
-      if (["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(meData.user.role)) {
-        const driverData = await apiFetch<{ drivers: any[] }>("/assets/drivers");
-        setDrivers(driverData.drivers);
-      } else {
-        setDrivers([]);
+      const data = await apiFetch<{ runs: PayableRun[] }>("/payables/runs");
+      setRuns(data.runs ?? []);
+      if (!selectedRunId && data.runs?.length) {
+        setSelectedRunId(data.runs[0]?.id ?? null);
       }
       setError(null);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setLoading(false);
     }
-  }, [buildParams]);
+  }, [selectedRunId]);
 
   useEffect(() => {
-    if (!canAccess) return;
-    loadData();
-  }, [canAccess, loadData]);
+    loadRuns();
+  }, [loadRuns]);
 
-  const generateSettlement = async () => {
-    if (!form.driverId || !form.periodStart || !form.periodEnd || invalidRange) return;
+  const createRun = async () => {
+    if (!form.periodStart || !form.periodEnd) return;
+    setNote(null);
     try {
-      await apiFetch("/settlements/generate", {
+      const response = await apiFetch<{ run: PayableRun }>("/payables/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
-      setForm({ driverId: "", periodStart: "", periodEnd: "" });
-      setFormError(null);
-      loadData();
+      setSelectedRunId(response.run.id);
+      setForm({ periodStart: "", periodEnd: "" });
+      setNote("Run created. Preview to generate deterministic line items.");
+      await loadRuns();
     } catch (err) {
-      setFormError((err as Error).message);
+      setError((err as Error).message);
     }
   };
 
-  const finalizeSettlement = async (id: string) => {
-    await apiFetch(`/settlements/${id}/finalize`, { method: "POST" });
-    loadData();
+  const previewRun = async (runId: string) => {
+    setNote(null);
+    try {
+      const response = await apiFetch<{ lineItems: PayableLineItem[]; previewChecksum: string; diff: { added: number; removed: number } }>(
+        `/payables/runs/${runId}/preview`,
+        { method: "POST" }
+      );
+      setPreviewItems(response.lineItems ?? []);
+      setNote(`Preview ready. Checksum ${response.previewChecksum.slice(0, 12)}… · +${response.diff.added} / -${response.diff.removed}`);
+      await loadRuns();
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
 
-  const markPaid = async (id: string) => {
-    await apiFetch(`/settlements/${id}/paid`, { method: "POST" });
-    loadData();
+  const finalizeRun = async (runId: string) => {
+    setNote(null);
+    try {
+      const response = await apiFetch<{ idempotent: boolean }>(`/payables/runs/${runId}/finalize`, { method: "POST" });
+      setNote(response.idempotent ? "Run was already finalized." : "Run finalized.");
+      await loadRuns();
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
 
-  const viewSettlement = async (id: string) => {
-    const data = await apiFetch<{ settlement: any }>(`/settlements/${id}`);
-    setSelected(data.settlement);
+  const markPaid = async (runId: string) => {
+    setNote(null);
+    try {
+      await apiFetch(`/payables/runs/${runId}/mark-paid`, { method: "POST" });
+      setNote("Run marked as paid.");
+      await loadRuns();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const loadStatements = async (runId: string) => {
+    try {
+      const response = await apiFetch<{ statements: Statement[] }>(`/payables/runs/${runId}/statements`);
+      setStatements(response.statements ?? []);
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
 
   return (
     <RouteGuard allowedRoles={["ADMIN", "BILLING"]}>
       {error ? <ErrorBanner message={error} /> : null}
-      {userRole && userRole !== "DRIVER" ? (
-        <Card className="space-y-3">
-          <SectionHeader title="Generate settlement" subtitle="Select driver and pay period" />
-          <div className="grid gap-3 lg:grid-cols-3">
-            <FormField label="Driver" htmlFor="settlementDriver">
-              <Select value={form.driverId} onChange={(e) => setForm({ ...form, driverId: e.target.value })}>
-                <option value="">Driver</option>
-                {drivers.map((driver) => (
-                  <option key={driver.id} value={driver.id}>
-                    {driver.name}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            <FormField label="Period start" htmlFor="settlementStart">
-              <Input
-                type="date"
-                value={form.periodStart}
-                onChange={(e) => setForm({ ...form, periodStart: e.target.value })}
-              />
-            </FormField>
-            <FormField label="Period end" htmlFor="settlementEnd">
-              <Input
-                type="date"
-                value={form.periodEnd}
-                onChange={(e) => setForm({ ...form, periodEnd: e.target.value })}
-              />
-            </FormField>
-          </div>
-          {invalidRange ? (
-            <div className="text-sm text-[color:var(--color-danger)]">End date must be after start date.</div>
-          ) : null}
-          {formError ? <div className="text-sm text-[color:var(--color-danger)]">{formError}</div> : null}
-          <Button onClick={generateSettlement} disabled={!form.driverId || !form.periodStart || !form.periodEnd || invalidRange}>
-            Generate
-          </Button>
-        </Card>
+      {note ? (
+        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-info)] bg-[color:var(--color-info-soft)] px-3 py-2 text-sm text-[color:var(--color-info)]">
+          {note}
+        </div>
       ) : null}
 
+      <Card className="space-y-3">
+        <SectionHeader title="Create run" subtitle="Choose settlement period" />
+        <div className="grid gap-3 md:grid-cols-2">
+          <FormField label="Period start" htmlFor="payablePeriodStart">
+            <Input type="date" value={form.periodStart} onChange={(e) => setForm({ ...form, periodStart: e.target.value })} />
+          </FormField>
+          <FormField label="Period end" htmlFor="payablePeriodEnd">
+            <Input type="date" value={form.periodEnd} onChange={(e) => setForm({ ...form, periodEnd: e.target.value })} />
+          </FormField>
+        </div>
+        <Button onClick={createRun} disabled={!form.periodStart || !form.periodEnd}>
+          Create run
+        </Button>
+      </Card>
+
       <Card className="space-y-4">
-        <SectionHeader title="Settlements" subtitle="Generate, review, and finalize driver pay" />
-        <RefinePanel>
-          <div className="grid gap-3 lg:grid-cols-6">
-            <FormField label="Status" htmlFor="filterStatus">
-              <Select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
-                <option value="ALL">All</option>
-                <option value="PENDING">Pending</option>
-                <option value="DRAFT">Pending</option>
-                <option value="FINALIZED">Approved</option>
-                <option value="PAID">Paid</option>
-              </Select>
-            </FormField>
-            <FormField label="From" htmlFor="filterFrom">
-              <Input type="date" value={filters.from} onChange={(e) => setFilters({ ...filters, from: e.target.value })} />
-            </FormField>
-            <FormField label="To" htmlFor="filterTo">
-              <Input type="date" value={filters.to} onChange={(e) => setFilters({ ...filters, to: e.target.value })} />
-            </FormField>
-            <FormField label="Week" htmlFor="filterWeek">
-              <Select value={filters.week} onChange={(e) => setFilters({ ...filters, week: e.target.value })}>
-                <option value="">Week</option>
-                {weeks.map((week: any) => (
-                  <option key={week.weekKey} value={week.weekKey}>
-                    {week.weekLabel}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            <FormField label="Group by" htmlFor="filterGroupBy">
-              <Select value={filters.groupBy} onChange={(e) => setFilters({ ...filters, groupBy: e.target.value })}>
-                <option value="week">Group by week</option>
-                <option value="none">Flat list</option>
-              </Select>
-            </FormField>
-            {userRole && ["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(userRole) ? (
-              <FormField label="Driver" htmlFor="filterDriver">
-                <Select value={filters.driverId} onChange={(e) => setFilters({ ...filters, driverId: e.target.value })}>
-                  <option value="">Driver</option>
-                  {drivers.map((driver) => (
-                    <option key={driver.id} value={driver.id}>
-                      {driver.name}
-                    </option>
-                  ))}
-                </Select>
-              </FormField>
-            ) : null}
-          </div>
-        </RefinePanel>
-        {totals ? (
-          <div className="flex flex-wrap items-center gap-3 text-sm text-[color:var(--color-text-muted)]">
-            <span>{totals.count} settlements</span>
-            <span>Net ${totals.net}</span>
-          </div>
-        ) : null}
-        <div className="grid gap-4">
-          {groups.length > 0 ? (
-            groups.map((group) => {
-              const groupLabel = group.label ?? group.weekLabel ?? group.weekKey ?? "Period";
-              const groupCount = group.count ?? group.totals?.count ?? group.settlements?.length ?? 0;
-              const groupItems = group.items ?? group.settlements ?? [];
-              return (
-                <div
-                  key={group.key ?? group.weekKey ?? groupLabel}
-                  className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-4"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-sm font-semibold text-ink">{groupLabel}</div>
-                    <div className="text-xs text-[color:var(--color-text-muted)]">{groupCount} settlements</div>
-                  </div>
-                  <div className="mt-3 grid gap-3">
-                    {groupItems.map((settlement: any) => (
-                      <div
-                        key={settlement.id}
-                        className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-white py-3 pl-5 pr-4"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <div className="text-sm font-semibold text-ink">{settlement.periodLabel}</div>
-                            <div className="text-xs text-[color:var(--color-text-muted)]">{settlement.driverName}</div>
-                          </div>
-                          <StatusChip
-                            label={formatSettlementStatusLabel(settlement.status)}
-                            tone={settlementTone(settlement.status)}
-                          />
-                        </div>
-                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-[color:var(--color-text-muted)]">
-                          <div>Net ${settlement.net}</div>
-                          <div>{settlement.loadCount} loads</div>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <Button size="sm" variant="secondary" onClick={() => viewSettlement(settlement.id)}>
-                            View
-                          </Button>
-                          {settlement.status === "DRAFT" ? (
-                            <Button size="sm" onClick={() => finalizeSettlement(settlement.id)}>
-                              Finalize
-                            </Button>
-                          ) : null}
-                          {settlement.status === "FINALIZED" ? (
-                            <Button size="sm" variant="secondary" onClick={() => markPaid(settlement.id)}>
-                              Mark paid
-                            </Button>
-                          ) : null}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+        <SectionHeader title="Payable runs" subtitle="Preview, finalize, and pay" />
+        {loading ? <EmptyState title="Loading runs..." /> : null}
+        {!loading && runs.length === 0 ? <EmptyState title="No runs yet." description="Create your first payable run." /> : null}
+        <div className="grid gap-3">
+          {runs.map((run) => (
+            <div
+              key={run.id}
+              className={`rounded-[var(--radius-card)] border px-4 py-3 ${
+                run.id === selectedRunId
+                  ? "border-[color:var(--color-divider-strong)] bg-[color:var(--color-surface-muted)]"
+                  : "border-[color:var(--color-divider)] bg-white"
+              }`}
+              onClick={() => setSelectedRunId(run.id)}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-ink">
+                  {new Date(run.periodStart).toLocaleDateString()} - {new Date(run.periodEnd).toLocaleDateString()}
                 </div>
-              );
-            })
-          ) : settlements.length > 0 ? (
-            settlements.map((settlement) => (
-              <div
-                key={settlement.id}
-                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white py-4 pl-6 pr-4"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-semibold text-ink">{settlement.periodLabel}</div>
-                    <div className="text-xs text-[color:var(--color-text-muted)]">{settlement.driverName}</div>
-                  </div>
-                  <StatusChip label={formatSettlementStatusLabel(settlement.status)} tone={settlementTone(settlement.status)} />
-                </div>
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-[color:var(--color-text-muted)]">
-                  <div>Net ${settlement.net}</div>
-                  <div>{settlement.loadCount} loads</div>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => viewSettlement(settlement.id)}>
-                    View
-                  </Button>
-                  {settlement.status === "DRAFT" ? (
-                    <Button size="sm" onClick={() => finalizeSettlement(settlement.id)}>
-                      Finalize
-                    </Button>
-                  ) : null}
-                  {settlement.status === "FINALIZED" ? (
-                    <Button size="sm" variant="secondary" onClick={() => markPaid(settlement.id)}>
-                      Mark paid
-                    </Button>
-                  ) : null}
-                </div>
+                <StatusChip label={runStatusLabel(run.status)} tone={runStatusTone(run.status)} />
               </div>
-            ))
-          ) : (
-            <EmptyState title="No settlements yet." description="Generate settlements once loads are completed." />
-          )}
+              <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
+                {run.lineItemCount} lines · Net {formatCurrency(run.totals.netCents)}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" variant="secondary" onClick={(e) => {
+                  e.stopPropagation();
+                  previewRun(run.id);
+                }}>
+                  Preview
+                </Button>
+                <Button size="sm" onClick={(e) => {
+                  e.stopPropagation();
+                  finalizeRun(run.id);
+                }}>
+                  Finalize
+                </Button>
+                <Button size="sm" variant="secondary" onClick={(e) => {
+                  e.stopPropagation();
+                  markPaid(run.id);
+                }}>
+                  Mark paid
+                </Button>
+                <Button size="sm" variant="secondary" onClick={(e) => {
+                  e.stopPropagation();
+                  loadStatements(run.id);
+                }}>
+                  Driver statements
+                </Button>
+              </div>
+            </div>
+          ))}
         </div>
       </Card>
 
-      {selected ? (
-        <Card className="space-y-2">
-          <SectionHeader title="Settlement details" subtitle={selected.periodLabel} />
-          <div className="text-sm text-[color:var(--color-text-muted)]">Driver: {selected.driverName}</div>
-          <div className="text-sm text-[color:var(--color-text-muted)]">
-            Status: {formatSettlementStatusLabel(selected.status)}
-          </div>
-          <div className="text-sm text-[color:var(--color-text-muted)]">Net: ${selected.net}</div>
-          {selected.items?.length ? (
-            <div className="mt-2 space-y-2 text-sm">
-              {selected.items.map((item: any) => (
-                <div
-                  key={item.id}
-                  className="flex items-center justify-between rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2"
-                >
-                  <div>
-                    <div className="text-sm text-ink">{item.description}</div>
-                    <div className="text-xs text-[color:var(--color-text-muted)]">{item.type}</div>
-                  </div>
-                  <div className="text-sm text-ink">${item.amount}</div>
+      <Card className="space-y-4">
+        <SectionHeader title="Preview" subtitle={selectedRun ? `Run ${selectedRun.id}` : "Select a run"} />
+        {previewItems.length === 0 ? (
+          <EmptyState title="No preview loaded." description="Run preview to generate deterministic line items." />
+        ) : (
+          <div className="grid gap-2">
+            {previewItems.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-sm"
+              >
+                <div>
+                  <div className="font-medium text-ink">{item.memo || item.type}</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">{item.partyType} · {item.partyId}</div>
                 </div>
-              ))}
+                <div>{formatCurrency(item.amountCents)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card className="space-y-4">
+        <SectionHeader title="Driver statements" subtitle="Load breakdown + deductions" />
+        {statements.length === 0 ? <EmptyState title="No statements loaded." /> : null}
+        <div className="grid gap-3">
+          {statements.map((statement) => (
+            <div key={statement.partyId} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3">
+              <div className="text-sm font-semibold text-ink">{statement.partyName}</div>
+              <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
+                Earnings {formatCurrency(statement.totals.earningsCents)} · Deductions {formatCurrency(statement.totals.deductionsCents)} · Net {formatCurrency(statement.totals.netCents)}
+              </div>
+              <div className="mt-2 grid gap-2">
+                {statement.items.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-sm">
+                    <span>{item.memo || item.type}</span>
+                    <span>{formatCurrency(item.amountCents)}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          ) : null}
-        </Card>
-      ) : null}
+          ))}
+        </div>
+      </Card>
     </RouteGuard>
   );
 }

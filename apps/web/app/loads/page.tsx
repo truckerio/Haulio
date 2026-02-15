@@ -22,7 +22,6 @@ import { apiFetch, getApiBase } from "@/lib/api";
 import { BulkLoadImport } from "@/components/BulkLoadImport";
 import { ImportWizard } from "@/components/ImportWizard";
 import {
-  deriveBillingStatus,
   deriveBlocker,
   deriveDocsBlocker,
   deriveOpsStatus,
@@ -44,7 +43,7 @@ const OPS_STATUSES = [
   "PAID",
   "CANCELLED",
 ] as const;
-const BILLING_STATUSES = ["DOCS_NEEDED", "READY_TO_INVOICE", "INVOICED", "PAID"] as const;
+const BILLING_STATUSES = ["BLOCKED", "READY", "INVOICED"] as const;
 
 // TODO(QA): Open /loads, click a chip (e.g., Missing POD) to confirm list updates, then click a card to verify navigation.
 
@@ -689,7 +688,7 @@ function LoadsPageContent() {
   const baseLoads = useMemo(() => {
     return loads.map((load) => {
       const opsStatus = deriveOpsStatus(load);
-      const billingStatus = deriveBillingStatus(load);
+      const billingStatus = load?.billingStatus ?? null;
       const docsBlocker = deriveDocsBlocker(load);
       const trackingBadge = deriveTrackingBadge(load);
       const blocker = deriveBlocker(load, docsBlocker, trackingBadge);
@@ -1739,13 +1738,13 @@ function LoadsPageContent() {
                     <StatusChip label={opsStatus} tone={statusTone(opsStatus)} />
                     {billingStatus ? (
                       <StatusChip
-                        label={billingStatus.replaceAll("_", " ")}
+                        label={billingStatus === "READY" ? "READY TO BILL" : billingStatus}
                         tone={
-                          billingStatus === "INVOICED" || billingStatus === "PAID"
+                          billingStatus === "INVOICED"
+                            ? "info"
+                            : billingStatus === "READY"
                             ? "success"
-                            : billingStatus === "READY_TO_INVOICE"
-                            ? "warning"
-                            : "neutral"
+                            : "warning"
                         }
                       />
                     ) : null}

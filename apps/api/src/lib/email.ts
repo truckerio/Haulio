@@ -10,6 +10,11 @@ type SmtpConfig = {
   replyTo?: string;
 };
 
+type EmailAttachment = {
+  filename: string;
+  path: string;
+};
+
 let transporter: nodemailer.Transporter | null = null;
 
 function getSmtpConfig(): SmtpConfig | null {
@@ -92,4 +97,29 @@ export async function sendPasswordResetEmail(params: {
 
   const transport = getTransporter(config);
   await transport.sendMail(mail);
+}
+
+export async function sendOperationalEmail(params: {
+  to: string;
+  cc?: string[];
+  subject: string;
+  text: string;
+  html?: string;
+  attachments?: EmailAttachment[];
+}) {
+  const config = getSmtpConfig();
+  if (!config) {
+    throw new Error("SMTP configuration missing");
+  }
+  const transport = getTransporter(config);
+  await transport.sendMail({
+    from: config.from,
+    to: params.to,
+    cc: params.cc && params.cc.length > 0 ? params.cc : undefined,
+    subject: params.subject,
+    text: params.text,
+    html: params.html,
+    attachments: params.attachments,
+    replyTo: config.replyTo,
+  });
 }

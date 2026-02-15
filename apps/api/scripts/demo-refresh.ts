@@ -123,6 +123,7 @@ async function wipeOrgData(orgId: string) {
   await prisma.loadConfirmationLearningExample.deleteMany({ where: { orgId } });
   await prisma.loadConfirmationExtractEvent.deleteMany({ where: { orgId } });
   await prisma.loadConfirmationDocument.deleteMany({ where: { orgId } });
+  await prisma.assignmentSuggestionLog.deleteMany({ where: { orgId } });
   await prisma.document.deleteMany({ where: { orgId } });
   await prisma.event.deleteMany({ where: { orgId } });
   await prisma.task.deleteMany({ where: { orgId } });

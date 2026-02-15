@@ -14,19 +14,34 @@ if (envPath) {
   dotenv.config({ path: envPath });
 }
 
+function isQaDatabaseUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    const dbName = decodeURIComponent(parsed.pathname.replace(/^\/+/, "")).toLowerCase();
+    const schema = (parsed.searchParams.get("schema") || "").toLowerCase();
+    const dbLooksQa = dbName.includes("qa");
+    const schemaLooksQa = schema.includes("qa");
+    return dbLooksQa || schemaLooksQa;
+  } catch {
+    const lower = url.toLowerCase();
+    return lower.includes("schema=qa") || lower.includes("/qa");
+  }
+}
+
 export function getQaDatabaseUrl() {
   const url = process.env.QA_DATABASE_URL || process.env.DATABASE_URL;
   if (!url) {
     throw new Error("QA_DATABASE_URL or DATABASE_URL must be set");
   }
-  const lower = url.toLowerCase();
-  const hasQa = lower.includes("qa") || lower.includes("schema=qa");
+  const hasQa = isQaDatabaseUrl(url);
   if (!hasQa) {
-    throw new Error("Refusing to run QA against non-qa database. Set QA_DATABASE_URL to a qa database/schema.");
+    throw new Error("Refusing to run QA against non-qa database. Use a QA database name or schema in QA_DATABASE_URL.");
   }
   return url;
 }
 
 export function getApiBase() {
-  return process.env.QA_API_BASE || "http://localhost:4000";
+  if (process.env.QA_API_BASE) return process.env.QA_API_BASE;
+  const port = process.env.QA_API_PORT || "4010";
+  return `http://localhost:${port}`;
 }

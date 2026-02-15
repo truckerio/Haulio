@@ -44,6 +44,7 @@ export default function AdminPage() {
   const [trucks, setTrucks] = useState<any[]>([]);
   const [trailers, setTrailers] = useState<any[]>([]);
   const [settings, setSettings] = useState<any | null>(null);
+  const [financePolicy, setFinancePolicy] = useState<any | null>(null);
   const [samsaraStatus, setSamsaraStatus] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,10 +58,20 @@ export default function AdminPage() {
           apiFetch<{ trucks: any[] }>("/admin/trucks"),
           apiFetch<{ trailers: any[] }>("/admin/trailers"),
           apiFetch<{ settings: any }>("/admin/settings"),
+          apiFetch<{ policy: any }>("/admin/finance-policy"),
           apiFetch<{ integration: any }>("/api/integrations/samsara/status"),
         ]);
 
-        const [entitiesResult, usersResult, driversResult, trucksResult, trailersResult, settingsResult, samsaraResult] = results;
+        const [
+          entitiesResult,
+          usersResult,
+          driversResult,
+          trucksResult,
+          trailersResult,
+          settingsResult,
+          financePolicyResult,
+          samsaraResult,
+        ] = results;
 
         if (entitiesResult.status === "fulfilled") setOperatingEntities(entitiesResult.value.entities ?? []);
         if (usersResult.status === "fulfilled") setUsers(usersResult.value.users ?? []);
@@ -68,6 +79,7 @@ export default function AdminPage() {
         if (trucksResult.status === "fulfilled") setTrucks(trucksResult.value.trucks ?? []);
         if (trailersResult.status === "fulfilled") setTrailers(trailersResult.value.trailers ?? []);
         if (settingsResult.status === "fulfilled") setSettings(settingsResult.value.settings ?? null);
+        if (financePolicyResult.status === "fulfilled") setFinancePolicy(financePolicyResult.value.policy ?? null);
         if (samsaraResult.status === "fulfilled") setSamsaraStatus(samsaraResult.value.integration ?? null);
         setError(null);
       } catch (err) {
@@ -96,6 +108,11 @@ export default function AdminPage() {
   const docsValue = requiredDocsCount > 0 ? `${requiredDocsCount} required documents` : "Not configured";
   const integrationValue = samsaraStatus?.status === "CONNECTED" ? "Connected" : "Not connected";
   const automationValue = settings ? "Configured" : "Not configured";
+  const financePolicyValue = financePolicy
+    ? financePolicy.factoringEnabled
+      ? "Factoring enabled"
+      : "Configured"
+    : "Not configured";
   const fleetCount = trucks.length + trailers.length;
   const fleetValue = `${fleetCount} trucks & trailers`;
   const employeesValue = `${employeeCount} ${pluralize(employeeCount, "employee", "employees")}`;
@@ -131,6 +148,12 @@ export default function AdminPage() {
               description="POD thresholds and billing guardrails."
               value={automationValue}
               onClick={() => router.push("/admin/automation")}
+            />
+            <SettingsRow
+              title="Finance Policy"
+              description="Receivables readiness rules and factoring defaults."
+              value={financePolicyValue}
+              onClick={() => router.push("/admin/finance-policy")}
             />
             <SettingsRow
               title="Fleet"

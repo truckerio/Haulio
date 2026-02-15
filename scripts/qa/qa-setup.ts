@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcryptjs";
@@ -68,6 +68,27 @@ async function main() {
     });
   }
 
+  async function ensureOperationalOnboarding(orgId: string) {
+    return prisma.onboardingState.upsert({
+      where: { orgId },
+      update: {
+        status: "OPERATIONAL",
+        completedSteps: ["basics", "operating", "team", "drivers", "fleet", "preferences", "tracking", "finance"],
+        percentComplete: 100,
+        currentStep: 8,
+        completedAt: new Date(),
+      },
+      create: {
+        orgId,
+        status: "OPERATIONAL",
+        completedSteps: ["basics", "operating", "team", "drivers", "fleet", "preferences", "tracking", "finance"],
+        percentComplete: 100,
+        currentStep: 8,
+        completedAt: new Date(),
+      },
+    });
+  }
+
   async function createUser(orgId: string, email: string, role: string, name: string, passwordHash: string) {
     return prisma.user.upsert({
       where: { orgId_email: { email, orgId } },
@@ -118,11 +139,45 @@ async function main() {
 
   await runStep("qa.setup.migrate", async () => {
     const dbPath = path.resolve(repoRoot, "packages/db");
-    execSync(`pnpm -C ${dbPath} exec prisma migrate reset --force --skip-seed`, {
+    const preferMigrations = process.env.QA_USE_MIGRATIONS === "true";
+    if (preferMigrations) {
+      try {
+        execSync(`pnpm -C ${dbPath} exec prisma migrate reset --force --skip-seed`, {
+          stdio: "inherit",
+          env: { ...process.env, DATABASE_URL: qaUrl },
+        });
+        return { details: "prisma migrate reset --force --skip-seed" };
+      } catch {
+        // Fall through to db-push reset below.
+      }
+    }
+
+    // Default QA path: rebuild schema from current model for deterministic local QA,
+    // independent of branch migration history.
+    const resetSql = `
+DROP SCHEMA IF EXISTS "public" CASCADE;
+CREATE SCHEMA "public";
+CREATE EXTENSION IF NOT EXISTS citext;
+`;
+    const resetResult = spawnSync(
+      "pnpm",
+      ["-C", dbPath, "exec", "prisma", "db", "execute", "--stdin"],
+      {
+        env: { ...process.env, DATABASE_URL: qaUrl },
+        input: resetSql,
+        encoding: "utf8",
+      }
+    );
+    if (resetResult.status !== 0) {
+      throw new Error(
+        `Schema reset failed: ${resetResult.stderr || resetResult.stdout || "unknown error"}`
+      );
+    }
+    execSync(`pnpm -C ${dbPath} exec prisma db push`, {
       stdio: "inherit",
       env: { ...process.env, DATABASE_URL: qaUrl },
     });
-    return { details: "prisma migrate reset --force --skip-seed" };
+    return { details: preferMigrations ? "fallback: prisma db execute reset + prisma db push" : "prisma db execute reset + prisma db push" };
   });
 
   await runStep("qa.setup.seed", async () => {
@@ -134,6 +189,8 @@ async function main() {
 
     await createOrgSettings(orgA.id, orgA.name);
     await createOrgSettings(orgB.id, orgB.name);
+    await ensureOperationalOnboarding(orgA.id);
+    await ensureOperationalOnboarding(orgB.id);
 
     const operatingEntityA = await ensureOperatingEntity(orgA.id, orgA.name);
     const operatingEntityB = await ensureOperatingEntity(orgB.id, orgB.name);

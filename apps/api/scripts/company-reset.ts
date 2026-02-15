@@ -40,41 +40,23 @@ async function resetUploads() {
 }
 
 async function wipeDatabase() {
-  await prisma.userNotificationPref.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.passwordReset.deleteMany();
-  await prisma.userInvite.deleteMany();
-  await prisma.locationPing.deleteMany();
-  await prisma.loadTrackingSession.deleteMany();
-  await prisma.truckTelematicsMapping.deleteMany();
-  await prisma.trackingIntegration.deleteMany();
-  await prisma.learningExample.deleteMany();
-  await prisma.learnedMapping.deleteMany();
-  await prisma.loadConfirmationLearningExample.deleteMany();
-  await prisma.loadConfirmationExtractEvent.deleteMany();
-  await prisma.loadConfirmationDocument.deleteMany();
-  await prisma.document.deleteMany();
-  await prisma.event.deleteMany();
-  await prisma.task.deleteMany();
-  await prisma.storageRecord.deleteMany();
-  await prisma.invoiceLineItem.deleteMany();
-  await prisma.invoice.deleteMany();
-  await prisma.settlementItem.deleteMany();
-  await prisma.settlement.deleteMany();
-  await prisma.auditLog.deleteMany();
-  await prisma.trailerManifestItem.deleteMany();
-  await prisma.trailerManifest.deleteMany();
-  await prisma.loadLeg.deleteMany();
-  await prisma.stop.deleteMany();
-  await prisma.load.deleteMany();
-  await prisma.driver.deleteMany();
-  await prisma.truck.deleteMany();
-  await prisma.trailer.deleteMany();
-  await prisma.customer.deleteMany();
-  await prisma.operatingEntity.deleteMany();
-  await prisma.orgSettings.deleteMany();
-  await prisma.user.deleteMany();
-  await prisma.organization.deleteMany();
+  // Keep migration history intact but clear all application data safely across schema changes.
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    DECLARE
+      tables text;
+    BEGIN
+      SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
+      INTO tables
+      FROM pg_tables
+      WHERE schemaname = 'public'
+        AND tablename <> '_prisma_migrations';
+
+      IF tables IS NOT NULL THEN
+        EXECUTE 'TRUNCATE TABLE ' || tables || ' RESTART IDENTITY CASCADE';
+      END IF;
+    END $$;
+  `);
 }
 
 async function main() {

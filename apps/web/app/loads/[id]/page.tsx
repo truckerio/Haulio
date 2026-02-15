@@ -19,7 +19,6 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
 import { formatDocStatusLabel, formatInvoiceStatusLabel, formatStatusLabel } from "@/lib/status-format";
-import { deriveBillingReadiness } from "@/lib/billing-readiness";
 
 import { API_BASE } from "@/lib/apiBase";
 const DOC_TYPES = ["POD", "RATECON", "BOL", "LUMPER", "SCALE", "DETENTION", "OTHER"] as const;
@@ -337,16 +336,13 @@ export default function LoadDetailsPage() {
       : null;
   const displayCharges = impliedLinehaul ? [impliedLinehaul, ...charges] : charges;
   const chargesTotalCents = displayCharges.reduce((sum, charge) => sum + (charge.amountCents ?? 0), 0);
-  const billingReadiness = useMemo(() => {
-    if (!load) return null;
-    return deriveBillingReadiness({ load, charges, invoices: load.invoices ?? [] });
-  }, [load, charges]);
   const billingBlockingReasons = (load?.billingBlockingReasons ?? []) as string[];
   const billingStatus = load?.billingStatus ?? null;
   const billingStatusLabel =
     billingStatus === "READY" ? "Ready to bill" : billingStatus === "INVOICED" ? "Invoiced" : "Blocked";
   const billingStatusTone =
     billingStatus === "READY" ? "success" : billingStatus === "INVOICED" ? "info" : "warning";
+  const canGenerateInvoice = Boolean(load?.status === "READY_TO_INVOICE" && billingStatus === "READY");
   const accessorials = load?.accessorials ?? [];
 
   const openDoc = (doc: any) => {
@@ -663,6 +659,47 @@ export default function LoadDetailsPage() {
   };
 
   const invoice = load?.invoices?.[0] ?? null;
+
+  const downloadInvoicePdf = useCallback(() => {
+    if (!invoice?.id) {
+      setBillingActionError("Invoice not generated.");
+      return;
+    }
+    if (!invoice?.pdfPath) {
+      setBillingActionError("Invoice PDF is not available for this invoice yet.");
+      return;
+    }
+    setBillingActionError(null);
+    window.open(`${API_BASE}/invoices/${invoice.id}/pdf`, "_blank", "noopener,noreferrer");
+  }, [invoice]);
+
+  const downloadInvoicePacket = useCallback(async () => {
+    if (!invoice?.id) {
+      setBillingActionError("Invoice not generated.");
+      return;
+    }
+    setBillingActionError(null);
+    try {
+      let packetPath = invoice.packetPath as string | null;
+      if (!packetPath) {
+        const result = await apiFetch<{ packetPath?: string | null }>(`/billing/invoices/${invoice.id}/packet`, { method: "POST" });
+        packetPath = result.packetPath ?? null;
+      }
+      if (!packetPath) {
+        throw new Error("Packet is not available for this invoice yet.");
+      }
+      const filename = packetPath.split("/").pop();
+      if (!filename) {
+        throw new Error("Packet path is invalid.");
+      }
+      window.open(`${API_BASE}/files/packets/${encodeURIComponent(filename)}`, "_blank", "noopener,noreferrer");
+      if (!invoice.packetPath) {
+        loadData();
+      }
+    } catch (err) {
+      setBillingActionError((err as Error).message);
+    }
+  }, [invoice, loadData]);
 
   const latestPing = tracking?.ping;
   const pingLat = latestPing?.lat ? Number(latestPing.lat) : null;
@@ -1312,8 +1349,13 @@ export default function LoadDetailsPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 {load?.status === "READY_TO_INVOICE" && canVerify ? (
-                  <Button onClick={generateInvoice} disabled={billingReadiness ? !billingReadiness.readyForInvoice : false}>
+                  <Button onClick={generateInvoice} disabled={!canGenerateInvoice}>
                     Generate invoice
+                  </Button>
+                ) : null}
+                {invoice && (!invoice.pdfPath || !invoice.packetPath) && canVerify ? (
+                  <Button variant="secondary" onClick={generateInvoice}>
+                    Regenerate Invoice Files
                   </Button>
                 ) : null}
                 {billingStatus === "READY" && canBillActions ? (
@@ -1326,18 +1368,13 @@ export default function LoadDetailsPage() {
                     Send to QuickBooks
                   </Button>
                 ) : null}
-                {invoice?.pdfPath ? (
-                  <Button variant="secondary" onClick={() => window.open(`${API_BASE}/invoices/${invoice.id}/pdf`, "_blank")}>
-                    Download PDF
+                {invoice ? (
+                  <Button variant="secondary" onClick={downloadInvoicePdf}>
+                    Download Invoice
                   </Button>
                 ) : null}
-                {invoice?.packetPath ? (
-                  <Button
-                    variant="secondary"
-                    onClick={() =>
-                      window.open(`${API_BASE}/files/packets/${invoice.packetPath.split("/").pop()}`, "_blank")
-                    }
-                  >
+                {invoice ? (
+                  <Button variant="secondary" onClick={downloadInvoicePacket}>
                     Download Packet
                   </Button>
                 ) : null}
@@ -1345,7 +1382,7 @@ export default function LoadDetailsPage() {
               {billingActionError ? (
                 <div className="text-xs text-[color:var(--color-danger)]">{billingActionError}</div>
               ) : null}
-              {billingReadiness && !billingReadiness.readyForInvoice ? (
+              {billingStatus !== "READY" ? (
                 <div className="text-xs text-[color:var(--color-text-muted)]">
                   Resolve readiness items before invoicing.
                 </div>
@@ -1839,17 +1876,13 @@ export default function LoadDetailsPage() {
                   Generate invoice
                 </Button>
               ) : null}
-              {invoice?.pdfPath ? (
-                <Button size="sm" variant="secondary" onClick={() => window.open(`${API_BASE}/invoices/${invoice.id}/pdf`, "_blank")}>
-                  Download PDF
+              {invoice ? (
+                <Button size="sm" variant="secondary" onClick={downloadInvoicePdf}>
+                  Download Invoice
                 </Button>
               ) : null}
-              {invoice?.packetPath ? (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => window.open(`${API_BASE}/files/packets/${invoice.packetPath.split("/").pop()}`, "_blank")}
-                >
+              {invoice ? (
+                <Button size="sm" variant="secondary" onClick={downloadInvoicePacket}>
                   Download Packet
                 </Button>
               ) : null}

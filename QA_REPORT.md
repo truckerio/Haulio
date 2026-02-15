@@ -1,39 +1,72 @@
 # QA Report
-Generated: 2026-01-23T09:46:42.829Z
+Generated: 2026-02-14T22:50:59.673Z
 
 ## Summary
-- Passed: 14
+- Passed: 15
 - Failed: 0
 - Skipped: 0
 
 ## Automated Checks
 - PASS qa.setup.docker — docker-compose up -d
 - PASS qa.setup.db-ready — Postgres is ready
-- PASS qa.setup.migrate — prisma migrate reset --force --skip-seed
+- PASS qa.setup.migrate — prisma db execute reset + prisma db push
 - PASS qa.setup.seed — Seeded QA orgs/users
 - PASS qa.tests.unit-integration — pnpm -r --if-present test (log: /Users/karanpreetsingh/demo-truckerio1/scripts/qa/qa-tests.log)
+- PASS qa.smoke.cleanup.assignments — Unassigned 0 existing load(s) for QA seed assets
 - PASS qa.smoke.multitenant — Org A cannot see Org B load
 - PASS qa.smoke.rbac — RBAC enforcement ok
 - PASS qa.smoke.load.lifecycle — Load delivered (DELIVERED)
-- PASS qa.smoke.documents — POD verified, invoice cmkqp4z9l001wke07dd69e1sv 
-- PASS qa.smoke.billing.queue — Load visible in billing queue
+- PASS qa.smoke.documents — POD verified, invoice created via generate 
+- PASS qa.smoke.billing.queue — Load visible in billing queue (delivered)
 - PASS qa.smoke.invoicing — Invoice packet generated
 - PASS qa.smoke.settlements — Settlement finalized and paid
 - PASS qa.smoke.imports — CSV import preview + commit ok
-- PASS qa.smoke.load.confirmations — Load confirmation created load cmkqp50zl002wke07u7o6jgji
+- PASS qa.smoke.load.confirmations — Load confirmation created load cmlmwucyr005yx0rgo5uzjvif
 ## Logs
 
 ### scripts/qa/qa-tests.log
 ```
 Scope: 5 of 6 workspace projects
+. test$ pnpm test:billing && pnpm test:finance && pnpm test:payables
+. test: > @truckerio/api@0.1.0 test:billing /Users/karanpreetsingh/demo-truckerio1/apps/api
+. test: > node --import tsx src/lib/billing-readiness.test.ts
+. test: billing readiness tests passed
+. test: > @truckerio/api@0.1.0 test:finance /Users/karanpreetsingh/demo-truckerio1/apps/api
+. test: > node --import tsx src/lib/finance-policy.test.ts && node --import tsx src/lib/finance-receivables.test.ts
+. test: finance policy tests passed
+. test: finance receivables tests passed
+. test: > @truckerio/api@0.1.0 test:payables /Users/karanpreetsingh/demo-truckerio1/apps/api
+. test: > node --import tsx src/lib/payables-engine.test.ts
+. test: payables engine tests passed
+. test: Done
 ```
 
 ### scripts/qa/qa-api.log
 ```
 > @truckerio/api@0.1.0 dev /Users/karanpreetsingh/demo-truckerio1/apps/api
-> tsx watch src/index.ts
+> TMPDIR=/tmp tsx watch src/index.ts
 
-API listening on 4010
+API listening on 0.0.0.0:4010
+Billing readiness updated {
+  loadId: 'cmlmwubda000lx0rg773k3q21',
+  billingStatus: 'BLOCKED',
+  blockingReasons: [ 'Delivery incomplete' ]
+}
+Billing readiness updated {
+  loadId: 'cmlmwubda000lx0rg773k3q21',
+  billingStatus: 'BLOCKED',
+  blockingReasons: [ 'Missing POD', 'Missing BOL' ]
+}
+Billing readiness updated {
+  loadId: 'cmlmwubda000lx0rg773k3q21',
+  billingStatus: 'BLOCKED',
+  blockingReasons: [ 'Missing BOL' ]
+}
+Billing readiness updated {
+  loadId: 'cmlmwubda000lx0rg773k3q21',
+  billingStatus: 'INVOICED',
+  blockingReasons: []
+}
 ```
 
 ## Manual UI Checks Remaining
