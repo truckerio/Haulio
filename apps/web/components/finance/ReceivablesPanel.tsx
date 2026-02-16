@@ -148,6 +148,9 @@ function syncTone(sync: FinanceReceivableRow["integrations"]["quickbooks"]["sync
 
 function actionLabel(action: string) {
   if (action === "MARK_COLLECTED") return "Record payment";
+  if (action === "GENERATE_SETTLEMENT") return "Create pay run";
+  if (action === "VIEW_SETTLEMENT") return "Open payables";
+  if (action === "FOLLOW_UP_COLLECTION") return "Open collections";
   return action
     .toLowerCase()
     .split("_")
@@ -481,6 +484,14 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
             throw new Error("Generate invoice before recording payment.");
           }
           await openManualPayment(row);
+          return;
+        }
+        if (action === "GENERATE_SETTLEMENT" || action === "VIEW_SETTLEMENT") {
+          window.location.href = `/finance?tab=payables&loadId=${row.loadId}`;
+          return;
+        }
+        if (action === "FOLLOW_UP_COLLECTION") {
+          window.location.href = `/loads/${row.loadId}?tab=billing`;
           return;
         }
         window.location.href = `/loads/${row.loadId}?tab=billing`;
