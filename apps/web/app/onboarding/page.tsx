@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { UserProvider } from "@/components/auth/user-context";
 import { RouteGuard } from "@/components/rbac/route-guard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1114,10 +1113,8 @@ function OnboardingWizard() {
 
 export default function OnboardingPage() {
   return (
-    <UserProvider>
-      <RouteGuard allowedRoles={["ADMIN"]}>
-        <OnboardingWizard />
-      </RouteGuard>
-    </UserProvider>
+    <RouteGuard allowedRoles={["ADMIN"]}>
+      <OnboardingWizard />
+    </RouteGuard>
   );
 }

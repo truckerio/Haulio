@@ -22,6 +22,8 @@ must be set there because Next.js reads it during `next build`.
 
 - Web: http://localhost:3000
 - API: http://localhost:4000
+- Postgres (optional): localhost:5433 (container port 5432)
+- Redis (optional): localhost:6380 (container port 6379)
 
 ## Stop
 

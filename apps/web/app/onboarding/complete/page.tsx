@@ -1,7 +1,6 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { UserProvider } from "@/components/auth/user-context";
 import { RouteGuard } from "@/components/rbac/route-guard";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -66,10 +65,8 @@ function ActivationContent() {
 
 export default function OnboardingCompletePage() {
   return (
-    <UserProvider>
-      <RouteGuard allowedRoles={["ADMIN"]}>
-        <ActivationContent />
-      </RouteGuard>
-    </UserProvider>
+    <RouteGuard allowedRoles={["ADMIN"]}>
+      <ActivationContent />
+    </RouteGuard>
   );
 }

@@ -19,6 +19,10 @@ type PayableRun = {
   status: "PAYABLE_READY" | "RUN_DRAFT" | "RUN_PREVIEWED" | "RUN_FINALIZED" | "PAID";
   previewChecksum: string | null;
   finalizedChecksum: string | null;
+  holdReasonCode?: string | null;
+  holdOwner?: "DISPATCH" | "DRIVER" | "BILLING" | "SYSTEM" | null;
+  holdNotes?: string | null;
+  anomalyCount?: number;
   finalizedAt: string | null;
   paidAt: string | null;
   createdAt: string;
@@ -30,6 +34,14 @@ type PayableRun = {
     netCents: number;
   };
   lineItemCount: number;
+};
+
+type PayableAnomaly = {
+  code: string;
+  severity: "warning" | "critical";
+  message: string;
+  partyId?: string;
+  meta?: Record<string, unknown>;
 };
 
 type PayableLineItem = {
@@ -68,7 +80,12 @@ function runStatusTone(status: PayableRun["status"]) {
 }
 
 function runStatusLabel(status: PayableRun["status"]) {
-  return status.replaceAll("_", " ");
+  if (status === "PAYABLE_READY") return "Needs Review";
+  if (status === "RUN_DRAFT") return "Approved";
+  if (status === "RUN_PREVIEWED") return "In Run";
+  if (status === "RUN_FINALIZED") return "Finalized";
+  if (status === "PAID") return "Paid";
+  return String(status).replaceAll("_", " ");
 }
 
 export function PayablesPanel() {
@@ -78,6 +95,7 @@ export function PayablesPanel() {
   const [note, setNote] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [previewItems, setPreviewItems] = useState<PayableLineItem[]>([]);
+  const [previewAnomalies, setPreviewAnomalies] = useState<PayableAnomaly[]>([]);
   const [statements, setStatements] = useState<Statement[]>([]);
   const [form, setForm] = useState({ periodStart: "", periodEnd: "" });
 
@@ -124,12 +142,20 @@ export function PayablesPanel() {
   const previewRun = async (runId: string) => {
     setNote(null);
     try {
-      const response = await apiFetch<{ lineItems: PayableLineItem[]; previewChecksum: string; diff: { added: number; removed: number } }>(
+      const response = await apiFetch<{
+        lineItems: PayableLineItem[];
+        previewChecksum: string;
+        diff: { added: number; removed: number };
+        anomalies?: PayableAnomaly[];
+        hold?: { reasonCode: string | null; owner: string | null };
+      }>(
         `/payables/runs/${runId}/preview`,
         { method: "POST" }
       );
       setPreviewItems(response.lineItems ?? []);
-      setNote(`Preview ready. Checksum ${response.previewChecksum.slice(0, 12)}… · +${response.diff.added} / -${response.diff.removed}`);
+      setPreviewAnomalies(response.anomalies ?? []);
+      const anomalyText = (response.anomalies ?? []).length > 0 ? ` · ${response.anomalies?.length} anomaly(s)` : "";
+      setNote(`Preview ready. Checksum ${response.previewChecksum.slice(0, 12)}… · +${response.diff.added} / -${response.diff.removed}${anomalyText}`);
       await loadRuns();
     } catch (err) {
       setError((err as Error).message);
@@ -152,6 +178,36 @@ export function PayablesPanel() {
     try {
       await apiFetch(`/payables/runs/${runId}/mark-paid`, { method: "POST" });
       setNote("Run marked as paid.");
+      await loadRuns();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const putRunOnHold = async (runId: string) => {
+    setNote(null);
+    try {
+      await apiFetch(`/payables/runs/${runId}/hold`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reasonCode: "MANUAL_REVIEW",
+          owner: "BILLING",
+          notes: "Manual hold set from payables workspace.",
+        }),
+      });
+      setNote("Run put on hold.");
+      await loadRuns();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const releaseHold = async (runId: string) => {
+    setNote(null);
+    try {
+      await apiFetch(`/payables/runs/${runId}/release-hold`, { method: "POST" });
+      setNote("Run hold released.");
       await loadRuns();
     } catch (err) {
       setError((err as Error).message);
@@ -215,6 +271,16 @@ export function PayablesPanel() {
               <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
                 {run.lineItemCount} lines · Net {formatCurrency(run.totals.netCents)}
               </div>
+              {run.holdReasonCode ? (
+                <div className="mt-1 text-xs text-[color:var(--color-danger)]">
+                  Hold: {run.holdReasonCode} ({run.holdOwner ?? "BILLING"})
+                </div>
+              ) : null}
+              {(run.anomalyCount ?? 0) > 0 ? (
+                <div className="mt-1 text-xs text-[color:var(--color-warning)]">
+                  {(run.anomalyCount ?? 0)} anomaly(s) flagged in preview
+                </div>
+              ) : null}
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button size="sm" variant="secondary" onClick={(e) => {
                   e.stopPropagation();
@@ -240,6 +306,18 @@ export function PayablesPanel() {
                 }}>
                   Driver statements
                 </Button>
+                <Button size="sm" variant="secondary" onClick={(e) => {
+                  e.stopPropagation();
+                  putRunOnHold(run.id);
+                }}>
+                  Hold
+                </Button>
+                <Button size="sm" variant="secondary" onClick={(e) => {
+                  e.stopPropagation();
+                  releaseHold(run.id);
+                }}>
+                  Release hold
+                </Button>
               </div>
             </div>
           ))}
@@ -248,6 +326,23 @@ export function PayablesPanel() {
 
       <Card className="space-y-4">
         <SectionHeader title="Preview" subtitle={selectedRun ? `Run ${selectedRun.id}` : "Select a run"} />
+        {previewAnomalies.length > 0 ? (
+          <div className="grid gap-2">
+            {previewAnomalies.map((anomaly, idx) => (
+              <div
+                key={`${anomaly.code}-${idx}`}
+                className={`rounded-[var(--radius-control)] border px-3 py-2 text-xs ${
+                  anomaly.severity === "critical"
+                    ? "border-[color:var(--color-danger)] bg-[color:var(--color-danger-soft)] text-[color:var(--color-danger)]"
+                    : "border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
+                }`}
+              >
+                <div className="font-medium">{anomaly.code}</div>
+                <div>{anomaly.message}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
         {previewItems.length === 0 ? (
           <EmptyState title="No preview loaded." description="Run preview to generate deterministic line items." />
         ) : (

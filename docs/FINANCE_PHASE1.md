@@ -7,6 +7,35 @@
 - Async/retryable QuickBooks sync state visible per receivable/invoice.
 - Backward compatibility for existing billing endpoints and pages.
 
+## Phase 1 Implementation Map (Current)
+- Canonical receivables endpoint: `GET /finance/receivables`
+  - Includes `topBlocker`, `nextBestAction`, `nextBestActionReasonCodes`, `priorityScore`, `blockerOwner`, factor-ready hints, server-side `actions`.
+- Legacy compatibility endpoints preserved:
+  - `GET /billing/readiness` and `GET /billing/queue` map from canonical receivables.
+- Bulk receivables operations:
+  - `POST /finance/receivables/bulk/generate-invoices`
+  - `POST /finance/receivables/bulk/qbo-sync`
+  - `POST /finance/receivables/bulk/send-reminders`
+  - `dry_run` supported on all three.
+- QBO job API:
+  - `GET /finance/qbo/jobs`
+  - `POST /finance/qbo/jobs/:id/retry`
+  - `POST /finance/qbo/retry-failed`
+- Factoring APIs:
+  - `POST /billing/loads/:id/send-to-factoring`
+  - `GET /billing/loads/:id/factoring/history`
+  - `POST /billing/loads/:id/factoring/retry`
+  - Factor-ready checks and immutable `BillingSubmission` records.
+- Dispatch ⇄ Finance sync APIs:
+  - `GET /internal/loads/:id/finance-snapshot`
+  - `POST /internal/dispatch-events`
+- Outbox + jobs worker loops:
+  - Finance outbox poller + retry/backoff (`FinanceOutboxEvent`).
+  - QBO sync job worker + retry/backoff (`QboSyncJob`).
+- Payables foundation extensions:
+  - Hold metadata + anomalies on `PayableRun`.
+  - Hold/release endpoints and finalize guard when run is on hold.
+
 ## Current Dependency Map
 
 ### Readiness/status computed today

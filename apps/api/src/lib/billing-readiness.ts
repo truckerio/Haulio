@@ -14,6 +14,7 @@ import {
   StopType,
 } from "@truckerio/db";
 import { normalizeFinancePolicy, type OrgFinancePolicy } from "./finance-policy";
+import { enqueueFinanceStatusUpdatedEvent } from "./finance-outbox";
 
 export type BillingReadinessResult = {
   billingStatus: BillingStatus;
@@ -53,6 +54,7 @@ const BLOCKING_REASONS = {
   pod: "Missing POD",
   bol: "Missing BOL",
   rateCon: "Missing Rate Confirmation",
+  invoice: "Invoice required before ready",
   accessorialPending: "Accessorial pending resolution",
   accessorialProof: "Accessorial missing proof",
   dispute: "Billing dispute open",
@@ -154,6 +156,13 @@ export function evaluateBillingReadinessSnapshot(
     blockers.add(BLOCKING_REASONS.dispute);
   }
 
+  if (policy.requireInvoiceBeforeReady) {
+    const hasActiveInvoice = invoices.some((invoice) => invoice.status !== InvoiceStatus.VOID);
+    if (!hasActiveInvoice) {
+      blockers.add(BLOCKING_REASONS.invoice);
+    }
+  }
+
   const blockingReasons = Array.from(blockers);
   return {
     billingStatus: blockingReasons.length > 0 ? BillingStatus.BLOCKED : BillingStatus.READY,
@@ -201,12 +210,25 @@ export async function evaluateBillingReadiness(loadId: string) {
     load.billingBlockingReasons.join("||") !== result.blockingReasons.join("||") ||
     load.billingStatus !== result.billingStatus;
   if (reasonsChanged) {
-    await prisma.load.update({
+    const updated = await prisma.load.update({
       where: { id: load.id },
       data: {
         billingStatus: result.billingStatus,
         billingBlockingReasons: result.blockingReasons,
       },
+      select: {
+        id: true,
+        orgId: true,
+        financeStage: true,
+        billingStatus: true,
+      },
+    });
+    await enqueueFinanceStatusUpdatedEvent(prisma as any, {
+      orgId: updated.orgId,
+      loadId: updated.id,
+      stage: updated.financeStage ?? null,
+      billingStatus: updated.billingStatus,
+      dedupeSuffix: `${updated.billingStatus}:${result.blockingReasons.join("|") || "none"}`,
     });
     console.info("Billing readiness updated", {
       loadId: load.id,

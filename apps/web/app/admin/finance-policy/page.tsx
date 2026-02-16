@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -12,8 +12,10 @@ import { Select } from "@/components/ui/select";
 import { CheckboxField } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { ErrorBanner } from "@/components/ui/error-banner";
+import { getSaveButtonLabel } from "@/components/ui/save-feedback";
 import { AdminSettingsShell } from "@/components/admin-settings/AdminSettingsShell";
 import { apiFetch } from "@/lib/api";
+import { useSaveFeedback } from "@/lib/use-save-feedback";
 
 type FinancePolicy = {
   requireRateCon: "ALWAYS" | "BROKERED_ONLY" | "NEVER";
@@ -43,8 +45,7 @@ export default function FinancePolicySettingsPage() {
   const [policy, setPolicy] = useState<FinancePolicy | null>(null);
   const [draft, setDraft] = useState<FinancePolicy | null>(null);
   const [ccText, setCcText] = useState("");
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
-  const saveTimerRef = useRef<number | null>(null);
+  const { saveState, startSaving, markSaved, resetSaveState } = useSaveFeedback(1800);
   const [error, setError] = useState<string | null>(null);
 
   const loadPolicy = async () => {
@@ -66,17 +67,9 @@ export default function FinancePolicySettingsPage() {
     loadPolicy();
   }, []);
 
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-    };
-  }, []);
-
   const updatePolicy = async () => {
     if (!draft) return;
-    setSaveState("saving");
+    startSaving();
     try {
       const ccEmails = ccText
         .split(/[,\n]/)
@@ -108,14 +101,10 @@ export default function FinancePolicySettingsPage() {
       setPolicy(response.policy);
       setDraft(response.policy);
       setCcText((response.policy.factoringCcEmails ?? []).join(", "));
-      setSaveState("saved");
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-      saveTimerRef.current = window.setTimeout(() => setSaveState("idle"), 1800);
+      markSaved();
       setError(null);
     } catch (err) {
-      setSaveState("idle");
+      resetSaveState();
       setError((err as Error).message || "Failed to save finance policy.");
     }
   };
@@ -314,7 +303,7 @@ export default function FinancePolicySettingsPage() {
 
           <div className="flex items-center gap-2">
             <Button onClick={updatePolicy} disabled={!draft || saveState === "saving"}>
-              {saveState === "saving" ? "Saving..." : "Save policy"}
+              {getSaveButtonLabel(saveState, "Save policy")}
             </Button>
             <Button
               variant="secondary"
@@ -322,13 +311,12 @@ export default function FinancePolicySettingsPage() {
               onClick={() => {
                 setDraft(policy);
                 setCcText((policy?.factoringCcEmails ?? []).join(", "));
-                setSaveState("idle");
+                resetSaveState();
                 setError(null);
               }}
             >
               Reset
             </Button>
-            {saveState === "saved" ? <span className="text-sm text-[color:var(--color-success)]">Saved</span> : null}
           </div>
         </AdminSettingsShell>
       </RouteGuard>

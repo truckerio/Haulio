@@ -7,7 +7,9 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
+import { getSaveButtonLabel } from "@/components/ui/save-feedback";
 import { apiFetch, getApiBase } from "@/lib/api";
+import { useSaveFeedback } from "@/lib/use-save-feedback";
 
 type DriverProfile = {
   id: string;
@@ -28,7 +30,7 @@ type DriverUser = {
 export default function DriverProfilePage() {
   const [profile, setProfile] = useState<DriverProfile | null>(null);
   const [user, setUser] = useState<DriverUser | null>(null);
-  const [saving, setSaving] = useState(false);
+  const { saveState, startSaving, markSaved, resetSaveState } = useSaveFeedback(1800);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -62,7 +64,7 @@ export default function DriverProfilePage() {
 
   const saveProfile = async () => {
     if (!profile) return;
-    setSaving(true);
+    startSaving();
     setError(null);
     setSuccess(null);
     try {
@@ -78,11 +80,10 @@ export default function DriverProfilePage() {
           medCardExpiresAt: profile.medCardExpiresAt ?? "",
         }),
       });
-      setSuccess("Profile saved.");
+      markSaved();
     } catch (err) {
+      resetSaveState();
       setError((err as Error).message);
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -207,9 +208,11 @@ export default function DriverProfilePage() {
         </div>
       </Card>
 
-      <Button size="lg" className="w-full" onClick={saveProfile} disabled={saving || !profile}>
-        {saving ? "Saving..." : "Save profile"}
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button size="lg" className="w-full" onClick={saveProfile} disabled={saveState === "saving" || !profile}>
+          {getSaveButtonLabel(saveState, "Save profile")}
+        </Button>
+      </div>
     </DriverShell>
   );
 }

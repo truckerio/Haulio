@@ -342,7 +342,12 @@ export default function LoadDetailsPage() {
     billingStatus === "READY" ? "Ready to bill" : billingStatus === "INVOICED" ? "Invoiced" : "Blocked";
   const billingStatusTone =
     billingStatus === "READY" ? "success" : billingStatus === "INVOICED" ? "info" : "warning";
-  const canGenerateInvoice = Boolean(load?.status === "READY_TO_INVOICE" && billingStatus === "READY");
+  const invoiceBeforeReadyOnlyBlocker =
+    billingBlockingReasons.length > 0 &&
+    billingBlockingReasons.every((reason) => reason === "Invoice required before ready");
+  const canGenerateInvoice = Boolean(
+    (load?.status === "READY_TO_INVOICE" && billingStatus === "READY") || invoiceBeforeReadyOnlyBlocker
+  );
   const accessorials = load?.accessorials ?? [];
 
   const openDoc = (doc: any) => {
@@ -1348,7 +1353,7 @@ export default function LoadDetailsPage() {
                 Invoice status: {invoice?.status ? formatInvoiceStatusLabel(invoice.status) : "Not generated"}
               </div>
               <div className="flex flex-wrap gap-2">
-                {load?.status === "READY_TO_INVOICE" && canVerify ? (
+                {canVerify && canGenerateInvoice ? (
                   <Button onClick={generateInvoice} disabled={!canGenerateInvoice}>
                     Generate invoice
                   </Button>
@@ -1382,9 +1387,14 @@ export default function LoadDetailsPage() {
               {billingActionError ? (
                 <div className="text-xs text-[color:var(--color-danger)]">{billingActionError}</div>
               ) : null}
-              {billingStatus !== "READY" ? (
+              {billingStatus !== "READY" && !invoiceBeforeReadyOnlyBlocker ? (
                 <div className="text-xs text-[color:var(--color-text-muted)]">
                   Resolve readiness items before invoicing.
+                </div>
+              ) : null}
+              {invoiceBeforeReadyOnlyBlocker ? (
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Finance policy requires invoice generation before this load is marked ready.
                 </div>
               ) : null}
               {load?.externalInvoiceRef ? (
@@ -1871,7 +1881,7 @@ export default function LoadDetailsPage() {
               <div className="text-sm text-[color:var(--color-text-muted)]">
                 Invoice: {invoice?.status ? formatInvoiceStatusLabel(invoice.status) : "Not generated"}
               </div>
-              {load?.status === "READY_TO_INVOICE" && canVerify ? (
+              {canVerify && canGenerateInvoice ? (
                 <Button size="sm" onClick={generateInvoice}>
                   Generate invoice
                 </Button>

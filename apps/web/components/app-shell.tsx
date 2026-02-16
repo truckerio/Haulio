@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusChip } from "@/components/ui/status-chip";
 import { LogoutButton } from "@/components/auth/logout-button";
-import { UserProvider, useUser } from "@/components/auth/user-context";
+import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -147,7 +147,7 @@ function NavContent({
             <div className="text-xs text-[color:var(--color-text-muted)]">Operations console</div>
           </div>
         </div>
-        <Badge className="bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
+        <Badge className="max-w-[11rem] truncate bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
           {org?.companyDisplayName ?? org?.name ?? "Unknown org"}
         </Badge>
       </div>
@@ -291,10 +291,11 @@ function AppShellInner({
   const searchRequestIdRef = useRef(0);
   const [teamsEnabled, setTeamsEnabled] = useState(false);
   const canSeeTeamsOps = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
+  const showTeamsOps = Boolean(user && (user.role === "ADMIN" || (user.role === "HEAD_DISPATCHER" && teamsEnabled)));
   const canUseGlobalSearch = Boolean(user && searchRoles.has(user.role));
   const sections = useMemo(
-    () => getVisibleSections(user?.role, { showTeamsOps: canSeeTeamsOps && teamsEnabled }),
-    [user?.role, canSeeTeamsOps, teamsEnabled]
+    () => getVisibleSections(user?.role, { showTeamsOps }),
+    [user?.role, showTeamsOps]
   );
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const groupedSearchResults = useMemo(() => {
@@ -424,7 +425,7 @@ function AppShellInner({
   }, [searchTerm, canUseGlobalSearch]);
 
   return (
-    <div className="min-h-screen h-screen w-full overflow-hidden bg-[color:var(--color-bg-muted)]">
+    <div className="min-h-dvh w-full overflow-hidden bg-[color:var(--color-bg-muted)]">
       <a href="#main-content" className="skip-link">
         Skip to content
       </a>
@@ -451,7 +452,10 @@ function AppShellInner({
             onClick={() => setNavOpen(false)}
             aria-hidden="true"
           />
-          <aside ref={navRef} className="absolute left-0 top-0 h-full w-72 bg-white px-4 py-6 shadow-[var(--shadow-card)]">
+          <aside
+            ref={navRef}
+            className="absolute left-0 top-0 h-full w-[min(20rem,92vw)] bg-white px-4 py-6 shadow-[var(--shadow-card)]"
+          >
             <div className="flex items-center justify-between">
               <div className="text-sm font-semibold text-ink">Navigation</div>
               <button
@@ -483,7 +487,7 @@ function AppShellInner({
         </div>
       ) : null}
 
-      <div className="flex h-[calc(100vh-4rem)] w-full min-h-0 lg:h-screen">
+      <div className="flex h-[calc(100dvh-4rem)] w-full min-h-0 lg:h-screen">
         <aside className="hidden h-screen w-72 flex-col border-r border-[color:var(--color-divider)] bg-white lg:flex">
           <div className="flex-1 overflow-y-auto px-5 py-6">
             <NavContent
@@ -504,14 +508,14 @@ function AppShellInner({
 
         <main
           id="main-content"
-          className="page-fade flex-1 min-h-0 min-w-0 overflow-y-auto lg:h-screen"
+          className="flex-1 min-h-0 min-w-0 overflow-y-auto lg:h-screen"
         >
-          <div className="space-y-6 px-4 pb-10 pt-6 lg:px-10 lg:pb-16 lg:pt-8">
+          <div className="space-y-6 px-3 pb-8 pt-5 sm:px-4 sm:pb-10 sm:pt-6 lg:px-10 lg:pb-16 lg:pt-8">
             {user?.role === "ADMIN" &&
             onboarding &&
             onboarding.status === "NOT_ACTIVATED" &&
             !pathname.startsWith("/onboarding") ? (
-              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-6 py-4 shadow-[var(--shadow-subtle)]">
+              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-4 shadow-[var(--shadow-subtle)] sm:px-6">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-subtle)]">Setup</div>
@@ -529,7 +533,7 @@ function AppShellInner({
               </div>
             ) : null}
             {hideHeader ? null : (
-              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-6 py-4 shadow-[var(--shadow-subtle)]">
+              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-4 shadow-[var(--shadow-subtle)] sm:px-6">
                 <h2 className="text-[22px] font-semibold text-ink">{title}</h2>
                 {subtitle ? <p className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</p> : null}
               </div>
@@ -553,11 +557,5 @@ export function AppShell({
   hideHeader?: boolean;
   children: ReactNode;
 }) {
-  return (
-    <UserProvider>
-      <AppShellInner title={title} subtitle={subtitle} hideHeader={hideHeader}>
-        {children}
-      </AppShellInner>
-    </UserProvider>
-  );
+  return <AppShellInner title={title} subtitle={subtitle} hideHeader={hideHeader}>{children}</AppShellInner>;
 }

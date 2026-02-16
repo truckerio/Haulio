@@ -202,8 +202,8 @@ export default function IntegrationsSettingsPage() {
                     <span>Company ID: {quickbooksStatus?.companyId ?? "Not configured"}</span>
                   </div>
                   <div className="mt-3 text-xs text-[color:var(--color-text-muted)]">
-                    Configure via env vars: <code>QUICKBOOKS_ENABLED</code>, <code>QUICKBOOKS_COMPANY_ID</code>,{" "}
-                    <code>QUICKBOOKS_ACCESS_TOKEN</code>.
+                    Configure via env vars: <code>QUICKBOOKS_ENABLED</code>, <code>QUICKBOOKS_ACCESS_TOKEN</code>.
+                    Set org QuickBooks Company ID in Finance settings.
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">

@@ -35,7 +35,7 @@ export function AdminSettingsShell({
               alignCenter ? (
                 <div className="relative w-full">
                   <div className="absolute left-0 top-0 pt-0.5">{backAction}</div>
-                  <div className="text-center">
+                  <div className="px-12 text-center">
                     <div className="text-[20px] font-semibold text-ink">{title}</div>
                     {subtitle ? <div className="text-[13px] text-[color:var(--color-text-muted)]">{subtitle}</div> : null}
                   </div>
@@ -55,7 +55,7 @@ export function AdminSettingsShell({
                 {subtitle ? <div className="text-[13px] text-[color:var(--color-text-muted)]">{subtitle}</div> : null}
               </div>
             )}
-            {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+            {actions ? <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">{actions}</div> : null}
           </div>
         </div>
       </div>

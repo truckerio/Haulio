@@ -9,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { FormField } from "@/components/ui/form-field";
 import { RouteGuard } from "@/components/rbac/route-guard";
 import { useUser } from "@/components/auth/user-context";
+import { getSaveButtonLabel } from "@/components/ui/save-feedback";
 import { apiFetch, getApiBase } from "@/lib/api";
+import { useSaveFeedback } from "@/lib/use-save-feedback";
 
 type Profile = {
   id: string;
@@ -30,7 +32,7 @@ type MfaSetupPayload = {
 export default function ProfilePage() {
   const { user, refresh } = useUser();
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [saving, setSaving] = useState(false);
+  const { saveState, startSaving, markSaved, resetSaveState } = useSaveFeedback(1800);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [mfaSetup, setMfaSetup] = useState<MfaSetupPayload | null>(null);
@@ -65,7 +67,7 @@ export default function ProfilePage() {
 
   const saveProfile = async () => {
     if (!profile) return;
-    setSaving(true);
+    startSaving();
     setError(null);
     setSuccess(null);
     try {
@@ -78,11 +80,10 @@ export default function ProfilePage() {
           timezone: profile.timezone ?? "",
         }),
       });
-      setSuccess("Profile saved.");
+      markSaved();
     } catch (err) {
+      resetSaveState();
       setError((err as Error).message);
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -345,9 +346,11 @@ export default function ProfilePage() {
             )}
           </Card>
 
-          <Button size="lg" onClick={saveProfile} disabled={saving}>
-            {saving ? "Saving..." : "Save profile"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="lg" onClick={saveProfile} disabled={saveState === "saving"}>
+              {getSaveButtonLabel(saveState, "Save profile")}
+            </Button>
+          </div>
         </div>
       </RouteGuard>
     </AppShell>

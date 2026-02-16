@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -12,19 +12,30 @@ import { Select } from "@/components/ui/select";
 import { CheckboxField } from "@/components/ui/checkbox";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorBanner } from "@/components/ui/error-banner";
+import { getSaveButtonLabel } from "@/components/ui/save-feedback";
 import { AdminSettingsShell } from "@/components/admin-settings/AdminSettingsShell";
 import { apiFetch } from "@/lib/api";
+import { useSaveFeedback } from "@/lib/use-save-feedback";
 
 export default function CompanySettingsPage() {
   const router = useRouter();
   const [settings, setSettings] = useState<any | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<any | null>(null);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
-  const saveTimerRef = useRef<number | null>(null);
+  const {
+    saveState,
+    startSaving: startSettingsSaving,
+    markSaved: markSettingsSaved,
+    resetSaveState: resetSettingsSaveState,
+  } = useSaveFeedback(2000);
   const [sequence, setSequence] = useState<any | null>(null);
   const [sequenceDraft, setSequenceDraft] = useState<any | null>(null);
   const [sequenceError, setSequenceError] = useState<string | null>(null);
-  const [sequenceSaving, setSequenceSaving] = useState(false);
+  const {
+    saveState: sequenceSaveState,
+    startSaving: startSequenceSaving,
+    markSaved: markSequenceSaved,
+    resetSaveState: resetSequenceSaveState,
+  } = useSaveFeedback(2000);
   const [operatingEntities, setOperatingEntities] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -115,14 +126,6 @@ export default function CompanySettingsPage() {
   }, [loadData]);
 
   useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!settingsDraft && settings) {
       setSettingsDraft({
         ...settings,
@@ -140,11 +143,7 @@ export default function CompanySettingsPage() {
 
   const updateSettings = async () => {
     if (!settingsDraft) return;
-    if (saveTimerRef.current) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    setSaveState("saving");
+    startSettingsSaving();
     const toNumber = (value: any, fallback: number) => {
       const num = Number(value);
       return Number.isFinite(num) ? num : fallback;
@@ -210,19 +209,16 @@ export default function CompanySettingsPage() {
         body: JSON.stringify(payload),
       });
       await loadSettings();
-      setSaveState("saved");
-      saveTimerRef.current = window.setTimeout(() => {
-        setSaveState("idle");
-      }, 2000);
+      markSettingsSaved();
     } catch (err) {
-      setSaveState("idle");
+      resetSettingsSaveState();
       setError((err as Error).message || "Failed to save settings.");
     }
   };
 
   const updateSequences = async () => {
     if (!sequenceDraft) return;
-    setSequenceSaving(true);
+    startSequenceSaving();
     setSequenceError(null);
     try {
       const payload = {
@@ -238,10 +234,10 @@ export default function CompanySettingsPage() {
       });
       setSequence(data.sequence);
       setSequenceDraft(data.sequence);
+      markSequenceSaved();
     } catch (err) {
+      resetSequenceSaveState();
       setSequenceError((err as Error).message || "Failed to update numbering settings.");
-    } finally {
-      setSequenceSaving(false);
     }
   };
 
@@ -428,7 +424,7 @@ export default function CompanySettingsPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               <Button onClick={updateSettings} disabled={saveState === "saving"}>
-                {saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : "Save"}
+                {getSaveButtonLabel(saveState)}
               </Button>
               <Button variant="secondary" onClick={() => setSettingsDraft(settings)}>
                 Reset
@@ -455,8 +451,8 @@ export default function CompanySettingsPage() {
               </FormField>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button onClick={updateSequences} disabled={sequenceSaving}>
-                {sequenceSaving ? "Saving..." : "Save"}
+              <Button onClick={updateSequences} disabled={sequenceSaveState === "saving"}>
+                {getSaveButtonLabel(sequenceSaveState)}
               </Button>
               {sequenceError ? <div className="text-sm text-[color:var(--color-danger)]">{sequenceError}</div> : null}
             </div>

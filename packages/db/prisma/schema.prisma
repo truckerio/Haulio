@@ -412,6 +412,59 @@ enum BillingSubmissionStatus {
   FAILED
 }
 
+enum FinanceOutboxEventType {
+  DISPATCH_LOAD_UPDATED
+  FINANCE_STATUS_UPDATED
+  QBO_SYNC_REQUESTED
+  FACTORING_REQUESTED
+}
+
+enum FinanceOutboxEventStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum QboEntityType {
+  CUSTOMER
+  INVOICE
+  PAYMENT
+}
+
+enum QboSyncJobStatus {
+  QUEUED
+  SYNCING
+  SYNCED
+  FAILED
+}
+
+enum FinancePaymentMethod {
+  ACH
+  WIRE
+  CHECK
+  CASH
+  FACTORING
+  OTHER
+}
+
+enum FinanceReceivableStage {
+  DELIVERED
+  DOCS_REVIEW
+  READY
+  INVOICE_SENT
+  COLLECTED
+  SETTLED
+}
+
+enum FinanceBlockerOwner {
+  DISPATCH
+  DRIVER
+  BILLING
+  CUSTOMER
+  SYSTEM
+}
+
 enum PayableRunStatus {
   PAYABLE_READY
   RUN_DRAFT
@@ -430,6 +483,13 @@ enum PayableLineItemType {
   EARNING
   DEDUCTION
   REIMBURSEMENT
+}
+
+enum PayableHoldOwner {
+  DISPATCH
+  DRIVER
+  BILLING
+  SYSTEM
 }
 
 model Organization {
@@ -483,6 +543,9 @@ model Organization {
   payableRuns PayableRun[]
   payableLineItems PayableLineItem[]
   settlementPolicyVersions SettlementPolicyVersion[]
+  financeOutboxEvents FinanceOutboxEvent[]
+  qboSyncJobs QboSyncJob[]
+  invoicePayments InvoicePayment[]
 }
 
 model SetupCode {
@@ -605,6 +668,7 @@ model User {
   teamMemberships   TeamMember[]
   assignmentSuggestionLogs AssignmentSuggestionLog[] @relation("AssignmentSuggestionDispatcher")
   billingSubmissions BillingSubmission[] @relation("BillingSubmissionCreatedBy")
+  invoicePaymentsCreated InvoicePayment[] @relation("InvoicePaymentCreatedBy")
   payableRunsCreated PayableRun[] @relation("PayableRunCreatedBy")
   settlementPolicyVersionsCreated SettlementPolicyVersion[] @relation("SettlementPolicyVersionCreatedBy")
 
@@ -800,6 +864,8 @@ model Load {
   billingBlockingReasons String[] @default([])
   invoicedAt       DateTime?
   externalInvoiceRef String?
+  qboSyncStatus    QboSyncJobStatus?
+  qboSyncLastError String?
   completedAt      DateTime?  @db.Timestamptz(6)
   lockedAt         DateTime?
   createdById      String?
@@ -807,6 +873,14 @@ model Load {
   deletedById      String?
   deletedReason    String?
   createdAt        DateTime   @default(now())
+  financeStage     FinanceReceivableStage?
+  financeTopBlockerCode String?
+  financeTopBlockerMessage String?
+  financeNextBestAction String?
+  financeNextBestActionReasonCodes String[] @default([])
+  financePriorityScore Int @default(0)
+  financeBlockerOwner FinanceBlockerOwner?
+  financeSnapshotUpdatedAt DateTime?
 
   org            Organization          @relation(fields: [orgId], references: [id])
   operatingEntity OperatingEntity      @relation(fields: [operatingEntityId], references: [id])
@@ -833,7 +907,9 @@ model Load {
   charges        LoadCharge[]
   assignmentMembers LoadAssignmentMember[]
   billingSubmissions BillingSubmission[]
+  invoicePayments InvoicePayment[]
   payableLineItems PayableLineItem[]
+  financeOutboxEvents FinanceOutboxEvent[]
 
   @@unique([orgId, loadNumber])
   @@unique([orgId, tripNumber])
@@ -1445,6 +1521,7 @@ model OrgSettings {
   factoringEmail               String?
   factoringCcEmails            String[]        @default([])
   factoringAttachmentMode      FactoringAttachmentMode @default(LINK_ONLY)
+  quickbooksCompanyId          String?
   defaultPaymentTermsDays      Int?
   trackingPreference           TrackingPreference @default(MANUAL)
   settlementSchedule           SettlementSchedule @default(WEEKLY)
@@ -1488,6 +1565,7 @@ model Invoice {
   Event Event[]
   Task  Task[]
   billingSubmissions BillingSubmission[]
+  payments InvoicePayment[]
 
   @@unique([orgId, invoiceNumber])
 }
@@ -1531,6 +1609,73 @@ model BillingSubmission {
   @@index([orgId, channel, status, createdAt])
 }
 
+model InvoicePayment {
+  id          String               @id @default(cuid())
+  orgId       String
+  loadId      String
+  invoiceId   String
+  amountCents Int
+  method      FinancePaymentMethod @default(OTHER)
+  reference   String?
+  notes       String?
+  receivedAt  DateTime
+  createdById String
+  createdAt   DateTime             @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  load      Load         @relation(fields: [loadId], references: [id])
+  invoice   Invoice      @relation(fields: [invoiceId], references: [id])
+  createdBy User         @relation("InvoicePaymentCreatedBy", fields: [createdById], references: [id])
+
+  @@index([orgId, loadId, createdAt])
+  @@index([invoiceId, createdAt])
+}
+
+model FinanceOutboxEvent {
+  id           String                  @id @default(cuid())
+  orgId        String
+  loadId       String?
+  type         FinanceOutboxEventType
+  payload      Json
+  status       FinanceOutboxEventStatus @default(PENDING)
+  attemptCount Int                     @default(0)
+  nextAttemptAt DateTime               @default(now())
+  lastError    String?
+  dedupeKey    String
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  load Load?        @relation(fields: [loadId], references: [id])
+
+  @@unique([orgId, dedupeKey])
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([orgId, status, nextAttemptAt])
+}
+
+model QboSyncJob {
+  id               String         @id @default(cuid())
+  orgId            String
+  entityType       QboEntityType
+  entityId         String
+  status           QboSyncJobStatus @default(QUEUED)
+  idempotencyKey   String
+  requestId        String
+  qboId            String?
+  lastErrorCode    String?
+  lastErrorMessage String?
+  attemptCount     Int            @default(0)
+  nextAttemptAt    DateTime       @default(now())
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, idempotencyKey])
+  @@index([orgId, status, nextAttemptAt, createdAt])
+  @@index([orgId, entityType, entityId, createdAt])
+}
+
 model PayableRun {
   id               String          @id @default(cuid())
   orgId            String
@@ -1539,6 +1684,11 @@ model PayableRun {
   status           PayableRunStatus @default(RUN_DRAFT)
   previewChecksum  String?
   finalizedChecksum String?
+  holdReasonCode   String?
+  holdOwner        PayableHoldOwner?
+  holdNotes        String?
+  anomaliesJson    Json?
+  anomalyCount     Int             @default(0)
   createdById      String
   finalizedAt      DateTime?
   paidAt           DateTime?

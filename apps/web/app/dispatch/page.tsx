@@ -1183,7 +1183,7 @@ function DispatchPageContent() {
           selectedLoadId ? "lg:grid-cols-[minmax(420px,590px)_minmax(0,1fr)]" : ""
         }`}
       >
-        <div className={selectedLoadId ? "min-h-0 max-h-[calc(100vh-24rem)] overflow-y-auto" : ""}>
+        <div className={selectedLoadId ? "min-h-0 max-h-[calc(100dvh-24rem)] overflow-y-auto" : ""}>
           <DispatchBrowse
             loads={sortedLoads}
             selectedLoadId={selectedLoadId}
@@ -1193,7 +1193,7 @@ function DispatchPageContent() {
           />
         </div>
         {selectedLoadId ? (
-          <div className="min-h-0 max-h-[calc(100vh-24rem)] overflow-y-auto">
+          <div className="min-h-0 max-h-[calc(100dvh-24rem)] overflow-y-auto">
             {workbenchRightPane ?? (
               <Card>
                 <EmptyState title="Loading load..." description="Fetching assignment and stop details." />

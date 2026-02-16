@@ -7,8 +7,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-haulio}
+    # Avoid conflicting with dev/qa postgres that commonly binds 5432.
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +22,9 @@ services:
     image: redis:7
     env_file:
       - ../../.env.prod.local
+    # Avoid conflicting with a local redis on 6379.
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
   api:
     build:
@@ -30,6 +32,10 @@ services:
       dockerfile: Dockerfile.api
     env_file:
       - ../../.env.prod.local
+    environment:
+      # Prevent interactive corepack download prompts in container runs.
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      CI: "1"
     ports:
       - "4000:4000"
     volumes:
@@ -47,6 +53,9 @@ services:
       dockerfile: Dockerfile.worker
     env_file:
       - ../../.env.prod.local
+    environment:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      CI: "1"
     volumes:
       - uploads:/app/uploads
     restart: unless-stopped
@@ -69,6 +78,8 @@ services:
     environment:
       NEXT_PUBLIC_API_BASE: /api
       API_BASE_INTERNAL: http://api:4000
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      CI: "1"
     ports:
       - "3000:3000"
     restart: unless-stopped

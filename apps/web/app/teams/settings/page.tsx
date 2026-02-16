@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -14,7 +14,9 @@ import { Input } from "@/components/ui/input";
 import { FormField } from "@/components/ui/form-field";
 import { CheckboxField } from "@/components/ui/checkbox";
 import { ErrorBanner } from "@/components/ui/error-banner";
+import { getSaveButtonLabel } from "@/components/ui/save-feedback";
 import { apiFetch } from "@/lib/api";
+import { useSaveFeedback } from "@/lib/use-save-feedback";
 
 type TeamMember = {
   id: string;
@@ -54,9 +56,11 @@ export default function AdminTeamsPage() {
   const [draftName, setDraftName] = useState("");
   const [draftActive, setDraftActive] = useState(true);
   const [draftMemberIds, setDraftMemberIds] = useState<string[]>([]);
-  const [saving, setSaving] = useState(false);
+  const { saveState, startSaving, markSaved, resetSaveState } = useSaveFeedback(1800);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [deletingTeamId, setDeletingTeamId] = useState<string | null>(null);
+  const [actionNote, setActionNote] = useState<string | null>(null);
+  const noteTimerRef = useRef<number | null>(null);
 
   const selectedTeam = useMemo(
     () => teams.find((team) => team.id === selectedTeamId) ?? null,
@@ -101,6 +105,25 @@ export default function AdminTeamsPage() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (noteTimerRef.current) {
+        window.clearTimeout(noteTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showActionNote = (message: string) => {
+    if (noteTimerRef.current) {
+      window.clearTimeout(noteTimerRef.current);
+    }
+    setActionNote(message);
+    noteTimerRef.current = window.setTimeout(() => {
+      setActionNote(null);
+      noteTimerRef.current = null;
+    }, 2000);
+  };
+
   const openTeam = (team: Team) => {
     setSelectedTeamId(team.id);
     setDraftName(team.name);
@@ -115,6 +138,7 @@ export default function AdminTeamsPage() {
     setDraftActive(true);
     setDraftMemberIds([]);
     setDrawerError(null);
+    resetSaveState();
   };
 
   const createTeam = async () => {
@@ -137,6 +161,7 @@ export default function AdminTeamsPage() {
       if (createdTeam) {
         openTeam(createdTeam);
       }
+      showActionNote("Team created.");
     } catch (err) {
       setError((err as Error).message || "Failed to create team.");
     } finally {
@@ -152,7 +177,7 @@ export default function AdminTeamsPage() {
       return;
     }
 
-    setSaving(true);
+    startSaving();
     setDrawerError(null);
     try {
       if (name !== selectedTeam.name || draftActive !== selectedTeam.active) {
@@ -197,11 +222,12 @@ export default function AdminTeamsPage() {
       } else {
         closeDrawer();
       }
+      markSaved();
+      showActionNote("Team changes saved.");
       setError(null);
     } catch (err) {
+      resetSaveState();
       setDrawerError((err as Error).message || "Failed to save team changes.");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -215,6 +241,7 @@ export default function AdminTeamsPage() {
         closeDrawer();
       }
       await loadData();
+      showActionNote("Team deleted.");
       setError(null);
     } catch (err) {
       setError((err as Error).message || "Failed to delete team.");
@@ -251,11 +278,12 @@ export default function AdminTeamsPage() {
           }
         >
           {error ? <ErrorBanner message={error} /> : null}
+          {actionNote ? <div className="text-sm text-[color:var(--color-success)]">{actionNote}</div> : null}
 
           <Card className="space-y-3">
             <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Create team</div>
             <div className="flex flex-wrap items-end gap-3">
-              <FormField label="Team name" htmlFor="teamName" className="min-w-[260px] flex-1">
+              <FormField label="Team name" htmlFor="teamName" className="w-full flex-1 sm:min-w-[260px]">
                 <Input
                   id="teamName"
                   value={createName}
@@ -328,8 +356,8 @@ export default function AdminTeamsPage() {
               <Button variant="secondary" onClick={closeDrawer}>
                 Cancel
               </Button>
-              <Button onClick={saveTeam} disabled={!selectedTeam || saving}>
-                {saving ? "Saving..." : "Save changes"}
+              <Button onClick={saveTeam} disabled={!selectedTeam || saveState === "saving"}>
+                {getSaveButtonLabel(saveState, "Save changes")}
               </Button>
             </>
           }

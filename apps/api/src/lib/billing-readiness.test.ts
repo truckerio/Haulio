@@ -30,6 +30,8 @@ const ready = evaluateBillingReadinessSnapshot({
   docs: readyDocs,
   accessorials: [],
   invoices: [],
+}, {
+  requireInvoiceBeforeReady: false,
 });
 assert.equal(ready.billingStatus, BillingStatus.READY);
 assert.equal(ready.blockingReasons.length, 0);
@@ -65,6 +67,7 @@ const rateConBrokeredOnlyForCompanyLoad = evaluateBillingReadinessSnapshot(
   },
   {
     requireRateCon: FinanceRateConRequirement.BROKERED_ONLY,
+    requireInvoiceBeforeReady: false,
   }
 );
 assert.equal(rateConBrokeredOnlyForCompanyLoad.billingStatus, BillingStatus.READY);
@@ -99,6 +102,7 @@ const podNeverRequired = evaluateBillingReadinessSnapshot(
   },
   {
     requireSignedPOD: FinanceDeliveredDocRequirement.NEVER,
+    requireInvoiceBeforeReady: false,
   }
 );
 assert.equal(podNeverRequired.billingStatus, BillingStatus.READY);
@@ -157,5 +161,32 @@ const disputed = evaluateBillingReadinessSnapshot({
 });
 assert.equal(disputed.billingStatus, BillingStatus.BLOCKED);
 assert.ok(disputed.blockingReasons.includes("Billing dispute open"));
+
+const invoiceRequiredBlocked = evaluateBillingReadinessSnapshot(
+  {
+    load: deliveredBrokeredLoad,
+    docs: readyDocs,
+    accessorials: [],
+    invoices: [],
+  },
+  {
+    requireInvoiceBeforeReady: true,
+  }
+);
+assert.equal(invoiceRequiredBlocked.billingStatus, BillingStatus.BLOCKED);
+assert.ok(invoiceRequiredBlocked.blockingReasons.includes("Invoice required before ready"));
+
+const invoiceRequiredSatisfied = evaluateBillingReadinessSnapshot(
+  {
+    load: deliveredBrokeredLoad,
+    docs: readyDocs,
+    accessorials: [],
+    invoices: [{ status: InvoiceStatus.SENT }],
+  },
+  {
+    requireInvoiceBeforeReady: true,
+  }
+);
+assert.equal(invoiceRequiredSatisfied.billingStatus, BillingStatus.READY);
 
 console.log("billing readiness tests passed");

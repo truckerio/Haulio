@@ -5,12 +5,17 @@ import {
   TaskStatus,
   TaskType,
   InvoiceStatus,
+  FinanceOutboxEventStatus,
+  FinanceOutboxEventType,
   StopType,
   LoadStatus,
   DocStatus,
 } from "@truckerio/db";
 import { processLoadConfirmations } from "./load-confirmations";
 import { syncSamsaraFuelSummaries } from "./samsara-fuel";
+import { persistFinanceSnapshotForLoad } from "../../api/src/lib/finance-snapshot";
+import { enqueueFinanceStatusUpdatedEvent } from "../../api/src/lib/finance-outbox";
+import { enqueueQboInvoiceSyncJob, isQuickbooksConnectedFromEnv, processQueuedQboSyncJobs } from "../../api/src/lib/qbo-sync";
 
 const FUEL_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -251,6 +256,117 @@ async function ensureComplianceTasks() {
   }
 }
 
+function nextOutboxBackoffMinutes(attemptCount: number) {
+  const exp = Math.min(6, Math.max(1, attemptCount));
+  return Math.min(60, 2 ** exp);
+}
+
+async function processFinanceOutboxEvents(limit = 25) {
+  const now = new Date();
+  const events = await prisma.financeOutboxEvent.findMany({
+    where: {
+      status: { in: [FinanceOutboxEventStatus.PENDING, FinanceOutboxEventStatus.FAILED] },
+      nextAttemptAt: { lte: now },
+    },
+    orderBy: [{ nextAttemptAt: "asc" }, { createdAt: "asc" }],
+    take: limit,
+  });
+  for (const event of events) {
+    const claim = await prisma.financeOutboxEvent.updateMany({
+      where: {
+        id: event.id,
+        status: { in: [FinanceOutboxEventStatus.PENDING, FinanceOutboxEventStatus.FAILED] },
+      },
+      data: {
+        status: FinanceOutboxEventStatus.PROCESSING,
+        attemptCount: { increment: 1 },
+        lastError: null,
+      },
+    });
+    if (claim.count === 0) continue;
+
+    const correlationId = `outbox-${event.id}`;
+    try {
+      if (event.type === FinanceOutboxEventType.DISPATCH_LOAD_UPDATED) {
+        if (!event.loadId) {
+          throw new Error("Missing loadId for DISPATCH_LOAD_UPDATED");
+        }
+        const snapshot = await persistFinanceSnapshotForLoad({
+          orgId: event.orgId,
+          loadId: event.loadId,
+          quickbooksConnected: isQuickbooksConnectedFromEnv(),
+        });
+        if (snapshot) {
+          await enqueueFinanceStatusUpdatedEvent(prisma as any, {
+            orgId: event.orgId,
+            loadId: event.loadId,
+            stage: snapshot.billingStage,
+            billingStatus: snapshot.readinessSnapshot.isReady ? "READY" : "BLOCKED",
+            dedupeSuffix: `snapshot:${snapshot.priorityScore}`,
+          });
+        }
+      } else if (event.type === FinanceOutboxEventType.FINANCE_STATUS_UPDATED) {
+        if (event.loadId) {
+          await persistFinanceSnapshotForLoad({
+            orgId: event.orgId,
+            loadId: event.loadId,
+            quickbooksConnected: isQuickbooksConnectedFromEnv(),
+          });
+        }
+      } else if (event.type === FinanceOutboxEventType.QBO_SYNC_REQUESTED) {
+        const payload = (event.payload ?? {}) as Record<string, unknown>;
+        const invoiceId = typeof payload.invoiceId === "string" ? payload.invoiceId : null;
+        if (!invoiceId) {
+          throw new Error("Missing invoiceId for QBO_SYNC_REQUESTED");
+        }
+        await enqueueQboInvoiceSyncJob(prisma as any, {
+          orgId: event.orgId,
+          invoiceId,
+          reason: "worker.outbox.qbo_sync_requested",
+        });
+      } else if (event.type === FinanceOutboxEventType.FACTORING_REQUESTED) {
+        // FACTORING_REQUESTED is currently audit-only in Phase 1.
+      }
+
+      await prisma.financeOutboxEvent.update({
+        where: { id: event.id },
+        data: {
+          status: FinanceOutboxEventStatus.DONE,
+          lastError: null,
+          nextAttemptAt: now,
+        },
+      });
+      console.info("finance.outbox.done", {
+        correlationId,
+        eventId: event.id,
+        type: event.type,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const latest = await prisma.financeOutboxEvent.findFirst({
+        where: { id: event.id },
+        select: { attemptCount: true },
+      });
+      const attempts = latest?.attemptCount ?? event.attemptCount + 1;
+      const retryAt = new Date(Date.now() + nextOutboxBackoffMinutes(attempts) * 60 * 1000);
+      await prisma.financeOutboxEvent.update({
+        where: { id: event.id },
+        data: {
+          status: FinanceOutboxEventStatus.FAILED,
+          lastError: message,
+          nextAttemptAt: retryAt,
+        },
+      });
+      console.error("finance.outbox.failed", {
+        correlationId,
+        eventId: event.id,
+        type: event.type,
+        error: message,
+      });
+    }
+  }
+}
+
 let lastLearningPruneAt: number | null = null;
 let lastFuelSyncAt: number | null = null;
 
@@ -285,6 +401,8 @@ async function pruneLearningExamples() {
 
 async function runLoop() {
   try {
+    await processFinanceOutboxEvents(40);
+    await processQueuedQboSyncJobs({ limit: 20 });
     await ensureMissingPodTasks();
     await cleanupMissingPodTasks();
     await ensureInvoiceAgingTasks();

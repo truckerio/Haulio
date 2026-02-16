@@ -47,9 +47,12 @@ import {
   BillingStatus,
   BillingSubmissionChannel,
   BillingSubmissionStatus,
+  FinancePaymentMethod,
   PayableLineItemType,
+  PayableHoldOwner,
   PayablePartyType,
   PayableRunStatus,
+  QboSyncJobStatus,
   AccessorialStatus,
   AccessorialType,
   MfaChallengePurpose,
@@ -100,6 +103,19 @@ import {
   mapReceivablesToLegacyReadiness,
 } from "./lib/finance-receivables";
 import { canRoleOverrideReadiness, financePolicyPayloadSchema, normalizeFinancePolicy } from "./lib/finance-policy";
+import {
+  enqueueDispatchLoadUpdatedEvent,
+  enqueueFinanceStatusUpdatedEvent,
+  enqueueQboSyncRequestedEvent,
+} from "./lib/finance-outbox";
+import {
+  enqueueQboInvoiceSyncJob,
+  getQuickbooksStatusForOrg,
+  isQuickbooksConnectedFromEnv,
+  processQueuedQboSyncJobs,
+  retryQboSyncJob,
+} from "./lib/qbo-sync";
+import { computeFinanceSnapshotForLoad, persistFinanceSnapshotForLoad } from "./lib/finance-snapshot";
 import { getVaultStatus, DEFAULT_VAULT_EXPIRING_DAYS, VAULT_DOCS_REQUIRING_EXPIRY } from "./lib/vault-status";
 import {
   applyTeamFilterOverride,
@@ -182,6 +198,28 @@ const parseTermsDays = (terms?: string | null) => {
 };
 
 const RESET_TOKEN_TTL_MINUTES = 60;
+
+async function refreshFinanceAfterMutation(params: {
+  orgId: string;
+  loadId: string;
+  source: string;
+  trigger: string;
+  dedupeSuffix?: string | null;
+}) {
+  await evaluateBillingReadiness(params.loadId);
+  await persistFinanceSnapshotForLoad({
+    orgId: params.orgId,
+    loadId: params.loadId,
+    quickbooksConnected: isQuickbooksConnectedFromEnv(),
+  });
+  await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+    orgId: params.orgId,
+    loadId: params.loadId,
+    source: params.source,
+    trigger: params.trigger,
+    dedupeSuffix: params.dedupeSuffix ?? null,
+  });
+}
 
 function hashToken(token: string) {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -489,7 +527,13 @@ async function transitionLoadStatus(params: {
     before: { status: params.load.status },
     after: { status: params.nextStatus },
   });
-  await evaluateBillingReadiness(params.load.id);
+  await refreshFinanceAfterMutation({
+    orgId: params.orgId,
+    loadId: params.load.id,
+    source: "dispatch.load-status-transition",
+    trigger: params.nextStatus,
+    dedupeSuffix: `${params.load.status}->${params.nextStatus}`,
+  });
   return updated;
 }
 
@@ -1005,6 +1049,10 @@ const explicitOrigins = Array.from(
 );
 const allowedOrigins = explicitOrigins;
 const IS_PROD = process.env.NODE_ENV === "production";
+const WEB_ORIGIN = process.env.WEB_ORIGIN?.trim() || "";
+const DEFAULT_COOKIE_SECURE = WEB_ORIGIN ? WEB_ORIGIN.startsWith("https://") : IS_PROD;
+const COOKIE_SECURE =
+  typeof process.env.COOKIE_SECURE === "string" ? process.env.COOKIE_SECURE.toLowerCase() === "true" : DEFAULT_COOKIE_SECURE;
 
 const parseHostname = (value?: string) => {
   if (!value) return null;
@@ -1089,7 +1137,8 @@ app.post("/setup/validate", setupLimiter, async (req, res) => {
   res.cookie("setup_code", normalized, {
     httpOnly: true,
     sameSite: "lax",
-    secure: IS_PROD,
+    // Prod-local runs NODE_ENV=production over http://localhost; Secure cookies would be dropped.
+    secure: COOKIE_SECURE,
     maxAge: 15 * 60 * 1000,
   });
   res.json({ valid: true });
@@ -4021,7 +4070,13 @@ app.post(
         requiresProof: accessorial.requiresProof,
       },
     });
-    await evaluateBillingReadiness(load.id);
+    await refreshFinanceAfterMutation({
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      source: "dispatch.accessorial",
+      trigger: "created",
+      dedupeSuffix: accessorial.id,
+    });
     res.json({ accessorial });
   }
 );
@@ -4085,7 +4140,13 @@ app.patch(
       before: { status: accessorial.status, amount: accessorial.amount, requiresProof: accessorial.requiresProof },
       after: { status: updated.status, amount: updated.amount, requiresProof: updated.requiresProof },
     });
-    await evaluateBillingReadiness(updated.loadId);
+    await refreshFinanceAfterMutation({
+      orgId: req.user!.orgId,
+      loadId: updated.loadId,
+      source: "dispatch.accessorial",
+      trigger: "updated",
+      dedupeSuffix: updated.id,
+    });
     res.json({ accessorial: updated });
   }
 );
@@ -4125,7 +4186,13 @@ app.post(
       before: { status: accessorial.status },
       after: { status: updated.status },
     });
-    await evaluateBillingReadiness(updated.loadId);
+    await refreshFinanceAfterMutation({
+      orgId: req.user!.orgId,
+      loadId: updated.loadId,
+      source: "dispatch.accessorial",
+      trigger: "approved",
+      dedupeSuffix: updated.id,
+    });
     res.json({ accessorial: updated });
   }
 );
@@ -4168,7 +4235,13 @@ app.post(
       before: { status: accessorial.status },
       after: { status: updated.status },
     });
-    await evaluateBillingReadiness(updated.loadId);
+    await refreshFinanceAfterMutation({
+      orgId: req.user!.orgId,
+      loadId: updated.loadId,
+      source: "dispatch.accessorial",
+      trigger: "rejected",
+      dedupeSuffix: updated.id,
+    });
     res.json({ accessorial: updated });
   }
 );
@@ -8053,7 +8126,13 @@ app.post(
         summary: `Uploaded ${parsed.data.type} for load ${load.loadNumber}`,
         after: { type: doc.type, status: doc.status, stopId: doc.stopId ?? null },
       });
-      await evaluateBillingReadiness(load.id);
+      await refreshFinanceAfterMutation({
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        source: "dispatch.docs",
+        trigger: "uploaded",
+        dedupeSuffix: doc.id,
+      });
       res.json({ doc });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
@@ -8172,7 +8251,13 @@ app.post(
         summary: `Uploaded ${parsed.data.type} for load ${load.loadNumber}`,
         after: { type: doc.type, status: doc.status, stopId: doc.stopId ?? null },
       });
-      await evaluateBillingReadiness(load.id);
+      await refreshFinanceAfterMutation({
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        source: "dispatch.docs",
+        trigger: "driver_uploaded",
+        dedupeSuffix: doc.id,
+      });
       res.json({ doc });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
@@ -8373,7 +8458,13 @@ app.post("/docs/:id/verify", requireAuth, requireCsrf, requirePermission(Permiss
       await completeTask(task.id, req.user!.orgId, req.user!.id);
     }
   }
-  await evaluateBillingReadiness(load.id);
+  await refreshFinanceAfterMutation({
+    orgId: req.user!.orgId,
+    loadId: load.id,
+    source: "dispatch.docs",
+    trigger: "verified",
+    dedupeSuffix: doc.id,
+  });
   res.json({
     doc: updated,
     invoice: null,
@@ -8426,7 +8517,13 @@ app.post("/docs/:id/reject", requireAuth, requireCsrf, requirePermission(Permiss
     before: { status: doc.status },
     after: { status: DocStatus.REJECTED },
   });
-  await evaluateBillingReadiness(doc.loadId);
+  await refreshFinanceAfterMutation({
+    orgId: req.user!.orgId,
+    loadId: doc.loadId,
+    source: "dispatch.docs",
+    trigger: "rejected",
+    dedupeSuffix: doc.id,
+  });
   res.json({ doc: updated });
 });
 
@@ -8467,10 +8564,8 @@ app.get("/finance/receivables", requireAuth, requireRole("ADMIN", "DISPATCHER", 
     ["NOT_CONNECTED", "NOT_SYNCED", "SYNCING", "SYNCED", "FAILED"].includes(token)
   );
 
-  const enabledFlag = String(process.env.QUICKBOOKS_ENABLED || "").toLowerCase() === "true";
-  const companyId = process.env.QUICKBOOKS_COMPANY_ID || null;
-  const hasToken = Boolean(process.env.QUICKBOOKS_ACCESS_TOKEN);
-  const quickbooksConnected = Boolean(enabledFlag && companyId && hasToken);
+  const qbo = await getQuickbooksStatusForOrg(req.user!.orgId);
+  const quickbooksConnected = qbo.enabled;
 
   const result = await listFinanceReceivables({
     orgId: req.user!.orgId,
@@ -8494,11 +8589,303 @@ app.get("/finance/receivables", requireAuth, requireRole("ADMIN", "DISPATCHER", 
   });
 });
 
+app.post(
+  "/finance/receivables/bulk/generate-invoices",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      loadIds: z.array(z.string()).min(1),
+      dry_run: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const dryRun = Boolean(parsed.data.dry_run);
+    const loadIds = Array.from(new Set(parsed.data.loadIds.map((id) => id.trim()).filter(Boolean)));
+    const results: Array<{ loadId: string; ok: boolean; message: string; invoiceId?: string | null }> = [];
+    for (const loadId of loadIds) {
+      const load = await prisma.load.findFirst({
+        where: { id: loadId, orgId: req.user!.orgId, deletedAt: null },
+        select: { id: true, loadNumber: true, status: true },
+      });
+      if (!load) {
+        results.push({ loadId, ok: false, message: "Load not found" });
+        continue;
+      }
+      if (dryRun) {
+        results.push({ loadId, ok: true, message: "Ready to generate invoice" });
+        continue;
+      }
+      try {
+        const invoiceResult = await generateInvoiceForLoad({
+          orgId: req.user!.orgId,
+          loadId,
+          userId: req.user!.id,
+          role: req.user!.role as Role,
+        });
+        if ("invoice" in invoiceResult && invoiceResult.invoice?.id) {
+          await persistFinanceSnapshotForLoad({
+            orgId: req.user!.orgId,
+            loadId,
+            quickbooksConnected: isQuickbooksConnectedFromEnv(),
+          });
+          await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+            orgId: req.user!.orgId,
+            loadId,
+            source: "finance.bulk.generate-invoices",
+            trigger: "invoice_generated",
+            dedupeSuffix: invoiceResult.invoice.id,
+          });
+          results.push({
+            loadId,
+            ok: true,
+            message: "Invoice generated",
+            invoiceId: invoiceResult.invoice.id,
+          });
+        } else {
+          results.push({
+            loadId,
+            ok: false,
+            message: `Missing required docs: ${(invoiceResult as any).missingDocs?.join(", ") || "unknown"}`,
+          });
+        }
+      } catch (error) {
+        results.push({ loadId, ok: false, message: (error as Error).message });
+      }
+    }
+    const okCount = results.filter((row) => row.ok).length;
+    res.json({
+      dryRun,
+      summary: {
+        total: results.length,
+        ok: okCount,
+        failed: results.length - okCount,
+      },
+      results,
+    });
+  }
+);
+
+app.post(
+  "/finance/receivables/bulk/qbo-sync",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      loadIds: z.array(z.string()).min(1),
+      dry_run: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    if (!isQuickbooksConnectedFromEnv()) {
+      res.status(400).json({ error: "QuickBooks is not connected" });
+      return;
+    }
+    const dryRun = Boolean(parsed.data.dry_run);
+    const loadIds = Array.from(new Set(parsed.data.loadIds.map((id) => id.trim()).filter(Boolean)));
+    const results: Array<{ loadId: string; ok: boolean; message: string; jobId?: string | null }> = [];
+    for (const loadId of loadIds) {
+      const load = await prisma.load.findFirst({
+        where: { id: loadId, orgId: req.user!.orgId, deletedAt: null },
+        include: { invoices: { orderBy: { generatedAt: "desc" }, take: 1 } },
+      });
+      if (!load) {
+        results.push({ loadId, ok: false, message: "Load not found" });
+        continue;
+      }
+      const invoice = load.invoices[0] ?? null;
+      if (!invoice) {
+        results.push({ loadId, ok: false, message: "Invoice not found" });
+        continue;
+      }
+      if (dryRun) {
+        results.push({ loadId, ok: true, message: "Will enqueue QBO sync" });
+        continue;
+      }
+      try {
+        const job = await enqueueQboInvoiceSyncJob(prisma as any, {
+          orgId: req.user!.orgId,
+          invoiceId: invoice.id,
+          reason: "finance.bulk.qbo-sync",
+        });
+        await enqueueQboSyncRequestedEvent(prisma as any, {
+          orgId: req.user!.orgId,
+          loadId: load.id,
+          invoiceId: invoice.id,
+          reason: "finance.bulk.qbo-sync",
+          dedupeSuffix: job.id,
+        });
+        results.push({ loadId, ok: true, message: "Queued", jobId: job.id });
+      } catch (error) {
+        results.push({ loadId, ok: false, message: (error as Error).message });
+      }
+    }
+    const okCount = results.filter((row) => row.ok).length;
+    res.json({
+      dryRun,
+      summary: {
+        total: results.length,
+        ok: okCount,
+        failed: results.length - okCount,
+      },
+      results,
+    });
+  }
+);
+
+app.post(
+  "/finance/receivables/bulk/send-reminders",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      loadIds: z.array(z.string()).min(1),
+      dry_run: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const dryRun = Boolean(parsed.data.dry_run);
+    const loadIds = Array.from(new Set(parsed.data.loadIds.map((id) => id.trim()).filter(Boolean)));
+    const results: Array<{ loadId: string; ok: boolean; message: string }> = [];
+    for (const loadId of loadIds) {
+      const load = await prisma.load.findFirst({
+        where: { id: loadId, orgId: req.user!.orgId, deletedAt: null },
+        include: { invoices: { orderBy: { generatedAt: "desc" }, take: 1 } },
+      });
+      if (!load) {
+        results.push({ loadId, ok: false, message: "Load not found" });
+        continue;
+      }
+      const invoice = load.invoices[0] ?? null;
+      if (!invoice || ![InvoiceStatus.SENT, InvoiceStatus.ACCEPTED, InvoiceStatus.DISPUTED].includes(invoice.status)) {
+        results.push({ loadId, ok: false, message: "Invoice is not in reminder stage" });
+        continue;
+      }
+      if (dryRun) {
+        results.push({ loadId, ok: true, message: "Reminder validation passed" });
+        continue;
+      }
+      results.push({ loadId, ok: true, message: "Reminder workflow stubbed (email integration pending recipient mapping)" });
+    }
+    const okCount = results.filter((row) => row.ok).length;
+    res.json({
+      dryRun,
+      summary: {
+        total: results.length,
+        ok: okCount,
+        failed: results.length - okCount,
+      },
+      results,
+    });
+  }
+);
+
+app.get("/finance/qbo/jobs", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const statusParam = typeof req.query.status === "string" ? req.query.status.toUpperCase() : "";
+  const statusFilter =
+    statusParam && ["QUEUED", "SYNCING", "SYNCED", "FAILED"].includes(statusParam)
+      ? (statusParam as QboSyncJobStatus)
+      : undefined;
+  const jobs = await prisma.qboSyncJob.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      ...(statusFilter ? { status: statusFilter } : {}),
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    take: 200,
+  });
+  res.json({ jobs });
+});
+
+app.post("/finance/qbo/jobs/:id/retry", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  try {
+    const job = await retryQboSyncJob({ orgId: req.user!.orgId, jobId: req.params.id });
+    res.json({ job });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
+});
+
+app.post("/finance/qbo/retry-failed", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const failed = await prisma.qboSyncJob.findMany({
+    where: { orgId: req.user!.orgId, status: QboSyncJobStatus.FAILED },
+    select: { id: true },
+    take: 500,
+  });
+  for (const row of failed) {
+    await retryQboSyncJob({ orgId: req.user!.orgId, jobId: row.id });
+  }
+  const processed = await processQueuedQboSyncJobs({ limit: 25 });
+  res.json({
+    retried: failed.length,
+    processed,
+  });
+});
+
+app.get("/internal/loads/:id/finance-snapshot", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
+  const snapshot = await computeFinanceSnapshotForLoad({
+    orgId: req.user!.orgId,
+    loadId: req.params.id,
+    quickbooksConnected: isQuickbooksConnectedFromEnv(),
+  });
+  if (!snapshot) {
+    res.status(404).json({ error: "Load not found" });
+    return;
+  }
+  res.json({ snapshot });
+});
+
+app.post(
+  "/internal/dispatch-events",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      loadId: z.string().min(1),
+      trigger: z.string().min(1),
+      source: z.string().min(1).default("dispatch.internal"),
+      dedupeSuffix: z.string().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const load = await prisma.load.findFirst({
+      where: { id: parsed.data.loadId, orgId: req.user!.orgId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    const event = await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      source: parsed.data.source,
+      trigger: parsed.data.trigger,
+      dedupeSuffix: parsed.data.dedupeSuffix ?? null,
+    });
+    res.json({ event });
+  }
+);
+
 app.get("/billing/readiness", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
-  const enabledFlag = String(process.env.QUICKBOOKS_ENABLED || "").toLowerCase() === "true";
-  const companyId = process.env.QUICKBOOKS_COMPANY_ID || null;
-  const hasToken = Boolean(process.env.QUICKBOOKS_ACCESS_TOKEN);
-  const quickbooksConnected = Boolean(enabledFlag && companyId && hasToken);
+  const qbo = await getQuickbooksStatusForOrg(req.user!.orgId);
+  const quickbooksConnected = qbo.enabled;
   const result = await listFinanceReceivables({
     orgId: req.user!.orgId,
     limit: 500,
@@ -8507,18 +8894,55 @@ app.get("/billing/readiness", requireAuth, requireRole("ADMIN", "DISPATCHER", "H
   res.json({ loads: mapReceivablesToLegacyReadiness(result.items, result.loadsById) });
 });
 
-app.get("/integrations/quickbooks/status", requireAuth, requireRole("ADMIN", "BILLING"), async (_req, res) => {
-  const enabledFlag = String(process.env.QUICKBOOKS_ENABLED || "").toLowerCase() === "true";
-  const companyId = process.env.QUICKBOOKS_COMPANY_ID || null;
-  const hasToken = Boolean(process.env.QUICKBOOKS_ACCESS_TOKEN);
-  res.json({ enabled: Boolean(enabledFlag && companyId && hasToken), companyId });
+app.get("/integrations/quickbooks/status", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const qbo = await getQuickbooksStatusForOrg(req.user!.orgId);
+  res.json({ enabled: qbo.enabled, companyId: qbo.companyId });
+});
+
+app.put("/integrations/quickbooks/status", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    companyId: z.union([z.string().trim().min(1), z.literal(""), z.null()]).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const settings = await prisma.orgSettings.findFirst({
+    where: { orgId: req.user!.orgId },
+    select: { id: true, quickbooksCompanyId: true },
+  });
+  if (!settings) {
+    res.status(404).json({ error: "Settings not configured" });
+    return;
+  }
+  const nextCompanyId = parsed.data.companyId?.trim() ? parsed.data.companyId.trim() : null;
+  if (settings.quickbooksCompanyId === nextCompanyId) {
+    const status = await getQuickbooksStatusForOrg(req.user!.orgId);
+    res.json({ enabled: status.enabled, companyId: status.companyId });
+    return;
+  }
+  await prisma.orgSettings.update({
+    where: { orgId: req.user!.orgId },
+    data: { quickbooksCompanyId: nextCompanyId },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "QUICKBOOKS_COMPANY_ID_UPDATED",
+    entity: "OrgSettings",
+    entityId: settings.id,
+    summary: "Updated QuickBooks company ID",
+    before: { quickbooksCompanyId: settings.quickbooksCompanyId },
+    after: { quickbooksCompanyId: nextCompanyId },
+  });
+  const status = await getQuickbooksStatusForOrg(req.user!.orgId);
+  res.json({ enabled: status.enabled, companyId: status.companyId });
 });
 
 app.get("/billing/queue", requireAuth, requirePermission(Permission.DOC_VERIFY, Permission.INVOICE_SEND), async (req, res) => {
-  const enabledFlag = String(process.env.QUICKBOOKS_ENABLED || "").toLowerCase() === "true";
-  const companyId = process.env.QUICKBOOKS_COMPANY_ID || null;
-  const hasToken = Boolean(process.env.QUICKBOOKS_ACCESS_TOKEN);
-  const quickbooksConnected = Boolean(enabledFlag && companyId && hasToken);
+  const qbo = await getQuickbooksStatusForOrg(req.user!.orgId);
+  const quickbooksConnected = qbo.enabled;
   const result = await listFinanceReceivables({
     orgId: req.user!.orgId,
     limit: 500,
@@ -8552,231 +8976,306 @@ app.get("/billing/queue", requireAuth, requirePermission(Permission.DOC_VERIFY, 
   res.json({ delivered, ready, invoiced });
 });
 
+const factoringSendPayloadSchema = z.object({
+  toEmail: z.string().trim().email().optional(),
+  ccEmails: z.array(z.string().trim().email()).optional(),
+  override: z.boolean().optional(),
+  overrideReason: z.string().trim().max(400).optional(),
+});
+
+async function sendLoadToFactoring(params: {
+  orgId: string;
+  userId: string;
+  role: Role;
+  loadId: string;
+  input: z.infer<typeof factoringSendPayloadSchema>;
+  retryMode?: boolean;
+}) {
+  const [load, settings] = await Promise.all([
+    prisma.load.findFirst({
+      where: { id: params.loadId, orgId: params.orgId },
+      include: {
+        stops: { orderBy: { sequence: "asc" } },
+        docs: true,
+        accessorials: true,
+        invoices: { orderBy: { generatedAt: "desc" } },
+      },
+    }),
+    prisma.orgSettings.findFirst({
+      where: { orgId: params.orgId },
+      select: {
+        requiredDocs: true,
+        ...FINANCE_POLICY_SELECT,
+      },
+    }),
+  ]);
+  if (!load) throw new Error("Load not found");
+  if (!settings) throw new Error("Settings not configured");
+
+  const policy = normalizeFinancePolicy(settings);
+  if (!policy.factoringEnabled) throw new Error("Factoring is not enabled for this organization");
+
+  const toEmail = params.input.toEmail?.trim() || policy.factoringEmail?.trim() || "";
+  if (!toEmail) throw new Error("Factoring email is required");
+  const ccEmails = (params.input.ccEmails ?? policy.factoringCcEmails ?? []).map((email) => email.trim()).filter(Boolean);
+
+  const snapshot = await computeFinanceSnapshotForLoad({
+    orgId: params.orgId,
+    loadId: load.id,
+    quickbooksConnected: isQuickbooksConnectedFromEnv(),
+  });
+  if (!snapshot) throw new Error("Finance snapshot unavailable");
+
+  const overrideRequested = Boolean(params.input.override);
+  const overrideAllowed = canRoleOverrideReadiness(policy, params.role as Role);
+  const override = overrideRequested && overrideAllowed;
+  if (overrideRequested && !overrideAllowed) {
+    throw new Error("Readiness override is not allowed for this role");
+  }
+  if (override && !params.input.overrideReason?.trim()) {
+    throw new Error("Override reason is required when readiness is overridden");
+  }
+  if (!snapshot.readinessSnapshot.isReady && !override) {
+    throw new Error(
+      `Load is not ready for factoring submission: ${snapshot.readinessSnapshot.blockers.map((b) => b.code).join(", ")}`
+    );
+  }
+  if (!snapshot.factorReady) {
+    throw new Error(`Load is not factor-ready: ${snapshot.factorReadyReasonCodes.join(", ") || "unknown reason"}`);
+  }
+
+  const invoice = load.invoices[0] ?? null;
+  if (policy.requireInvoiceBeforeSend && !invoice) {
+    throw new Error("Invoice must be generated before factoring submission");
+  }
+
+  let packetPath = invoice?.packetPath ?? null;
+  let packetLink: string | null = null;
+  const attachments: Array<{ filename: string; path: string }> = [];
+
+  if (!packetPath && invoice?.pdfPath) {
+    const packet = await generatePacketZip({
+      orgId: params.orgId,
+      invoiceNumber: invoice.invoiceNumber,
+      invoicePath: invoice.pdfPath,
+      loadId: load.id,
+      requiredDocs: settings.requiredDocs,
+    });
+    if (packet.missing.length > 0) {
+      throw new Error(`Missing required docs: ${packet.missing.join(", ")}`);
+    }
+    packetPath = packet.filePath ?? null;
+    if (packetPath) {
+      await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: { packetPath },
+      });
+    }
+  }
+
+  if (policy.factoringAttachmentMode !== "LINK_ONLY" && !invoice?.pdfPath) {
+    throw new Error("Invoice PDF is required for factoring attachments");
+  }
+
+  if (policy.factoringAttachmentMode === "ZIP") {
+    if (!packetPath) {
+      throw new Error("Packet not available for ZIP attachment mode");
+    }
+    attachments.push({
+      filename: path.basename(packetPath),
+      path: resolveUploadPath(packetPath),
+    });
+  } else if (policy.factoringAttachmentMode === "PDFS") {
+    if (!invoice?.pdfPath) {
+      throw new Error("Invoice PDF is required for PDF attachment mode");
+    }
+    attachments.push({
+      filename: path.basename(invoice.pdfPath),
+      path: resolveUploadPath(invoice.pdfPath),
+    });
+    for (const doc of load.docs.filter((item) => item.status === DocStatus.VERIFIED)) {
+      attachments.push({
+        filename: path.basename(doc.filename),
+        path: resolveUploadPath(doc.filename),
+      });
+    }
+  } else if (policy.factoringAttachmentMode === "LINK_ONLY") {
+    const effectivePacketPath = packetPath ?? invoice?.packetPath ?? null;
+    if (effectivePacketPath) {
+      packetLink = buildFactoringPacketLink(params.orgId, effectivePacketPath);
+    }
+  }
+
+  const latestSubmission = await prisma.billingSubmission.findFirst({
+    where: {
+      orgId: params.orgId,
+      loadId: load.id,
+      channel: BillingSubmissionChannel.FACTORING,
+      status: BillingSubmissionStatus.SENT,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  const latestMatchesArtifacts =
+    latestSubmission &&
+    latestSubmission.invoiceId === (invoice?.id ?? null) &&
+    latestSubmission.attachmentMode === policy.factoringAttachmentMode &&
+    latestSubmission.packetPath === packetPath &&
+    latestSubmission.packetLink === packetLink &&
+    latestSubmission.toEmail === toEmail &&
+    JSON.stringify(latestSubmission.ccEmails ?? []) === JSON.stringify(ccEmails);
+  if (params.retryMode && latestMatchesArtifacts) {
+    return { submission: latestSubmission, idempotent: true };
+  }
+
+  const subject = invoice
+    ? `Factoring packet: ${invoice.invoiceNumber} / ${load.loadNumber}`
+    : `Factoring packet: ${load.loadNumber}`;
+  const lines = [
+    `Load: ${load.loadNumber}`,
+    invoice ? `Invoice: ${invoice.invoiceNumber}` : "Invoice: not generated",
+    `Readiness: ${snapshot.readinessSnapshot.isReady ? "READY" : "BLOCKED"}`,
+    "",
+    override ? "Submitted with admin override." : "Submitted with readiness checks passed.",
+    packetLink ? `Packet link: ${packetLink}` : "",
+  ].filter(Boolean);
+  const text = lines.join("\n");
+
+  try {
+    await sendOperationalEmail({
+      to: toEmail,
+      cc: ccEmails,
+      subject,
+      text,
+      attachments: policy.factoringAttachmentMode === "LINK_ONLY" ? [] : attachments,
+    });
+    const submission = await prisma.billingSubmission.create({
+      data: {
+        orgId: params.orgId,
+        loadId: load.id,
+        invoiceId: invoice?.id ?? null,
+        channel: BillingSubmissionChannel.FACTORING,
+        status: BillingSubmissionStatus.SENT,
+        toEmail,
+        ccEmails,
+        attachmentMode: policy.factoringAttachmentMode,
+        packetPath,
+        packetLink,
+        createdById: params.userId,
+      },
+    });
+    await logAudit({
+      orgId: params.orgId,
+      userId: params.userId,
+      action: "FACTORING_PACKET_SENT",
+      entity: "BillingSubmission",
+      entityId: submission.id,
+      summary: `Sent factoring packet for ${load.loadNumber}`,
+      meta: {
+        loadId: load.id,
+        invoiceId: invoice?.id ?? null,
+        attachmentMode: policy.factoringAttachmentMode,
+        override,
+        overrideReason: params.input.overrideReason?.trim() || null,
+      },
+    });
+    await persistFinanceSnapshotForLoad({
+      orgId: params.orgId,
+      loadId: load.id,
+      quickbooksConnected: isQuickbooksConnectedFromEnv(),
+    });
+    return { submission, idempotent: false };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const submission = await prisma.billingSubmission.create({
+      data: {
+        orgId: params.orgId,
+        loadId: load.id,
+        invoiceId: invoice?.id ?? null,
+        channel: BillingSubmissionChannel.FACTORING,
+        status: BillingSubmissionStatus.FAILED,
+        toEmail,
+        ccEmails,
+        attachmentMode: policy.factoringAttachmentMode,
+        packetPath,
+        packetLink,
+        errorMessage: message,
+        createdById: params.userId,
+      },
+    });
+    await logAudit({
+      orgId: params.orgId,
+      userId: params.userId,
+      action: "FACTORING_PACKET_FAILED",
+      entity: "BillingSubmission",
+      entityId: submission.id,
+      summary: `Factoring send failed for ${load.loadNumber}`,
+      meta: { error: message, retryMode: Boolean(params.retryMode) },
+    });
+    throw new Error(message);
+  }
+}
+
+app.get("/billing/loads/:id/factoring/history", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const submissions = await prisma.billingSubmission.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      loadId: req.params.id,
+      channel: BillingSubmissionChannel.FACTORING,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  res.json({ submissions });
+});
+
+app.post(
+  "/billing/loads/:id/factoring/retry",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const parsed = factoringSendPayloadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    try {
+      const result = await sendLoadToFactoring({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        role: req.user!.role as Role,
+        loadId: req.params.id,
+        input: parsed.data,
+        retryMode: true,
+      });
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  }
+);
+
 app.post(
   "/billing/loads/:id/send-to-factoring",
   requireAuth,
   requireCsrf,
   requireRole("ADMIN", "BILLING"),
   async (req, res) => {
-    const schema = z.object({
-      toEmail: z.string().trim().email().optional(),
-      ccEmails: z.array(z.string().trim().email()).optional(),
-      override: z.boolean().optional(),
-      overrideReason: z.string().trim().max(400).optional(),
-    });
-    const parsed = schema.safeParse(req.body);
+    const parsed = factoringSendPayloadSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid payload" });
       return;
     }
-
-    const [load, settings] = await Promise.all([
-      prisma.load.findFirst({
-        where: { id: req.params.id, orgId: req.user!.orgId },
-        include: {
-          stops: { orderBy: { sequence: "asc" } },
-          docs: true,
-          accessorials: true,
-          invoices: { orderBy: { generatedAt: "desc" } },
-        },
-      }),
-      prisma.orgSettings.findFirst({
-        where: { orgId: req.user!.orgId },
-        select: {
-          requiredDocs: true,
-          ...FINANCE_POLICY_SELECT,
-        },
-      }),
-    ]);
-    if (!load) {
-      res.status(404).json({ error: "Load not found" });
-      return;
-    }
-    if (!settings) {
-      res.status(400).json({ error: "Settings not configured" });
-      return;
-    }
-    const policy = normalizeFinancePolicy(settings);
-    if (!policy.factoringEnabled) {
-      res.status(400).json({ error: "Factoring is not enabled for this organization" });
-      return;
-    }
-
-    const toEmail = parsed.data.toEmail?.trim() || policy.factoringEmail?.trim() || "";
-    if (!toEmail) {
-      res.status(400).json({ error: "Factoring email is required" });
-      return;
-    }
-    const ccEmails = (parsed.data.ccEmails ?? policy.factoringCcEmails ?? []).map((email) => email.trim()).filter(Boolean);
-
-    const readiness = evaluateBillingReadinessSnapshot(
-      {
-        load,
-        stops: load.stops,
-        docs: load.docs,
-        accessorials: load.accessorials,
-        invoices: load.invoices.map((invoice) => ({ status: invoice.status })),
-      },
-      policy
-    );
-    const overrideRequested = Boolean(parsed.data.override);
-    const overrideAllowed = canRoleOverrideReadiness(policy, req.user!.role as Role);
-    const override = overrideRequested && overrideAllowed;
-    if (overrideRequested && !overrideAllowed) {
-      res.status(403).json({ error: "Readiness override is not allowed for this role" });
-      return;
-    }
-    if (override && !parsed.data.overrideReason?.trim()) {
-      res.status(400).json({ error: "Override reason is required when readiness is overridden" });
-      return;
-    }
-    if (readiness.billingStatus !== BillingStatus.READY && !override) {
-      res.status(400).json({
-        error: "Load is not ready for factoring submission",
-        blockers: readiness.blockingReasons,
-      });
-      return;
-    }
-
-    const invoice = load.invoices[0] ?? null;
-    if (policy.requireInvoiceBeforeSend && !invoice) {
-      res.status(400).json({ error: "Invoice must be generated before factoring submission" });
-      return;
-    }
-
-    let packetPath = invoice?.packetPath ?? null;
-    let packetLink: string | null = null;
-    const attachments: Array<{ filename: string; path: string }> = [];
-
     try {
-      if (!packetPath && invoice?.pdfPath) {
-        const packet = await generatePacketZip({
-          orgId: req.user!.orgId,
-          invoiceNumber: invoice.invoiceNumber,
-          invoicePath: invoice.pdfPath,
-          loadId: load.id,
-          requiredDocs: settings.requiredDocs,
-        });
-        if (packet.missing.length > 0) {
-          res.status(400).json({ error: "Missing required docs", missingDocs: packet.missing });
-          return;
-        }
-        packetPath = packet.filePath ?? null;
-        if (packetPath) {
-          await prisma.invoice.update({
-            where: { id: invoice.id },
-            data: { packetPath },
-          });
-        }
-      }
-
-      if (policy.factoringAttachmentMode !== "LINK_ONLY") {
-        if (!invoice?.pdfPath) {
-          res.status(400).json({ error: "Invoice PDF is required for factoring attachments" });
-          return;
-        }
-      }
-
-      if (policy.factoringAttachmentMode === "ZIP") {
-        if (!packetPath) {
-          res.status(400).json({ error: "Packet not available for ZIP attachment mode" });
-          return;
-        }
-        attachments.push({
-          filename: path.basename(packetPath),
-          path: resolveUploadPath(packetPath),
-        });
-      } else if (policy.factoringAttachmentMode === "PDFS") {
-        if (!invoice?.pdfPath) {
-          res.status(400).json({ error: "Invoice PDF is required for PDF attachment mode" });
-          return;
-        }
-        attachments.push({
-          filename: path.basename(invoice.pdfPath),
-          path: resolveUploadPath(invoice.pdfPath),
-        });
-        for (const doc of load.docs.filter((item) => item.status === DocStatus.VERIFIED)) {
-          attachments.push({
-            filename: path.basename(doc.filename),
-            path: resolveUploadPath(doc.filename),
-          });
-        }
-      } else if (policy.factoringAttachmentMode === "LINK_ONLY") {
-        const effectivePacketPath = packetPath ?? invoice?.packetPath ?? null;
-        if (effectivePacketPath) {
-          packetLink = buildFactoringPacketLink(req.user!.orgId, effectivePacketPath);
-        }
-      }
-
-      const subject = invoice
-        ? `Factoring packet: ${invoice.invoiceNumber} / ${load.loadNumber}`
-        : `Factoring packet: ${load.loadNumber}`;
-      const lines = [
-        `Load: ${load.loadNumber}`,
-        invoice ? `Invoice: ${invoice.invoiceNumber}` : "Invoice: not generated",
-        `Readiness: ${readiness.billingStatus}`,
-        "",
-        override ? "Submitted with admin override." : "Submitted with readiness checks passed.",
-        packetLink ? `Packet link: ${packetLink}` : "",
-      ].filter(Boolean);
-      const text = lines.join("\n");
-
-      await sendOperationalEmail({
-        to: toEmail,
-        cc: ccEmails,
-        subject,
-        text,
-        attachments: policy.factoringAttachmentMode === "LINK_ONLY" ? [] : attachments,
-      });
-      const submission = await prisma.billingSubmission.create({
-        data: {
-          orgId: req.user!.orgId,
-          loadId: load.id,
-          invoiceId: invoice?.id ?? null,
-          channel: BillingSubmissionChannel.FACTORING,
-          status: BillingSubmissionStatus.SENT,
-          toEmail,
-          ccEmails,
-          attachmentMode: policy.factoringAttachmentMode,
-          packetPath,
-          packetLink,
-          createdById: req.user!.id,
-        },
-      });
-      await logAudit({
+      const result = await sendLoadToFactoring({
         orgId: req.user!.orgId,
         userId: req.user!.id,
-        action: "FACTORING_PACKET_SENT",
-        entity: "BillingSubmission",
-        entityId: submission.id,
-        summary: `Sent factoring packet for ${load.loadNumber}`,
-        meta: {
-          loadId: load.id,
-          invoiceId: invoice?.id ?? null,
-          attachmentMode: policy.factoringAttachmentMode,
-          override,
-          overrideReason: parsed.data.overrideReason?.trim() || null,
-        },
+        role: req.user!.role as Role,
+        loadId: req.params.id,
+        input: parsed.data,
       });
-      res.json({ submission });
+      res.json(result);
     } catch (error) {
-      const submission = await prisma.billingSubmission.create({
-        data: {
-          orgId: req.user!.orgId,
-          loadId: load.id,
-          invoiceId: invoice?.id ?? null,
-          channel: BillingSubmissionChannel.FACTORING,
-          status: BillingSubmissionStatus.FAILED,
-          toEmail,
-          ccEmails,
-          attachmentMode: policy.factoringAttachmentMode,
-          packetPath,
-          packetLink,
-          errorMessage: (error as Error).message,
-          createdById: req.user!.id,
-        },
-      });
-      res.status(400).json({ error: (error as Error).message, submissionId: submission.id });
+      res.status(400).json({ error: (error as Error).message });
     }
   }
 );
@@ -8817,7 +9316,281 @@ app.post(
       before: { billingStatus: load.billingStatus },
       after: { billingStatus: updated.billingStatus, invoicedAt: updated.invoicedAt },
     });
+    await persistFinanceSnapshotForLoad({
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      quickbooksConnected: isQuickbooksConnectedFromEnv(),
+    });
+    await enqueueFinanceStatusUpdatedEvent(prisma as any, {
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      stage: null,
+      billingStatus: BillingStatus.INVOICED,
+      dedupeSuffix: `mark-invoiced:${Date.now()}`,
+    });
     res.json({ load: updated });
+  }
+);
+
+app.get(
+  "/finance/receivables/:loadId/payments",
+  requireAuth,
+  requireRole("ADMIN", "BILLING", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.loadId, orgId: req.user!.orgId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    const payments = await prisma.invoicePayment.findMany({
+      where: { orgId: req.user!.orgId, loadId: load.id },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        invoiceId: true,
+        amountCents: true,
+        method: true,
+        reference: true,
+        notes: true,
+        receivedAt: true,
+        createdAt: true,
+        createdBy: { select: { id: true, name: true, email: true } },
+      },
+    });
+    res.json({ payments });
+  }
+);
+
+app.post(
+  "/finance/receivables/:loadId/manual-payment",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      mode: z.enum(["FULL", "PARTIAL"]).default("FULL"),
+      amountCents: z.number().int().positive().optional(),
+      method: z.nativeEnum(FinancePaymentMethod).default(FinancePaymentMethod.OTHER),
+      reference: z.string().trim().max(120).optional(),
+      notes: z.string().trim().max(500).optional(),
+      receivedAt: z.string().datetime().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.loadId, orgId: req.user!.orgId, deletedAt: null },
+      select: { id: true, loadNumber: true, status: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+
+    const invoice = await prisma.invoice.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        status: { not: InvoiceStatus.VOID },
+      },
+      orderBy: { generatedAt: "desc" },
+      include: {
+        items: { select: { amount: true } },
+      },
+    });
+    if (!invoice) {
+      res.status(400).json({ error: "Invoice not found for load" });
+      return;
+    }
+
+    const invoiceTotal = invoice.totalAmount
+      ? toDecimal(invoice.totalAmount) ?? new Prisma.Decimal(0)
+      : invoice.items.reduce((sum, item) => add(sum, item.amount), new Prisma.Decimal(0));
+    const invoiceTotalCents = Math.max(0, Math.round(Number(invoiceTotal) * 100));
+    if (invoiceTotalCents <= 0) {
+      res.status(400).json({ error: "Invoice total must be greater than zero" });
+      return;
+    }
+
+    const mode = parsed.data.mode;
+    const receivedAt = parsed.data.receivedAt ? new Date(parsed.data.receivedAt) : new Date();
+    if (Number.isNaN(receivedAt.getTime())) {
+      res.status(400).json({ error: "Invalid receivedAt value" });
+      return;
+    }
+    const reference = parsed.data.reference?.trim() || null;
+    const notes = parsed.data.notes?.trim() || null;
+    const method = parsed.data.method;
+
+    let amountCents = invoiceTotalCents;
+    if (mode === "PARTIAL") {
+      if (!parsed.data.amountCents) {
+        res.status(400).json({ error: "amountCents is required for partial payments" });
+        return;
+      }
+      if (parsed.data.amountCents > invoiceTotalCents) {
+        res.status(400).json({ error: "Payment amount cannot exceed invoice total" });
+        return;
+      }
+      amountCents = parsed.data.amountCents;
+    }
+
+    if (amountCents <= 0) {
+      res.status(400).json({ error: "Payment amount must be greater than zero" });
+      return;
+    }
+
+    const duplicate = await prisma.invoicePayment.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        invoiceId: invoice.id,
+        amountCents,
+        method,
+        reference,
+        receivedAt,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (duplicate) {
+      res.json({
+        ok: true,
+        idempotent: true,
+        payment: duplicate,
+        invoice: {
+          id: invoice.id,
+          status: invoice.status,
+          paidAt: invoice.paidAt,
+          shortPaidAmount: invoice.shortPaidAmount,
+        },
+      });
+      return;
+    }
+
+    const shortPaidCents = Math.max(0, invoiceTotalCents - amountCents);
+    const nextStatus = shortPaidCents > 0 ? InvoiceStatus.SHORT_PAID : InvoiceStatus.PAID;
+    const paymentRef =
+      reference ||
+      (invoice.paymentRef && invoice.paymentRef.trim().length > 0 ? invoice.paymentRef : method);
+
+    const [updatedInvoice, payment] = await prisma.$transaction(async (tx) => {
+      const nextInvoice = await tx.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          status: nextStatus,
+          paidAt: receivedAt,
+          paymentRef,
+          shortPaidAmount:
+            shortPaidCents > 0 ? new Prisma.Decimal(shortPaidCents).div(100) : null,
+        },
+      });
+      const nextPayment = await tx.invoicePayment.create({
+        data: {
+          orgId: req.user!.orgId,
+          loadId: load.id,
+          invoiceId: invoice.id,
+          amountCents,
+          method,
+          reference,
+          notes,
+          receivedAt,
+          createdById: req.user!.id,
+        },
+      });
+      return [nextInvoice, nextPayment] as const;
+    });
+
+    if (load.status !== LoadStatus.PAID) {
+      await transitionLoadStatus({
+        load,
+        nextStatus: LoadStatus.PAID,
+        userId: req.user!.id,
+        orgId: req.user!.orgId,
+        role: req.user!.role as Role,
+        message: `Manual payment recorded for ${load.loadNumber}`,
+      });
+    }
+
+    await createEvent({
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      userId: req.user!.id,
+      invoiceId: invoice.id,
+      type: EventType.INVOICE_GENERATED,
+      message: `Manual payment recorded (${nextStatus})`,
+      meta: {
+        mode,
+        amountCents,
+        method,
+        reference,
+        receivedAt: receivedAt.toISOString(),
+      },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "FINANCE_MANUAL_PAYMENT_RECORDED",
+      entity: "Invoice",
+      entityId: invoice.id,
+      summary: `Manual payment recorded for ${load.loadNumber}`,
+      before: {
+        status: invoice.status,
+        paidAt: invoice.paidAt,
+        shortPaidAmount: invoice.shortPaidAmount,
+        paymentRef: invoice.paymentRef,
+      },
+      after: {
+        status: updatedInvoice.status,
+        paidAt: updatedInvoice.paidAt,
+        shortPaidAmount: updatedInvoice.shortPaidAmount,
+        paymentRef: updatedInvoice.paymentRef,
+        payment: {
+          id: payment.id,
+          amountCents: payment.amountCents,
+          method: payment.method,
+          reference: payment.reference,
+          notes: payment.notes,
+          receivedAt: payment.receivedAt,
+        },
+      },
+    });
+
+    await refreshFinanceAfterMutation({
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      source: "finance.manual-payment",
+      trigger: nextStatus,
+      dedupeSuffix: payment.id,
+    });
+
+    res.json({
+      ok: true,
+      idempotent: false,
+      payment: {
+        id: payment.id,
+        invoiceId: payment.invoiceId,
+        amountCents: payment.amountCents,
+        method: payment.method,
+        reference: payment.reference,
+        notes: payment.notes,
+        receivedAt: payment.receivedAt,
+        createdAt: payment.createdAt,
+      },
+      invoice: {
+        id: updatedInvoice.id,
+        status: updatedInvoice.status,
+        paidAt: updatedInvoice.paidAt,
+        shortPaidAmount: updatedInvoice.shortPaidAmount,
+        paymentRef: updatedInvoice.paymentRef,
+      },
+    });
   }
 );
 
@@ -8840,18 +9613,43 @@ app.post(
       return;
     }
     try {
-      const { createInvoiceForLoad } = await import("./integrations/quickbooks");
-      const result = await createInvoiceForLoad(load.id);
-      const updated = await prisma.load.update({
-        where: { id: load.id },
-        data: {
-          billingStatus: BillingStatus.INVOICED,
-          billingBlockingReasons: [],
-          invoicedAt: new Date(),
-          externalInvoiceRef: result.externalInvoiceRef,
-        },
+      const qbo = await getQuickbooksStatusForOrg(req.user!.orgId);
+      if (!qbo.enabled) {
+        res.status(400).json({ error: "QuickBooks is not connected" });
+        return;
+      }
+      const invoice = await prisma.invoice.findFirst({
+        where: { orgId: req.user!.orgId, loadId: load.id },
+        orderBy: { generatedAt: "desc" },
+        select: { id: true },
       });
-      res.json({ load: updated, externalInvoiceRef: result.externalInvoiceRef });
+      if (!invoice) {
+        res.status(400).json({ error: "Invoice not found for load" });
+        return;
+      }
+      const job = await enqueueQboInvoiceSyncJob(prisma as any, {
+        orgId: req.user!.orgId,
+        invoiceId: invoice.id,
+        reason: "billing.readiness.quickbooks",
+      });
+      await enqueueQboSyncRequestedEvent(prisma as any, {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        invoiceId: invoice.id,
+        reason: "billing.readiness.quickbooks",
+        dedupeSuffix: job.id,
+      });
+      const processed = await processQueuedQboSyncJobs({ limit: 1 });
+      const refreshed = await prisma.load.findFirst({
+        where: { id: load.id, orgId: req.user!.orgId },
+        select: { id: true, externalInvoiceRef: true, qboSyncStatus: true, qboSyncLastError: true },
+      });
+      res.json({
+        load: refreshed,
+        job,
+        processed,
+        externalInvoiceRef: refreshed?.externalInvoiceRef ?? null,
+      });
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
     }
@@ -8952,6 +9750,32 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
         message: `Invoice exists for ${load.loadNumber}`,
       });
     }
+    if (isQuickbooksConnectedFromEnv()) {
+      const job = await enqueueQboInvoiceSyncJob(prisma as any, {
+        orgId: params.orgId,
+        invoiceId: hydratedInvoice.id,
+        reason: "invoice.generate.existing",
+      });
+      await enqueueQboSyncRequestedEvent(prisma as any, {
+        orgId: params.orgId,
+        loadId: load.id,
+        invoiceId: hydratedInvoice.id,
+        reason: "invoice.generate.existing",
+        dedupeSuffix: job.id,
+      });
+    }
+    await persistFinanceSnapshotForLoad({
+      orgId: params.orgId,
+      loadId: load.id,
+      quickbooksConnected: isQuickbooksConnectedFromEnv(),
+    });
+    await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+      orgId: params.orgId,
+      loadId: load.id,
+      source: "finance.invoice",
+      trigger: "invoice_generated",
+      dedupeSuffix: hydratedInvoice.id,
+    });
     return { invoice: hydratedInvoice, missingDocs: [] } as const;
   }
   const settings = await prisma.orgSettings.findFirst({ where: { orgId: params.orgId } });
@@ -9131,6 +9955,33 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
     entityId: invoice.id,
     summary: `Generated invoice ${invoiceResult.invoiceNumber} for ${load.loadNumber}`,
     after: { invoiceNumber: invoice.invoiceNumber, status: invoice.status },
+  });
+
+  if (isQuickbooksConnectedFromEnv()) {
+    const job = await enqueueQboInvoiceSyncJob(prisma as any, {
+      orgId: params.orgId,
+      invoiceId: invoice.id,
+      reason: "invoice.generate.new",
+    });
+    await enqueueQboSyncRequestedEvent(prisma as any, {
+      orgId: params.orgId,
+      loadId: load.id,
+      invoiceId: invoice.id,
+      reason: "invoice.generate.new",
+      dedupeSuffix: job.id,
+    });
+  }
+  await persistFinanceSnapshotForLoad({
+    orgId: params.orgId,
+    loadId: load.id,
+    quickbooksConnected: isQuickbooksConnectedFromEnv(),
+  });
+  await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+    orgId: params.orgId,
+    loadId: load.id,
+    source: "finance.invoice",
+    trigger: "invoice_generated",
+    dedupeSuffix: invoice.id,
   });
 
   return { invoice, missingDocs: packet.missing } as const;
@@ -9346,7 +10197,27 @@ app.post(
       after: { status: updated.status },
     });
 
-    await evaluateBillingReadiness(invoice.loadId);
+    if (parsed.data.status === "SENT" && isQuickbooksConnectedFromEnv()) {
+      const job = await enqueueQboInvoiceSyncJob(prisma as any, {
+        orgId: req.user!.orgId,
+        invoiceId: invoice.id,
+        reason: "invoice.status.sent",
+      });
+      await enqueueQboSyncRequestedEvent(prisma as any, {
+        orgId: req.user!.orgId,
+        loadId: invoice.loadId,
+        invoiceId: invoice.id,
+        reason: "invoice.status.sent",
+        dedupeSuffix: job.id,
+      });
+    }
+    await refreshFinanceAfterMutation({
+      orgId: req.user!.orgId,
+      loadId: invoice.loadId,
+      source: "finance.invoice-status",
+      trigger: parsed.data.status,
+      dedupeSuffix: invoice.id,
+    });
     res.json({ invoice: updated });
   }
 );
@@ -9463,6 +10334,65 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
   return lines;
 }
 
+type PayableAnomaly = {
+  code: string;
+  severity: "warning" | "critical";
+  message: string;
+  partyId?: string;
+  meta?: Record<string, unknown>;
+};
+
+function detectPayableAnomalies(lines: PayablePreviewLine[]): PayableAnomaly[] {
+  const anomalies: PayableAnomaly[] = [];
+  const netByParty = new Map<string, number>();
+  const absoluteAmounts: number[] = [];
+
+  for (const line of lines) {
+    const signed = line.type === PayableLineItemType.DEDUCTION ? -line.amountCents : line.amountCents;
+    const partyKey = `${line.partyType}:${line.partyId}`;
+    netByParty.set(partyKey, (netByParty.get(partyKey) ?? 0) + signed);
+    absoluteAmounts.push(Math.abs(line.amountCents));
+    if ((line.type === PayableLineItemType.DEDUCTION || line.type === PayableLineItemType.REIMBURSEMENT) && !line.loadId) {
+      anomalies.push({
+        code: "MISSING_LINKAGE",
+        severity: "warning",
+        message: `${line.type} line item has no load linkage`,
+        partyId: line.partyId,
+        meta: { lineMemo: line.memo ?? null },
+      });
+    }
+  }
+
+  for (const [partyKey, net] of netByParty) {
+    if (net < 0) {
+      anomalies.push({
+        code: "NEGATIVE_NET",
+        severity: "critical",
+        message: `Net payable is negative for ${partyKey}`,
+        partyId: partyKey.split(":")[1],
+        meta: { netCents: net },
+      });
+    }
+  }
+
+  const medianAmount = median(absoluteAmounts) ?? 0;
+  if (medianAmount > 0) {
+    for (const line of lines) {
+      if (line.amountCents > medianAmount * 3 && line.amountCents >= 100_000) {
+        anomalies.push({
+          code: "AMOUNT_SPIKE",
+          severity: "warning",
+          message: `Amount spike detected on ${line.partyType} ${line.partyId}`,
+          partyId: line.partyId,
+          meta: { amountCents: line.amountCents, medianCents: medianAmount },
+        });
+      }
+    }
+  }
+
+  return anomalies;
+}
+
 
 app.get("/payables/runs", requireAuth, requirePermission(Permission.SETTLEMENT_GENERATE), async (req, res) => {
   const runs = await prisma.payableRun.findMany({
@@ -9491,6 +10421,10 @@ app.get("/payables/runs", requireAuth, requirePermission(Permission.SETTLEMENT_G
       status: run.status,
       previewChecksum: run.previewChecksum,
       finalizedChecksum: run.finalizedChecksum,
+      holdReasonCode: run.holdReasonCode,
+      holdOwner: run.holdOwner,
+      holdNotes: run.holdNotes,
+      anomalyCount: run.anomalyCount,
       finalizedAt: run.finalizedAt,
       paidAt: run.paidAt,
       createdAt: run.createdAt,
@@ -9583,6 +10517,11 @@ app.get("/payables/runs/:id", requireAuth, requirePermission(Permission.SETTLEME
       status: run.status,
       previewChecksum: run.previewChecksum,
       finalizedChecksum: run.finalizedChecksum,
+      holdReasonCode: run.holdReasonCode,
+      holdOwner: run.holdOwner,
+      holdNotes: run.holdNotes,
+      anomalyCount: run.anomalyCount,
+      anomalies: Array.isArray(run.anomaliesJson) ? run.anomaliesJson : [],
       finalizedAt: run.finalizedAt,
       paidAt: run.paidAt,
       createdAt: run.createdAt,
@@ -9621,6 +10560,9 @@ app.post("/payables/runs/:id/preview", requireAuth, requireCsrf, requirePermissi
   const previousFingerprints = run.lineItems.map((item) => payableLineFingerprint(item));
   const nextFingerprints = previewLines.map((item) => payableLineFingerprint(item));
   const diff = diffPayableLineFingerprints(previousFingerprints, nextFingerprints);
+  const anomalies = detectPayableAnomalies(previewLines);
+  const holdReasonCode = anomalies.length > 0 ? "ANOMALY_REVIEW_REQUIRED" : null;
+  const holdOwner = anomalies.length > 0 ? PayableHoldOwner.BILLING : null;
 
   await prisma.$transaction(async (tx) => {
     await tx.payableLineItem.deleteMany({ where: { runId: run.id } });
@@ -9644,6 +10586,11 @@ app.post("/payables/runs/:id/preview", requireAuth, requireCsrf, requirePermissi
       data: {
         status: PayableRunStatus.RUN_PREVIEWED,
         previewChecksum,
+        anomaliesJson: anomalies as unknown as Prisma.JsonArray,
+        anomalyCount: anomalies.length,
+        holdReasonCode,
+        holdOwner,
+        holdNotes: anomalies.length > 0 ? "Review anomalies before finalizing this run." : null,
       },
     });
   });
@@ -9658,8 +10605,61 @@ app.post("/payables/runs/:id/preview", requireAuth, requireCsrf, requirePermissi
     status: PayableRunStatus.RUN_PREVIEWED,
     previewChecksum,
     diff,
+    anomalies,
+    hold: {
+      reasonCode: holdReasonCode,
+      owner: holdOwner,
+    },
     lineItems,
   });
+});
+
+app.post("/payables/runs/:id/hold", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {
+  const schema = z.object({
+    reasonCode: z.string().trim().min(2),
+    owner: z.nativeEnum(PayableHoldOwner).optional(),
+    notes: z.string().trim().max(500).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const run = await prisma.payableRun.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!run) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  const updated = await prisma.payableRun.update({
+    where: { id: run.id },
+    data: {
+      holdReasonCode: parsed.data.reasonCode,
+      holdOwner: parsed.data.owner ?? PayableHoldOwner.BILLING,
+      holdNotes: parsed.data.notes ?? null,
+    },
+  });
+  res.json({ run: updated });
+});
+
+app.post("/payables/runs/:id/release-hold", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {
+  const run = await prisma.payableRun.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!run) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  const updated = await prisma.payableRun.update({
+    where: { id: run.id },
+    data: {
+      holdReasonCode: null,
+      holdOwner: null,
+      holdNotes: null,
+    },
+  });
+  res.json({ run: updated });
 });
 
 app.post("/payables/runs/:id/finalize", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {
@@ -9676,6 +10676,14 @@ app.post("/payables/runs/:id/finalize", requireAuth, requireCsrf, requirePermiss
   }
   if (run.status !== PayableRunStatus.RUN_PREVIEWED) {
     res.status(400).json({ error: "Run must be previewed before finalize" });
+    return;
+  }
+  if (run.holdReasonCode) {
+    res.status(400).json({
+      error: "Run is on hold and requires review before finalize",
+      holdReasonCode: run.holdReasonCode,
+      holdOwner: run.holdOwner,
+    });
     return;
   }
   const updated = await prisma.payableRun.update({

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { IdleLogout } from "@/components/idle-logout";
 import { CanonicalHost } from "@/components/canonical-host";
+import { UserProvider } from "@/components/auth/user-context";
 
 export const metadata: Metadata = {
   title: "Haulio",
@@ -17,9 +18,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="min-h-screen">
-        <CanonicalHost />
-        <IdleLogout />
-        {children}
+        <UserProvider>
+          <CanonicalHost />
+          <IdleLogout />
+          {children}
+        </UserProvider>
       </body>
     </html>
   );

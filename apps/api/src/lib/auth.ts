@@ -25,6 +25,10 @@ const SESSION_COOKIE = "session";
 const SESSION_TTL_DAYS = 14;
 const IS_PROD = process.env.NODE_ENV === "production";
 const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN?.trim() || undefined;
+const WEB_ORIGIN = process.env.WEB_ORIGIN?.trim() || "";
+const DEFAULT_COOKIE_SECURE = WEB_ORIGIN ? WEB_ORIGIN.startsWith("https://") : IS_PROD;
+const COOKIE_SECURE =
+  typeof process.env.COOKIE_SECURE === "string" ? process.env.COOKIE_SECURE.toLowerCase() === "true" : DEFAULT_COOKIE_SECURE;
 
 function hashToken(token: string) {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -51,7 +55,9 @@ export function setSessionCookie(res: Response, token: string, expiresAt: Date) 
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: IS_PROD,
+    // Prod-local runs NODE_ENV=production over http://localhost; Secure cookies would be dropped
+    // by the browser and cause an auth redirect loop (flicker).
+    secure: COOKIE_SECURE,
     expires: expiresAt,
     domain: COOKIE_DOMAIN,
   });

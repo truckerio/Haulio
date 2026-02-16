@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { RouteGuard } from "@/components/rbac/route-guard";
@@ -11,15 +11,16 @@ import { FormField } from "@/components/ui/form-field";
 import { Select } from "@/components/ui/select";
 import { CheckboxField } from "@/components/ui/checkbox";
 import { ErrorBanner } from "@/components/ui/error-banner";
+import { getSaveButtonLabel } from "@/components/ui/save-feedback";
 import { AdminSettingsShell } from "@/components/admin-settings/AdminSettingsShell";
 import { apiFetch } from "@/lib/api";
+import { useSaveFeedback } from "@/lib/use-save-feedback";
 
 export default function AutomationSettingsPage() {
   const router = useRouter();
   const [settings, setSettings] = useState<any | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<any | null>(null);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
-  const saveTimerRef = useRef<number | null>(null);
+  const { saveState, startSaving, markSaved, resetSaveState } = useSaveFeedback(2000);
   const [error, setError] = useState<string | null>(null);
   const [loadsFile, setLoadsFile] = useState<File | null>(null);
   const [stopsFile, setStopsFile] = useState<File | null>(null);
@@ -53,14 +54,6 @@ export default function AutomationSettingsPage() {
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!settingsDraft && settings) {
       setSettingsDraft({
         ...settings,
@@ -72,11 +65,7 @@ export default function AutomationSettingsPage() {
 
   const updateSettings = async () => {
     if (!settingsDraft) return;
-    if (saveTimerRef.current) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    setSaveState("saving");
+    startSaving();
     const toNumber = (value: any, fallback: number) => {
       const num = Number(value);
       return Number.isFinite(num) ? num : fallback;
@@ -142,12 +131,9 @@ export default function AutomationSettingsPage() {
         body: JSON.stringify(payload),
       });
       await loadSettings();
-      setSaveState("saved");
-      saveTimerRef.current = window.setTimeout(() => {
-        setSaveState("idle");
-      }, 2000);
+      markSaved();
     } catch (err) {
-      setSaveState("idle");
+      resetSaveState();
       setError((err as Error).message || "Failed to save settings.");
     }
   };
@@ -347,7 +333,7 @@ export default function AutomationSettingsPage() {
 
           <div className="flex flex-wrap gap-2">
             <Button onClick={updateSettings} disabled={saveState === "saving"}>
-              {saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : "Save"}
+              {getSaveButtonLabel(saveState)}
             </Button>
             <Button variant="secondary" onClick={() => setSettingsDraft(settings)}>
               Reset
