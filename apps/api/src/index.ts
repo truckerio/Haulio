@@ -454,7 +454,21 @@ function normalizePlateState(value?: string | null) {
   return trimmed;
 }
 
-type LoadStatusRecord = { id: string; loadNumber: string; status: LoadStatus; completedAt?: Date | null };
+type LoadStatusRecord = {
+  id: string;
+  loadNumber: string;
+  status: LoadStatus;
+  completedAt?: Date | null;
+  deliveredAt?: Date | null;
+};
+
+const DELIVERY_REACHED_STATUSES = new Set<LoadStatus>([
+  LoadStatus.DELIVERED,
+  LoadStatus.POD_RECEIVED,
+  LoadStatus.READY_TO_INVOICE,
+  LoadStatus.INVOICED,
+  LoadStatus.PAID,
+]);
 
 const resolveCompletedAtUpdate = (params: { current: LoadStatus; next: LoadStatus; existing?: Date | null }) => {
   if (params.current === params.next) return undefined;
@@ -464,6 +478,19 @@ const resolveCompletedAtUpdate = (params: { current: LoadStatus; next: LoadStatu
     return params.existing ?? new Date();
   }
   if (currentCompleted && !nextCompleted) {
+    return null;
+  }
+  return undefined;
+};
+
+const resolveDeliveredAtUpdate = (params: { current: LoadStatus; next: LoadStatus; existing?: Date | null }) => {
+  if (params.current === params.next) return undefined;
+  const currentDelivered = DELIVERY_REACHED_STATUSES.has(params.current);
+  const nextDelivered = DELIVERY_REACHED_STATUSES.has(params.next);
+  if (nextDelivered && !currentDelivered) {
+    return params.existing ?? new Date();
+  }
+  if (currentDelivered && !nextDelivered) {
     return null;
   }
   return undefined;
@@ -493,13 +520,22 @@ async function transitionLoadStatus(params: {
     next: params.nextStatus,
     existing: params.load.completedAt ?? null,
   });
+  const deliveredAt = resolveDeliveredAtUpdate({
+    current: params.load.status,
+    next: params.nextStatus,
+    existing: params.load.deliveredAt ?? null,
+  });
+  const updateData: Prisma.LoadUpdateInput = {
+    status: params.nextStatus,
+    ...(params.data ?? {}),
+    completedAt: completedAt !== undefined ? completedAt : undefined,
+  };
+  if ((!params.data || !Object.prototype.hasOwnProperty.call(params.data, "deliveredAt")) && deliveredAt !== undefined) {
+    updateData.deliveredAt = deliveredAt;
+  }
   const updated = await prisma.load.update({
     where: { id: params.load.id },
-    data: {
-      status: params.nextStatus,
-      ...(params.data ?? {}),
-      completedAt: completedAt !== undefined ? completedAt : undefined,
-    },
+    data: updateData,
   });
   await createEvent({
     orgId: params.orgId,
@@ -5810,6 +5846,14 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
           existing: existing.completedAt ?? null,
         })
       : undefined;
+  const deliveredAtUpdate =
+    statusChanged && statusRequested
+      ? resolveDeliveredAtUpdate({
+          current: existing.status,
+          next: statusRequested as LoadStatus,
+          existing: existing.deliveredAt ?? null,
+        })
+      : undefined;
 
   const load = await prisma.load.update({
     where: { id: existing.id },
@@ -5830,6 +5874,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       miles: parsed.data.miles,
       status: statusRequested,
       completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
+      deliveredAt: deliveredAtUpdate !== undefined ? deliveredAtUpdate : undefined,
     },
   });
   await logLoadFieldAudit({
@@ -10287,17 +10332,25 @@ type PayablePreviewLine = {
 };
 
 async function buildPayablePreviewLines(params: { orgId: string; periodStart: Date; periodEnd: Date }) {
-  const settlements = await prisma.settlement.findMany({
-    where: {
-      orgId: params.orgId,
-      periodStart: { gte: params.periodStart },
-      periodEnd: { lte: params.periodEnd },
-    },
-    include: { items: true },
-    orderBy: [{ driverId: "asc" }, { periodStart: "asc" }],
-  });
+  const [settlements, settings] = await Promise.all([
+    prisma.settlement.findMany({
+      where: {
+        orgId: params.orgId,
+        periodStart: { gte: params.periodStart },
+        periodEnd: { lte: params.periodEnd },
+      },
+      include: { items: true },
+      orderBy: [{ driverId: "asc" }, { periodStart: "asc" }],
+    }),
+    prisma.orgSettings.findFirst({
+      where: { orgId: params.orgId },
+      select: { driverRatePerMile: true },
+    }),
+  ]);
   const lines: PayablePreviewLine[] = [];
+  const driversCoveredBySettlement = new Set<string>();
   for (const settlement of settlements) {
+    driversCoveredBySettlement.add(settlement.driverId);
     if (settlement.items.length > 0) {
       for (const item of settlement.items) {
         const rawAmount = Number(item.amount);
@@ -10330,6 +10383,52 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
       source: { settlementId: settlement.id },
     });
   }
+
+  // Fallback for orgs that have delivered loads but no settlement rows yet:
+  // build deterministic CPM earnings lines directly from delivered load data.
+  const fallbackLoads = await prisma.load.findMany({
+    where: {
+      orgId: params.orgId,
+      assignedDriverId: { not: null },
+      deliveredAt: { gte: params.periodStart, lte: params.periodEnd },
+    },
+    select: {
+      id: true,
+      loadNumber: true,
+      miles: true,
+      assignedDriverId: true,
+      deliveredAt: true,
+      driver: { select: { payRatePerMile: true } },
+    },
+    orderBy: [{ assignedDriverId: "asc" }, { deliveredAt: "asc" }, { createdAt: "asc" }],
+  });
+
+  const defaultRate = toDecimal(settings?.driverRatePerMile ?? 0) ?? new Prisma.Decimal(0);
+  for (const load of fallbackLoads) {
+    if (!load.assignedDriverId) continue;
+    if (driversCoveredBySettlement.has(load.assignedDriverId)) continue;
+    const ratePerMile = toDecimal(load.driver?.payRatePerMile ?? defaultRate) ?? defaultRate;
+    const miles = toDecimalFixed(load.miles ?? 0, 2) ?? new Prisma.Decimal(0);
+    const amount = mul(ratePerMile, miles);
+    const amountCents = Math.abs(Math.round(Number(amount) * 100));
+    if (amountCents === 0) continue;
+    lines.push({
+      partyType: PayablePartyType.DRIVER,
+      partyId: load.assignedDriverId,
+      loadId: load.id,
+      type: PayableLineItemType.EARNING,
+      amountCents,
+      memo: `Fallback CPM for ${load.loadNumber ?? load.id}`,
+      source: {
+        fallback: "DELIVERED_LOAD",
+        loadId: load.id,
+        deliveredAt: load.deliveredAt?.toISOString() ?? null,
+        ratePerMile: Number(ratePerMile),
+        miles: Number(miles),
+      },
+    });
+  }
+
   lines.sort((a, b) => payableLineFingerprint(a).localeCompare(payableLineFingerprint(b)));
   return lines;
 }
