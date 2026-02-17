@@ -397,18 +397,19 @@ function LoadsPageContent() {
 
   const handleCreate = async () => {
     setFormError(null);
+    const parsedRate = Number(form.rate);
+    const parsedMiles = Number(form.miles);
     if (
       !form.customerName.trim() ||
       !form.pickupName.trim() ||
-      !form.pickupCity.trim() ||
-      !form.pickupState.trim() ||
       !form.deliveryName.trim() ||
-      !form.deliveryCity.trim() ||
-      !form.deliveryState.trim() ||
       !form.pickupDate.trim() ||
-      !form.deliveryDateStart.trim()
+      !Number.isFinite(parsedRate) ||
+      parsedRate <= 0 ||
+      !Number.isFinite(parsedMiles) ||
+      parsedMiles <= 0
     ) {
-      setFormError("Fill all required fields before creating the load.");
+      setFormError("Required: customer, rate, miles, pickup date, pickup name, and delivery name.");
       return;
     }
     const combineDateTime = (date: string, time?: string) => {
@@ -471,8 +472,8 @@ function LoadsPageContent() {
           truckUnit: form.truckUnit || undefined,
           trailerUnit: form.trailerUnit || undefined,
           weightLbs: form.weightLbs ? Number(form.weightLbs) : undefined,
-          rate: form.rate ? Number(form.rate) : undefined,
-          miles: form.miles ? Number(form.miles) : undefined,
+          rate: parsedRate,
+          miles: parsedMiles,
           salesRepName: form.salesRepName || undefined,
           dropName: form.dropName || undefined,
           desiredInvoiceDate: form.desiredInvoiceDate || undefined,
@@ -1103,14 +1104,14 @@ function LoadsPageContent() {
                   onChange={(e) => setForm({ ...form, weightLbs: e.target.value })}
                 />
               </FormField>
-              <FormField label="Total Rev" htmlFor="rate">
+              <FormField label="Total Rev" htmlFor="rate" required>
                 <Input
                   placeholder="2150"
                   value={form.rate}
                   onChange={(e) => setForm({ ...form, rate: e.target.value })}
                 />
               </FormField>
-              <FormField label="Miles" htmlFor="miles">
+              <FormField label="Miles" htmlFor="miles" required>
                 <Input
                   placeholder="1200"
                   value={form.miles}
@@ -1176,7 +1177,7 @@ function LoadsPageContent() {
               ) : null}
             </div>
             <div className="grid gap-3 lg:grid-cols-3">
-              <FormField label="PU Date F" htmlFor="puDate">
+              <FormField label="PU Date F" htmlFor="puDate" required>
                 <Input
                   type="date"
                   value={form.pickupDate}
@@ -1209,7 +1210,7 @@ function LoadsPageContent() {
                   onBlur={() => requestStopNameSuggestion("pickup")}
                 />
               </FormField>
-              <FormField label="Ship City" htmlFor="shipCity" required>
+              <FormField label="Ship City" htmlFor="shipCity">
                 <Input
                   placeholder="Fontana"
                   value={form.pickupCity}
@@ -1221,7 +1222,7 @@ function LoadsPageContent() {
                   onBlur={() => requestAddressSuggestion("pickup")}
                 />
               </FormField>
-              <FormField label="Ship St" htmlFor="shipState" required>
+              <FormField label="Ship St" htmlFor="shipState">
                 <Input
                   placeholder="CA"
                   value={form.pickupState}
@@ -1365,7 +1366,7 @@ function LoadsPageContent() {
                   onBlur={() => requestStopNameSuggestion("delivery")}
                 />
               </FormField>
-              <FormField label="Cons City" htmlFor="consCity" required>
+              <FormField label="Cons City" htmlFor="consCity">
                 <Input
                   placeholder="Indianapolis"
                   value={form.deliveryCity}
@@ -1377,7 +1378,7 @@ function LoadsPageContent() {
                   onBlur={() => requestAddressSuggestion("delivery")}
                 />
               </FormField>
-              <FormField label="Cons St" htmlFor="consState" required>
+              <FormField label="Cons St" htmlFor="consState">
                 <Input
                   placeholder="IN"
                   value={form.deliveryState}

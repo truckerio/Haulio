@@ -5420,7 +5420,7 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
     palletCount: z.union([z.number(), z.string()]).optional(),
     weightLbs: z.union([z.number(), z.string()]).optional(),
     rate: z.union([z.number(), z.string()]).optional(),
-    miles: z.number().optional(),
+    miles: z.union([z.number(), z.string()]).optional(),
     stops: z
       .array(
         z.object({
@@ -5443,8 +5443,19 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
-  if (!parsed.data.customerId && !parsed.data.customerName) {
-    res.status(400).json({ error: "Customer required" });
+  if (!parsed.data.customerId && !parsed.data.customerName?.trim()) {
+    res.status(400).json({ error: "Customer name required" });
+    return;
+  }
+  const rateDecimal = toDecimal(parsed.data.rate);
+  if (!rateDecimal || !Number.isFinite(Number(rateDecimal)) || Number(rateDecimal) <= 0) {
+    res.status(400).json({ error: "Rate is required and must be greater than 0" });
+    return;
+  }
+  const milesValue =
+    typeof parsed.data.miles === "string" ? Number(parsed.data.miles) : (parsed.data.miles ?? Number.NaN);
+  if (!Number.isFinite(milesValue) || milesValue <= 0) {
+    res.status(400).json({ error: "Miles is required and must be greater than 0" });
     return;
   }
 
@@ -5542,20 +5553,27 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
     return;
   }
 
-  const pickupStop = parsed.data.stops.find((stop) => stop.type === "PICKUP") ?? parsed.data.stops[0];
-  const deliveryStop =
-    parsed.data.stops
-      .slice()
-      .reverse()
-      .find((stop) => stop.type === "DELIVERY") ?? parsed.data.stops[parsed.data.stops.length - 1];
-  let miles = parsed.data.miles;
-  if (miles === undefined) {
-    miles =
-      (await suggestMilesForRoute({
-        orgId: req.user!.orgId,
-        pickup: pickupStop,
-        delivery: deliveryStop,
-      })) ?? undefined;
+  const pickupStop = parsed.data.stops.find((stop) => stop.type === "PICKUP");
+  const deliveryStop = parsed.data.stops
+    .slice()
+    .reverse()
+    .find((stop) => stop.type === "DELIVERY");
+  if (!pickupStop || !deliveryStop) {
+    res.status(400).json({ error: "Pickup and delivery stops are required" });
+    return;
+  }
+  if (!pickupStop.name.trim() || !deliveryStop.name.trim()) {
+    res.status(400).json({ error: "Pickup and delivery names are required" });
+    return;
+  }
+  if (!pickupStop.appointmentStart) {
+    res.status(400).json({ error: "Pickup date/time start is required" });
+    return;
+  }
+  const pickupStartDate = new Date(pickupStop.appointmentStart);
+  if (Number.isNaN(pickupStartDate.getTime())) {
+    res.status(400).json({ error: "Pickup date/time start is invalid" });
+    return;
   }
 
   const load = await prisma.load.create({
@@ -5582,8 +5600,8 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
       consigneeReferenceNumber,
       palletCount,
       weightLbs,
-      rate: toDecimal(parsed.data.rate),
-      miles,
+      rate: rateDecimal,
+      miles: milesValue,
       createdById: req.user!.id,
       stops: {
         create: parsed.data.stops.map((stop) => ({
