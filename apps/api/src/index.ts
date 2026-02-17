@@ -7260,7 +7260,39 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
     },
     orderBy: { createdAt: "desc" },
   });
-  res.json({ load, driver });
+
+  const dispatcherContacts = await prisma.user.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      isActive: true,
+      id: { not: req.user!.id },
+      role: { in: [Role.HEAD_DISPATCHER, Role.DISPATCHER, Role.ADMIN] },
+      phone: { not: null },
+    },
+    select: { id: true, name: true, role: true, phone: true, createdAt: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const priorityByRole: Partial<Record<Role, number>> = {
+    ADMIN: 3,
+    HEAD_DISPATCHER: 1,
+    DISPATCHER: 2,
+  };
+  dispatcherContacts.sort(
+    (a, b) =>
+      (priorityByRole[a.role] ?? 99) - (priorityByRole[b.role] ?? 99) ||
+      a.createdAt.getTime() - b.createdAt.getTime()
+  );
+  const primaryDispatcher = dispatcherContacts[0]
+    ? {
+        id: dispatcherContacts[0].id,
+        name: dispatcherContacts[0].name,
+        role: dispatcherContacts[0].role,
+        phone: dispatcherContacts[0].phone,
+      }
+    : null;
+
+  res.json({ load, driver, dispatcher: primaryDispatcher });
 });
 
 app.get("/driver/settings", requireAuth, requireRole("DRIVER"), async (req, res) => {

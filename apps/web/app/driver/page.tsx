@@ -16,7 +16,7 @@ import { enqueueUpload, listQueuedUploads, removeQueuedUpload, type QueuedUpload
 import { deriveDriverState, getComplianceStatus, type DriverState } from "@/lib/driver-ops";
 import { formatDocStatusLabel, formatSettlementStatusLabel } from "@/lib/status-format";
 
-const DISPATCH_PHONE = "+15550101000";
+const FALLBACK_DISPATCH_PHONE = (process.env.NEXT_PUBLIC_DISPATCH_PHONE ?? "").trim();
 const HIGHLIGHT_CLASSES = ["ring-2", "ring-[color:var(--color-accent-soft)]", "ring-offset-2"];
 
 type DocStatus = "UPLOADED" | "VERIFIED" | "REJECTED";
@@ -112,6 +112,13 @@ type DriverSettlement = {
   paidAt?: string | null;
 };
 
+type DispatcherContact = {
+  id: string;
+  name?: string | null;
+  role?: string | null;
+  phone?: string | null;
+};
+
 type TrackingSession = {
   status: TrackingStatus;
   startedAt?: string | null;
@@ -175,6 +182,7 @@ export default function DriverPage() {
   const router = useRouter();
   const [load, setLoad] = useState<DriverLoad | null>(null);
   const [driver, setDriver] = useState<DriverProfile | null>(null);
+  const [dispatcher, setDispatcher] = useState<DispatcherContact | null>(null);
   const [settings, setSettings] = useState<DriverSettings | null>(null);
   const [queued, setQueued] = useState<QueuedUpload[]>([]);
   const [isOnline, setIsOnline] = useState(true);
@@ -199,11 +207,14 @@ export default function DriverPage() {
 
   const loadData = useCallback(async () => {
     const [loadData, settingsData] = await Promise.all([
-      apiFetch<{ load: DriverLoad | null; driver: DriverProfile | null }>("/driver/current"),
+      apiFetch<{ load: DriverLoad | null; driver: DriverProfile | null; dispatcher?: DispatcherContact | null }>(
+        "/driver/current"
+      ),
       apiFetch<{ settings: DriverSettings | null }>("/driver/settings"),
     ]);
     setLoad(loadData.load);
     setDriver(loadData.driver ?? null);
+    setDispatcher(loadData.dispatcher ?? null);
     setSettings(settingsData.settings);
     if (loadData.load?.id) {
       try {
@@ -342,6 +353,21 @@ export default function DriverPage() {
   const trackingOffInTransit = load?.status === "IN_TRANSIT" && !trackingActive;
 
   const hasLoad = Boolean(load);
+  const dispatcherPhone = useMemo(() => {
+    const value = dispatcher?.phone?.trim();
+    return value && value.length > 0 ? value : "";
+  }, [dispatcher?.phone]);
+  const callDispatcher = useCallback(() => {
+    if (dispatcherPhone) {
+      window.location.href = `tel:${dispatcherPhone}`;
+      return;
+    }
+    if (FALLBACK_DISPATCH_PHONE) {
+      window.location.href = `tel:${FALLBACK_DISPATCH_PHONE}`;
+      return;
+    }
+    setActionNote("Dispatcher phone is not configured. Ask admin to add a dispatcher phone number.");
+  }, [dispatcherPhone]);
 
   const driverState: DriverState = deriveDriverState({
     hasLoad: Boolean(load),
@@ -860,7 +886,7 @@ export default function DriverPage() {
           {!load ? (
             <div className="mt-3 space-y-3">
               <p className="text-[color:var(--color-text-muted)]">No load assigned right now.</p>
-              <Button variant="secondary" onClick={() => (window.location.href = `tel:${DISPATCH_PHONE}`)}>
+              <Button variant="secondary" onClick={callDispatcher}>
                 Call dispatcher
               </Button>
             </div>
@@ -1157,7 +1183,7 @@ export default function DriverPage() {
               >
                 Navigate
               </Button>
-              <Button size="lg" variant="ghost" className="w-full" onClick={() => (window.location.href = `tel:${DISPATCH_PHONE}`)}>
+              <Button size="lg" variant="ghost" className="w-full" onClick={callDispatcher}>
                 Call dispatcher
               </Button>
             </div>
