@@ -30,6 +30,12 @@ pnpm dev:api   # Express API on http://localhost:4000
 pnpm dev:worker # Task automation worker
 ```
 
+## Production-like local (Docker)
+
+- Mac guide: `docs/LOCAL_PROD_SETUP_MAC.md`
+- Windows guide: `docs/LOCAL_PROD_SETUP_WINDOWS.md`
+- Troubleshooting: `docs/LOCAL_PROD_TROUBLESHOOTING.md`
+
 ## Prisma client generation (deploy)
 
 Prisma Client must be generated during the build in the target environment
