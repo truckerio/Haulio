@@ -16,6 +16,8 @@
     "dev:all": "docker-compose up -d && pnpm dev",
     "prod:local": "docker compose -p prodlocal --env-file .env.prod.local -f infra/docker/docker-compose.prod-local.yml up -d --build",
     "prod:local:down": "docker compose -p prodlocal --env-file .env.prod.local -f infra/docker/docker-compose.prod-local.yml down --remove-orphans",
+    "prod:local:bootstrap": "bash scripts/dev/bootstrap-prod-local.sh",
+    "prod:local:reset-seed": "bash scripts/dev/reset-and-seed.sh",
     "dev:web": "pnpm --filter @truckerio/web dev",
     "dev:api": "pnpm --filter @truckerio/api dev",
     "dev:worker": "pnpm --filter @truckerio/worker dev",
