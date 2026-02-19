@@ -32,6 +32,8 @@ pnpm dev:worker # Task automation worker
 
 ## Production-like local (Docker)
 
+- Mac dependencies: `docs/LOCAL_PROD_DEPENDENCIES_MAC.md`
+- Windows dependencies: `docs/LOCAL_PROD_DEPENDENCIES_WINDOWS.md`
 - Mac guide: `docs/LOCAL_PROD_SETUP_MAC.md`
 - Windows guide: `docs/LOCAL_PROD_SETUP_WINDOWS.md`
 - Troubleshooting: `docs/LOCAL_PROD_TROUBLESHOOTING.md`

@@ -2,6 +2,10 @@
 
 This devkit provides a production-like local stack (`web`, `api`, `worker`, `postgres`, `redis`) plus repeatable reset/seed scripts so any teammate can run the same environment.
 
+Dependency download checklists:
+- Mac: `docs/LOCAL_PROD_DEPENDENCIES_MAC.md`
+- Windows: `docs/LOCAL_PROD_DEPENDENCIES_WINDOWS.md`
+
 ## Included assets
 
 - Compose stack: `infra/docker/docker-compose.prod-local.yml`
