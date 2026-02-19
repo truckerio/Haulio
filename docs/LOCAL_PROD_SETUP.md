@@ -5,6 +5,8 @@ This devkit provides a production-like local stack (`web`, `api`, `worker`, `pos
 Dependency download checklists:
 - Mac: `docs/LOCAL_PROD_DEPENDENCIES_MAC.md`
 - Windows: `docs/LOCAL_PROD_DEPENDENCIES_WINDOWS.md`
+- Clone + run guide: `docs/LOCAL_PROD_CLONE_AND_RUN.md`
+- Git push guide: `docs/LOCAL_PROD_GIT_PUSH.md`
 
 ## Included assets
 
