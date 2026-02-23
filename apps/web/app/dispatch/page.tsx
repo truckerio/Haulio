@@ -18,7 +18,6 @@ import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { NoAccess } from "@/components/rbac/no-access";
 import type { AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
 import { DispatchBrowse } from "@/components/dispatch/DispatchBrowse";
-import { TripsWorkspace } from "@/components/dispatch/TripsWorkspace";
 import { WorkbenchRightPane } from "@/components/dispatch/WorkbenchRightPane";
 import { apiFetch } from "@/lib/api";
 import { buildYardOsPlanningUrl } from "@/lib/yardos";
@@ -122,7 +121,6 @@ const defaultFilters = {
 
 type Filters = typeof defaultFilters;
 type QueueView = "active" | "recent" | "history";
-type DispatchWorkspaceTab = "dispatch" | "trips";
 
 function DispatchPageContent() {
   const router = useRouter();
@@ -170,32 +168,11 @@ function DispatchPageContent() {
   const pendingLoadIdRef = useRef<string | null>(null);
 
   const loadIdParam = searchParams.get("loadId");
-  const workspaceTab = useMemo<DispatchWorkspaceTab>(() => {
-    return searchParams.get("tab") === "trips" ? "trips" : "dispatch";
-  }, [searchParams]);
-  const dispatchWorkspaceActive = workspaceTab === "dispatch";
   const queueView = useMemo<QueueView>(() => {
     const value = searchParams.get("queueView");
     if (value === "recent" || value === "history") return value;
     return "active";
   }, [searchParams]);
-
-  const updateWorkspaceTab = useCallback(
-    (nextTab: DispatchWorkspaceTab) => {
-      const params = new URLSearchParams(searchParams.toString());
-      if (nextTab === "dispatch") {
-        params.delete("tab");
-        params.delete("tripId");
-      } else {
-        params.set("tab", "trips");
-        params.delete("loadId");
-        params.delete("queueView");
-      }
-      const query = params.toString();
-      router.replace(query ? `${pathname}?${query}` : pathname);
-    },
-    [pathname, router, searchParams]
-  );
 
   const updateLoadIdParam = useCallback(
     (loadId: string | null) => {
@@ -255,14 +232,7 @@ function DispatchPageContent() {
   const hasDispatchRole = Boolean(
     user && (user.role === "ADMIN" || user.role === "DISPATCHER" || user.role === "HEAD_DISPATCHER")
   );
-  const hasTripsRole = Boolean(
-    user &&
-      (user.role === "ADMIN" ||
-        user.role === "DISPATCHER" ||
-        user.role === "HEAD_DISPATCHER" ||
-        user.role === "BILLING")
-  );
-  const canDispatch = dispatchWorkspaceActive && hasDispatchRole;
+  const canDispatch = hasDispatchRole;
   const isQueueReadOnly = queueView !== "active";
   const canStartTracking = canDispatch;
   const canSeeAllTeams = Boolean(
@@ -290,22 +260,13 @@ function DispatchPageContent() {
         const allowed =
           data.user?.role === "ADMIN" ||
           data.user?.role === "DISPATCHER" ||
-          data.user?.role === "HEAD_DISPATCHER" ||
-          data.user?.role === "BILLING";
+          data.user?.role === "HEAD_DISPATCHER";
         setHasAccess(Boolean(allowed));
       })
       .catch(() => setHasAccess(false));
   }, []);
 
   useEffect(() => {
-    if (hasAccess !== true) return;
-    if (workspaceTab !== "dispatch") return;
-    if (hasDispatchRole || !hasTripsRole) return;
-    updateWorkspaceTab("trips");
-  }, [hasAccess, workspaceTab, hasDispatchRole, hasTripsRole, updateWorkspaceTab]);
-
-  useEffect(() => {
-    if (!dispatchWorkspaceActive) return;
     if (!user || user.role !== "ADMIN") return;
     apiFetch<{ state: { status?: string } }>("/onboarding/state")
       .then((payload) => {
@@ -318,7 +279,7 @@ function DispatchPageContent() {
       .catch(() => {
         // ignore onboarding checks for non-admins or unexpected errors
       });
-  }, [user, dispatchWorkspaceActive]);
+  }, [user]);
 
   useEffect(() => {
     if (!hasAccess) return;
@@ -1070,24 +1031,10 @@ function DispatchPageContent() {
     />
   ) : undefined;
 
-  const workspaceSwitcher = (
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <SectionHeader title="Workspace" subtitle="Switch between dispatch execution and trip management" />
-      <SegmentedControl
-        value={workspaceTab}
-        options={[
-          { label: "Dispatch", value: "dispatch" },
-          { label: "Trips", value: "trips" },
-        ]}
-        onChange={(value) => updateWorkspaceTab(value as DispatchWorkspaceTab)}
-      />
-    </div>
-  );
-
   if (hasAccess === false) {
     return (
       <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch or trips." />
+        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
       </AppShell>
     );
   }
@@ -1099,28 +1046,9 @@ function DispatchPageContent() {
     );
   }
 
-  if (workspaceTab === "trips" && !hasTripsRole) {
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        {workspaceSwitcher}
-        <NoAccess title="No access to Trips" description="You do not have permission to view trip management." />
-      </AppShell>
-    );
-  }
-
-  if (workspaceTab === "trips") {
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        {workspaceSwitcher}
-        <TripsWorkspace />
-      </AppShell>
-    );
-  }
-
   if (!hasDispatchRole) {
     return (
       <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        {workspaceSwitcher}
         <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
       </AppShell>
     );
@@ -1130,7 +1058,6 @@ function DispatchPageContent() {
     const isAdmin = user?.role === "ADMIN";
     return (
       <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        {workspaceSwitcher}
         <BlockedScreen
           isAdmin={isAdmin}
           description={isAdmin ? blocked.message || "Finish setup to perform dispatch assignments." : undefined}
@@ -1142,189 +1069,200 @@ function DispatchPageContent() {
 
   return (
     <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-      {workspaceSwitcher}
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <SectionHeader title="Refine" subtitle="Filter down to what you need" />
-        <Button variant="secondary" size="sm" onClick={() => setShowFilters((prev) => !prev)}>
-          {showFilters ? "Hide filters" : "Show filters"}
-        </Button>
+      <div className="sticky top-0 z-20 -mx-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-2 py-2 backdrop-blur">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-ink">Live dispatch</div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">Execution board</div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => setShowFilters((prev) => !prev)}>
+              {showFilters ? "Hide filters" : "Filters"}
+            </Button>
+            <SegmentedControl
+              value={browseLens}
+              options={[
+                { label: "Board", value: "board" },
+                { label: "List", value: "list" },
+              ]}
+              onChange={(value) => setBrowseLens(value as "board" | "list")}
+            />
+            <Button variant="secondary" size="sm" onClick={() => loadDispatchLoads(filters, pageIndex)}>
+              Refresh
+            </Button>
+          </div>
+        </div>
       </div>
 
-      {dispatchError ? (
-        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-warning-soft)] bg-[color:var(--color-warning-soft)]/60 px-4 py-3 text-sm text-[color:var(--color-warning)]">
-          {dispatchError}
-        </div>
-      ) : null}
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <SectionHeader title="Queue state" subtitle="Active, recent, or historical dispatch runs" />
+        <SegmentedControl
+          value={queueView}
+          options={[
+            { label: "Active", value: "active" },
+            { label: "Recent", value: "recent" },
+            { label: "History", value: "history" },
+          ]}
+          onChange={(value) => updateQueueViewParam(value as QueueView)}
+        />
+      </div>
 
       {showFilters ? (
-        <RefinePanel>
-          <div className="grid gap-3 lg:grid-cols-4">
-            <FormField label="Search" htmlFor="dispatchSearch">
-              <Input
-                placeholder="Load #, customer, destination"
-                value={filters.search}
-                onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-              />
-            </FormField>
-            <FormField label="Status" htmlFor="dispatchStatus">
-              <Select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
-                <option value="">All statuses</option>
-                <option value="PLANNED">Planned</option>
-                <option value="ASSIGNED">Assigned</option>
-                <option value="IN_TRANSIT">In transit</option>
-                <option value="DELIVERED">Delivered</option>
-                <option value="READY_TO_INVOICE">Ready to invoice</option>
-                <option value="INVOICED">Invoiced</option>
-              </Select>
-            </FormField>
-            <FormField label="Driver" htmlFor="dispatchDriver">
-              <Select value={filters.driverId} onChange={(e) => setFilters({ ...filters, driverId: e.target.value })}>
-                <option value="">All drivers</option>
-                {drivers.map((driver) => (
-                  <option key={driver.id} value={driver.id}>
-                    {driver.name}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            <FormField label="Assignment" htmlFor="dispatchAssigned">
-              <Select value={filters.assigned} onChange={(e) => setFilters({ ...filters, assigned: e.target.value })}>
-                <option value="all">All assignments</option>
-                <option value="assigned">Assigned</option>
-                <option value="unassigned">Unassigned</option>
-              </Select>
-            </FormField>
-          </div>
-          <details className="mt-3">
-            <summary className="cursor-pointer text-xs font-medium text-[color:var(--color-text-muted)]">Advanced filters</summary>
-            <div className="mt-3 grid gap-3 lg:grid-cols-3">
-              <FormField label="Truck" htmlFor="dispatchTruck">
-                <Select value={filters.truckId} onChange={(e) => setFilters({ ...filters, truckId: e.target.value })}>
-                  <option value="">All trucks</option>
-                  {trucks.map((truck) => (
-                    <option key={truck.id} value={truck.id}>
-                      {truck.unit}
-                    </option>
-                  ))}
-                </Select>
-              </FormField>
-              <FormField label="Trailer" htmlFor="dispatchTrailer">
-                <Select value={filters.trailerId} onChange={(e) => setFilters({ ...filters, trailerId: e.target.value })}>
-                  <option value="">All trailers</option>
-                  {trailers.map((trailer) => (
-                    <option key={trailer.id} value={trailer.id}>
-                      {trailer.unit}
-                    </option>
-                  ))}
-                </Select>
-              </FormField>
-              <div className="grid grid-cols-2 gap-2">
-                <FormField label="From" htmlFor="dispatchFromDate">
-                  <Input
-                    type="date"
-                    value={filters.fromDate}
-                    onChange={(e) => setFilters({ ...filters, fromDate: e.target.value })}
-                  />
-                </FormField>
-                <FormField label="To" htmlFor="dispatchToDate">
-                  <Input
-                    type="date"
-                    value={filters.toDate}
-                    onChange={(e) => setFilters({ ...filters, toDate: e.target.value })}
-                  />
-                </FormField>
-              </div>
-            </div>
-            <div className="mt-3 grid gap-3 lg:grid-cols-3">
-              <FormField label="Destination search" htmlFor="dispatchDestSearch">
+        <div className="mt-3">
+          <RefinePanel>
+            <div className="grid gap-3 lg:grid-cols-4">
+              <FormField label="Search" htmlFor="dispatchSearch">
                 <Input
-                  placeholder="City, state, zip, or name"
-                  value={filters.destSearch}
-                  onChange={(e) => setFilters({ ...filters, destSearch: e.target.value })}
+                  placeholder="Load #, customer, destination"
+                  value={filters.search}
+                  onChange={(e) => setFilters({ ...filters, search: e.target.value })}
                 />
               </FormField>
-              <FormField label="Min rate" htmlFor="dispatchMinRate">
-                <Input placeholder="1000" value={filters.minRate} onChange={(e) => setFilters({ ...filters, minRate: e.target.value })} />
+              <FormField label="Status" htmlFor="dispatchStatus">
+                <Select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
+                  <option value="">All statuses</option>
+                  <option value="PLANNED">Planned</option>
+                  <option value="ASSIGNED">Assigned</option>
+                  <option value="IN_TRANSIT">In transit</option>
+                  <option value="DELIVERED">Delivered</option>
+                  <option value="READY_TO_INVOICE">Ready to invoice</option>
+                  <option value="INVOICED">Invoiced</option>
+                </Select>
               </FormField>
-              <FormField label="Max rate" htmlFor="dispatchMaxRate">
-                <Input placeholder="5000" value={filters.maxRate} onChange={(e) => setFilters({ ...filters, maxRate: e.target.value })} />
-              </FormField>
-            </div>
-            <div className="mt-3 grid gap-3 lg:grid-cols-3">
-              <FormField label="Operating entity" htmlFor="dispatchOperatingEntity">
-                <Select
-                  value={filters.operatingEntityId}
-                  onChange={(e) => setFilters({ ...filters, operatingEntityId: e.target.value })}
-                >
-                  <option value="">All operating entities</option>
-                  {operatingEntities.map((entity) => (
-                    <option key={entity.id} value={entity.id}>
-                      {entity.name} {entity.isDefault ? "(Default)" : ""}
+              <FormField label="Driver" htmlFor="dispatchDriver">
+                <Select value={filters.driverId} onChange={(e) => setFilters({ ...filters, driverId: e.target.value })}>
+                  <option value="">All drivers</option>
+                  {drivers.map((driver) => (
+                    <option key={driver.id} value={driver.id}>
+                      {driver.name}
                     </option>
                   ))}
                 </Select>
               </FormField>
-              {canSeeAllTeams ? (
-                <FormField label="Team" htmlFor="dispatchTeam">
-                  <Select value={filters.teamId} onChange={(e) => setFilters({ ...filters, teamId: e.target.value })}>
-                    <option value="">All teams</option>
-                    {teams.map((team) => (
-                      <option key={team.id} value={team.id}>
-                        {team.name}
+              <FormField label="Assignment" htmlFor="dispatchAssigned">
+                <Select value={filters.assigned} onChange={(e) => setFilters({ ...filters, assigned: e.target.value })}>
+                  <option value="all">All assignments</option>
+                  <option value="assigned">Assigned</option>
+                  <option value="unassigned">Unassigned</option>
+                </Select>
+              </FormField>
+            </div>
+            <details className="mt-3">
+              <summary className="cursor-pointer text-xs font-medium text-[color:var(--color-text-muted)]">Advanced filters</summary>
+              <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                <FormField label="Truck" htmlFor="dispatchTruck">
+                  <Select value={filters.truckId} onChange={(e) => setFilters({ ...filters, truckId: e.target.value })}>
+                    <option value="">All trucks</option>
+                    {trucks.map((truck) => (
+                      <option key={truck.id} value={truck.id}>
+                        {truck.unit}
                       </option>
                     ))}
                   </Select>
                 </FormField>
-              ) : null}
+                <FormField label="Trailer" htmlFor="dispatchTrailer">
+                  <Select value={filters.trailerId} onChange={(e) => setFilters({ ...filters, trailerId: e.target.value })}>
+                    <option value="">All trailers</option>
+                    {trailers.map((trailer) => (
+                      <option key={trailer.id} value={trailer.id}>
+                        {trailer.unit}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+                <div className="grid grid-cols-2 gap-2">
+                  <FormField label="From" htmlFor="dispatchFromDate">
+                    <Input
+                      type="date"
+                      value={filters.fromDate}
+                      onChange={(e) => setFilters({ ...filters, fromDate: e.target.value })}
+                    />
+                  </FormField>
+                  <FormField label="To" htmlFor="dispatchToDate">
+                    <Input
+                      type="date"
+                      value={filters.toDate}
+                      onChange={(e) => setFilters({ ...filters, toDate: e.target.value })}
+                    />
+                  </FormField>
+                </div>
+              </div>
+              <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                <FormField label="Destination search" htmlFor="dispatchDestSearch">
+                  <Input
+                    placeholder="City, state, zip, or name"
+                    value={filters.destSearch}
+                    onChange={(e) => setFilters({ ...filters, destSearch: e.target.value })}
+                  />
+                </FormField>
+                <FormField label="Min rate" htmlFor="dispatchMinRate">
+                  <Input placeholder="1000" value={filters.minRate} onChange={(e) => setFilters({ ...filters, minRate: e.target.value })} />
+                </FormField>
+                <FormField label="Max rate" htmlFor="dispatchMaxRate">
+                  <Input placeholder="5000" value={filters.maxRate} onChange={(e) => setFilters({ ...filters, maxRate: e.target.value })} />
+                </FormField>
+              </div>
+              <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                <FormField label="Operating entity" htmlFor="dispatchOperatingEntity">
+                  <Select
+                    value={filters.operatingEntityId}
+                    onChange={(e) => setFilters({ ...filters, operatingEntityId: e.target.value })}
+                  >
+                    <option value="">All operating entities</option>
+                    {operatingEntities.map((entity) => (
+                      <option key={entity.id} value={entity.id}>
+                        {entity.name} {entity.isDefault ? "(Default)" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+                {canSeeAllTeams ? (
+                  <FormField label="Team" htmlFor="dispatchTeam">
+                    <Select value={filters.teamId} onChange={(e) => setFilters({ ...filters, teamId: e.target.value })}>
+                      <option value="">All teams</option>
+                      {teams.map((team) => (
+                        <option key={team.id} value={team.id}>
+                          {team.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </FormField>
+                ) : null}
+              </div>
+            </details>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                onClick={() => {
+                  setPageIndex(0);
+                  loadDispatchLoads(filters, 0);
+                }}
+              >
+                Apply
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setFilters(defaultFilters);
+                  setPageIndex(0);
+                  loadDispatchLoads(defaultFilters, 0);
+                }}
+              >
+                Reset
+              </Button>
             </div>
-          </details>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              onClick={() => {
-                setPageIndex(0);
-                loadDispatchLoads(filters, 0);
-              }}
-            >
-              Apply
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => {
-                setFilters(defaultFilters);
-                setPageIndex(0);
-                loadDispatchLoads(defaultFilters, 0);
-              }}
-            >
-              Reset
-            </Button>
-          </div>
-        </RefinePanel>
+          </RefinePanel>
+        </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <SectionHeader title="Browse" subtitle="Board or list view of trip-linked loads" />
-        <div className="flex flex-wrap items-center gap-2">
-          <SegmentedControl
-            value={queueView}
-            options={[
-              { label: "Active", value: "active" },
-              { label: "Recent", value: "recent" },
-              { label: "History", value: "history" },
-            ]}
-            onChange={(value) => updateQueueViewParam(value as QueueView)}
-          />
-          <SegmentedControl
-            value={browseLens}
-            options={[
-              { label: "Board", value: "board" },
-              { label: "List", value: "list" },
-            ]}
-            onChange={(value) => setBrowseLens(value as "board" | "list")}
-          />
+      {dispatchError ? (
+        <div className="mt-3 border-l-2 border-[color:var(--color-warning)] pl-3 text-sm text-[color:var(--color-warning)]">
+          {dispatchError}
         </div>
+      ) : null}
+      <div className="mt-4 border-t border-[color:var(--color-divider)] pt-4">
+        <SectionHeader title="Browse" subtitle="Board or list view of trip-linked loads" />
       </div>
 
       <div

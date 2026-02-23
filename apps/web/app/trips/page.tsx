@@ -1,24 +1,21 @@
-import { redirect } from "next/navigation";
+"use client";
 
-type TripsPageProps = {
-  searchParams?: Record<string, string | string[] | undefined>;
-};
+import { Suspense } from "react";
+import { AppShell } from "@/components/app-shell";
+import { TripsWorkspace } from "@/components/dispatch/TripsWorkspace";
 
-export default function TripsPage({ searchParams }: TripsPageProps) {
-  const params = new URLSearchParams();
-  params.set("tab", "trips");
+function TripsPageContent() {
+  return (
+    <AppShell title="Trips" subtitle="Planning and trip management">
+      <TripsWorkspace />
+    </AppShell>
+  );
+}
 
-  const tripIdValue = searchParams?.tripId;
-  const tripId = Array.isArray(tripIdValue) ? tripIdValue[0] : tripIdValue;
-  if (tripId) {
-    params.set("tripId", tripId);
-  }
-
-  const searchValue = searchParams?.search;
-  const search = Array.isArray(searchValue) ? searchValue[0] : searchValue;
-  if (search) {
-    params.set("search", search);
-  }
-
-  redirect(`/dispatch?${params.toString()}`);
+export default function TripsPage() {
+  return (
+    <Suspense fallback={null}>
+      <TripsPageContent />
+    </Suspense>
+  );
 }

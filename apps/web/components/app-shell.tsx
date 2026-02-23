@@ -45,6 +45,7 @@ const navSections: NavSection[] = [
     items: [
       { href: "/loads", label: "Loads" },
       { href: "/dispatch", label: "Dispatch" },
+      { href: "/trips", label: "Trips" },
       { href: "/teams", label: "Teams (Ops)" },
       { href: "/finance", label: "Finance" },
     ],
@@ -66,15 +67,16 @@ const roleRoutes: Record<string, string[]> = {
     "/dashboard",
     "/loads",
     "/dispatch",
+    "/trips",
     "/teams",
     "/finance",
     "/audit",
     "/admin",
     "/profile",
   ],
-  HEAD_DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/teams", "/finance", "/profile"],
-  DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/finance", "/profile"],
-  BILLING: ["/today", "/dashboard", "/loads", "/dispatch", "/finance", "/profile"],
+  HEAD_DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/trips", "/teams", "/finance", "/profile"],
+  DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/trips", "/finance", "/profile"],
+  BILLING: ["/today", "/dashboard", "/loads", "/trips", "/finance", "/profile"],
   DRIVER: ["/driver"],
 };
 
@@ -151,6 +153,16 @@ function NavIcon({ href, active }: { href: string; active: boolean }) {
       <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
         <path d="M3.5 12h8.5M12.5 12l-2.5-2.5M12.5 12l-2.5 2.5M20.5 12H12" />
         <circle cx="20.5" cy="12" r="2.5" />
+      </svg>
+    );
+  }
+  if (href === "/trips") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M4 7.5h16M4 12h16M4 16.5h16" />
+        <circle cx="7.5" cy="7.5" r="1.4" />
+        <circle cx="12" cy="12" r="1.4" />
+        <circle cx="16.5" cy="16.5" r="1.4" />
       </svg>
     );
   }
