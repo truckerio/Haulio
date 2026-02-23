@@ -168,11 +168,20 @@ async function apiForm<T>(baseUrl: string, session: Session, path: string, form:
 async function findLoadIdsByFilter(baseUrl: string, session: Session, key: string, value: string) {
   const params = new URLSearchParams();
   params.set(key, value);
-  const list = await apiJson<{ loads: Array<{ id: string }> }>(baseUrl, session, `/loads?${params.toString()}`);
-  return (list.loads || []).map((load) => load.id);
+  const list = await apiJson<{ loads?: Array<{ id: string }>; items?: Array<{ id: string }> }>(
+    baseUrl,
+    session,
+    `/loads?${params.toString()}`
+  );
+  return (list.loads || list.items || []).map((load) => load.id);
 }
 
 function buildStops() {
+  const now = Date.now();
+  const pickupStart = new Date(now + 60 * 60 * 1000).toISOString();
+  const pickupEnd = new Date(now + 2 * 60 * 60 * 1000).toISOString();
+  const deliveryStart = new Date(now + 8 * 60 * 60 * 1000).toISOString();
+  const deliveryEnd = new Date(now + 9 * 60 * 60 * 1000).toISOString();
   return [
     {
       type: "PICKUP",
@@ -181,6 +190,8 @@ function buildStops() {
       city: "Austin",
       state: "TX",
       zip: "78701",
+      appointmentStart: pickupStart,
+      appointmentEnd: pickupEnd,
       sequence: 1,
     },
     {
@@ -190,6 +201,8 @@ function buildStops() {
       city: "Dallas",
       state: "TX",
       zip: "75201",
+      appointmentStart: deliveryStart,
+      appointmentEnd: deliveryEnd,
       sequence: 2,
     },
   ];
@@ -225,26 +238,46 @@ async function main() {
     const adminB = await login(baseUrl, state.orgB.users.admin, state.password);
 
     let loadAId = "";
+    let loadANumber = "";
     let loadBId = "";
     let stopIds: string[] = [];
     let podDocId = "";
     let invoiceId = "";
 
     await runStep("qa.smoke.cleanup.assignments", async () => {
-      const loadIds = new Set<string>();
-      for (const id of await findLoadIdsByFilter(baseUrl, dispatcherA, "driverId", state.orgA.driverId)) {
-        loadIds.add(id);
+      const [plannedTrips, assignedTrips] = await Promise.all([
+        apiJson<{ trips: Array<{ id: string; status: string; driverId?: string | null; truckId?: string | null; trailerId?: string | null }> }>(
+          baseUrl,
+          dispatcherA,
+          "/trips?status=PLANNED"
+        ),
+        apiJson<{ trips: Array<{ id: string; status: string; driverId?: string | null; truckId?: string | null; trailerId?: string | null }> }>(
+          baseUrl,
+          dispatcherA,
+          "/trips?status=ASSIGNED"
+        ),
+      ]);
+      const candidateTrips = [...(plannedTrips.trips || []), ...(assignedTrips.trips || [])].filter(
+        (trip) =>
+          trip.driverId === state.orgA.driverId ||
+          trip.truckId === state.orgA.truckId ||
+          trip.trailerId === state.orgA.trailerId
+      );
+
+      let cleared = 0;
+      for (const trip of candidateTrips) {
+        await apiJson(baseUrl, dispatcherA, `/trips/${trip.id}/assign`, {
+          method: "POST",
+          body: JSON.stringify({
+            driverId: null,
+            truckId: null,
+            trailerId: null,
+            status: "PLANNED",
+          }),
+        });
+        cleared += 1;
       }
-      for (const id of await findLoadIdsByFilter(baseUrl, dispatcherA, "truckId", state.orgA.truckId)) {
-        loadIds.add(id);
-      }
-      for (const id of await findLoadIdsByFilter(baseUrl, dispatcherA, "trailerId", state.orgA.trailerId)) {
-        loadIds.add(id);
-      }
-      for (const loadId of loadIds) {
-        await apiJson(baseUrl, dispatcherA, `/loads/${loadId}/unassign`, { method: "POST" });
-      }
-      return { details: `Unassigned ${loadIds.size} existing load(s) for QA seed assets` };
+      return { details: `Cleared assignments from ${cleared} trip(s) for QA seed assets` };
     });
 
     await runStep("qa.smoke.multitenant", async () => {
@@ -265,6 +298,7 @@ async function main() {
         }),
       });
       loadAId = loadA.load.id;
+      loadANumber = loadA.load.loadNumber;
 
       const loadB = await apiJson<{ load: any }>(baseUrl, adminB, "/loads", {
         method: "POST",
@@ -302,12 +336,15 @@ async function main() {
   });
 
   await runStep("qa.smoke.load.lifecycle", async () => {
-    await apiJson(baseUrl, dispatcherA, `/loads/${loadAId}/assign`, {
+    await apiJson(baseUrl, dispatcherA, `/trips`, {
       method: "POST",
       body: JSON.stringify({
+        loadNumbers: [loadANumber],
+        movementMode: "FTL",
         driverId: state.orgA.driverId,
         truckId: state.orgA.truckId,
         trailerId: state.orgA.trailerId,
+        status: "ASSIGNED",
       }),
     });
     const load = await apiJson<{ load: any }>(baseUrl, dispatcherA, `/loads/${loadAId}`);

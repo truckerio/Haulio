@@ -32,7 +32,7 @@ export async function generatePacketZip(params: {
     const output = fs.createWriteStream(filePath);
     const archive = archiver("zip", { zlib: { level: 9 } });
     output.on("close", () => resolve());
-    archive.on("error", (err) => reject(err));
+    archive.on("error", (err: unknown) => reject(err));
     archive.pipe(output);
     const invoiceRelPath = toRelativeUploadPath(params.invoicePath);
     if (!invoiceRelPath) {

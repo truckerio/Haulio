@@ -41,6 +41,8 @@ type OnboardingState = {
 type WarningDetailLoad = {
   id: string;
   loadNumber?: string | null;
+  tripId?: string | null;
+  tripNumber?: string | null;
   customerName?: string | null;
   status?: string | null;
   warningReason: string;
@@ -80,8 +82,8 @@ const SECTION_META = [
 ] as const;
 
 const WARNING_META = [
-  { key: "dispatch_unassigned_loads", label: "Unassigned", title: "Unassigned loads need coverage" },
-  { key: "dispatch_stuck_in_transit", label: "Stuck in transit", title: "Loads stuck in transit" },
+  { key: "dispatch_unassigned_loads", label: "Unassigned trips", title: "Unassigned trips need coverage" },
+  { key: "dispatch_stuck_in_transit", label: "Stuck in transit", title: "Trips stuck in transit" },
 ] as const;
 
 const TONE_CLASS: Record<(typeof SECTION_META)[number]["tone"], string> = {
@@ -198,11 +200,19 @@ function TodayContent() {
   const resolveItemHref = (item: TodayItem) => {
     if (!item.href) return null;
     if (isDispatcherRole) {
+      if (item.href.startsWith("/trips")) {
+        return item.entityType === "trip" && item.entityId
+          ? `/dispatch?tab=trips&tripId=${item.entityId}`
+          : "/dispatch?tab=trips";
+      }
+      if (item.entityType === "trip" && item.entityId) {
+        return `/dispatch?tab=trips&tripId=${item.entityId}`;
+      }
       if (item.entityType === "load" && item.entityId) {
         return `/dispatch?loadId=${item.entityId}`;
       }
       if (item.href.startsWith("/loads")) {
-        return "/dispatch";
+        return "/dispatch?tab=trips";
       }
     }
     return item.href;
@@ -468,7 +478,10 @@ function TodayContent() {
                     key={load.id}
                     className="space-y-1 border border-[color:var(--color-divider)] pl-5 pr-4"
                   >
-                    <div className="text-sm font-semibold">{load.loadNumber ?? "Load"}</div>
+                    <div className="text-sm font-semibold">
+                      {load.tripNumber ? `${load.tripNumber} · ` : ""}
+                      {load.loadNumber ?? "Load"}
+                    </div>
                     {load.customerName ? <div className="text-xs text-[color:var(--color-text-muted)]">{load.customerName}</div> : null}
                     <div className="text-xs text-[color:var(--color-text-muted)]">{load.warningReason}</div>
                     {load.stopSummary ? (
@@ -484,10 +497,16 @@ function TodayContent() {
                       size="sm"
                       variant="secondary"
                       onClick={() =>
-                        router.push(isDispatcherRole ? `/dispatch?loadId=${load.id}` : `/loads/${load.id}`)
+                        router.push(
+                          isDispatcherRole
+                            ? load.tripId
+                              ? `/dispatch?tab=trips&tripId=${load.tripId}`
+                              : `/dispatch?loadId=${load.id}`
+                            : `/loads/${load.id}`
+                        )
                       }
                     >
-                      Open load
+                      {isDispatcherRole ? (load.tripId ? "Open trip" : "Open load") : "Open load"}
                     </Button>
                   </Card>
                 ))

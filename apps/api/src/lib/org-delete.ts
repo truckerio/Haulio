@@ -154,7 +154,7 @@ export async function performOrganizationDelete(params: {
     return { status: 403, body: { error: "Organization deletion is not enabled" } };
   }
 
-  const email = actor.email.toLowerCase();
+  const email = String(actor.email ?? "").toLowerCase();
   if (!params.allowlist.has(email)) {
     await logDeleteAuditSafe(params.audit, {
       orgId: actor.orgId,

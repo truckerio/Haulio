@@ -78,6 +78,15 @@ enum ManifestStatus {
   COMPLETE
 }
 
+enum TripStatus {
+  PLANNED
+  ASSIGNED
+  IN_TRANSIT
+  ARRIVED
+  COMPLETE
+  CANCELLED
+}
+
 enum TaskStatus {
   OPEN
   IN_PROGRESS
@@ -235,6 +244,12 @@ enum LoadType {
   OTHER
 }
 
+enum MovementMode {
+  FTL
+  LTL
+  POOL_DISTRIBUTION
+}
+
 enum LoadBusinessType {
   COMPANY
   BROKER
@@ -379,6 +394,49 @@ enum SettlementSchedule {
   MONTHLY
 }
 
+enum AppearanceTheme {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+enum AppearanceTextScale {
+  DEFAULT
+  LARGE
+  XL
+}
+
+enum AppearanceContrast {
+  NORMAL
+  HIGH
+}
+
+enum AppearanceFontWeight {
+  NORMAL
+  BOLD
+}
+
+enum AppearanceNavDensity {
+  COMPACT
+  COMFORTABLE
+}
+
+enum AppearanceMotion {
+  FULL
+  REDUCED
+}
+
+enum AppearanceFocusRing {
+  STANDARD
+  STRONG
+}
+
+enum AppearanceColorPreset {
+  DEFAULT
+  SLATE
+  TEAL
+}
+
 enum FinanceRateConRequirement {
   ALWAYS
   BROKERED_ONLY
@@ -485,10 +543,27 @@ enum PayableLineItemType {
   REIMBURSEMENT
 }
 
+enum PayableMilesSource {
+  PLANNED
+  APPROVED_ACTUAL
+  MANUAL_OVERRIDE
+}
+
 enum PayableHoldOwner {
   DISPATCH
   DRIVER
   BILLING
+  SYSTEM
+}
+
+enum LoadNoteVisibility {
+  NORMAL
+  LOCKED
+}
+
+enum LoadNoteSource {
+  OPS
+  DRIVER
   SYSTEM
 }
 
@@ -497,63 +572,66 @@ model Organization {
   name      String
   createdAt DateTime @default(now())
 
-  users       User[]
-  identities UserIdentity[]
-  drivers     Driver[]
-  trucks      Truck[]
-  trailers    Trailer[]
-  customers   Customer[]
-  loads       Load[]
-  operatingEntities OperatingEntity[]
-  stops       Stop[]
-  documents   Document[]
-  vaultDocuments VaultDocument[]
-  loadConfirmationDocuments LoadConfirmationDocument[]
-  loadConfirmationExtractEvents LoadConfirmationExtractEvent[]
+  users                            User[]
+  identities                       UserIdentity[]
+  drivers                          Driver[]
+  trucks                           Truck[]
+  trailers                         Trailer[]
+  customers                        Customer[]
+  loads                            Load[]
+  operatingEntities                OperatingEntity[]
+  stops                            Stop[]
+  documents                        Document[]
+  vaultDocuments                   VaultDocument[]
+  loadConfirmationDocuments        LoadConfirmationDocument[]
+  loadConfirmationExtractEvents    LoadConfirmationExtractEvent[]
   loadConfirmationLearningExamples LoadConfirmationLearningExample[]
-  learningExamples LearningExample[]
-  learnedMappings LearnedMapping[]
-  events      Event[]
-  tasks       Task[]
-  settings    OrgSettings?
-  audits      AuditLog[]
-  invoices    Invoice[]
-  settlements Settlement[]
-  loadCharges LoadCharge[]
-  accessorials Accessorial[]
-  storage     StorageRecord[]
-  trackingIntegrations TrackingIntegration[]
-  fuelSummaries FuelSummary[]
-  truckTelematicsMappings TruckTelematicsMapping[]
-  trackingSessions LoadTrackingSession[]
-  locationPings LocationPing[]
-  legs        LoadLeg[]
-  manifests   TrailerManifest[]
-  invites     UserInvite[]
-  passwordResets PasswordReset[]
-  onboardingState OnboardingState?
-  sequence   OrgSequence?
-  setupCodes SetupCode[]
-  teams      Team[]
-  teamMembers TeamMember[]
-  teamAssignments TeamAssignment[]
-  assignmentSuggestionLogs AssignmentSuggestionLog[]
-  driverStats DriverStats[]
-  billingSubmissions BillingSubmission[]
-  payableRuns PayableRun[]
-  payableLineItems PayableLineItem[]
-  settlementPolicyVersions SettlementPolicyVersion[]
-  financeOutboxEvents FinanceOutboxEvent[]
-  qboSyncJobs QboSyncJob[]
-  invoicePayments InvoicePayment[]
+  learningExamples                 LearningExample[]
+  learnedMappings                  LearnedMapping[]
+  events                           Event[]
+  tasks                            Task[]
+  settings                         OrgSettings?
+  audits                           AuditLog[]
+  invoices                         Invoice[]
+  settlements                      Settlement[]
+  loadCharges                      LoadCharge[]
+  accessorials                     Accessorial[]
+  storage                          StorageRecord[]
+  trackingIntegrations             TrackingIntegration[]
+  fuelSummaries                    FuelSummary[]
+  truckTelematicsMappings          TruckTelematicsMapping[]
+  trackingSessions                 LoadTrackingSession[]
+  locationPings                    LocationPing[]
+  legs                             LoadLeg[]
+  manifests                        TrailerManifest[]
+  trips                            Trip[]
+  tripLoads                        TripLoad[]
+  invites                          UserInvite[]
+  passwordResets                   PasswordReset[]
+  onboardingState                  OnboardingState?
+  sequence                         OrgSequence?
+  setupCodes                       SetupCode[]
+  teams                            Team[]
+  teamMembers                      TeamMember[]
+  teamAssignments                  TeamAssignment[]
+  assignmentSuggestionLogs         AssignmentSuggestionLog[]
+  driverStats                      DriverStats[]
+  billingSubmissions               BillingSubmission[]
+  payableRuns                      PayableRun[]
+  payableLineItems                 PayableLineItem[]
+  settlementPolicyVersions         SettlementPolicyVersion[]
+  financeOutboxEvents              FinanceOutboxEvent[]
+  qboSyncJobs                      QboSyncJob[]
+  invoicePayments                  InvoicePayment[]
+  loadNotes                        LoadNote[]
 }
 
 model SetupCode {
-  id         String   @id @default(cuid())
-  code       String   @unique
+  id         String    @id @default(cuid())
+  code       String    @unique
   orgId      String?
   consumedAt DateTime?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
 
   org Organization? @relation(fields: [orgId], references: [id])
 
@@ -580,10 +658,10 @@ model Team {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  org         Organization  @relation(fields: [orgId], references: [id])
-  defaultUsers User[]       @relation("UserDefaultTeam")
-  members     TeamMember[]
-  assignments TeamAssignment[]
+  org          Organization     @relation(fields: [orgId], references: [id])
+  defaultUsers User[]           @relation("UserDefaultTeam")
+  members      TeamMember[]
+  assignments  TeamAssignment[]
 
   @@unique([orgId, name])
   @@index([orgId])
@@ -620,93 +698,104 @@ model TeamAssignment {
 }
 
 model User {
-  id           String       @id @default(cuid())
-  orgId        String
-  email        String       @db.Citext
-  passwordHash String
-  role         Role
-  status       UserStatus   @default(ACTIVE)
-  name         String?
-  phone        String?
-  profilePhotoUrl String?
-  permissions  Permission[] @default([])
-  isActive     Boolean      @default(true)
-  canSeeAllTeams Boolean    @default(false)
-  defaultTeamId String?
-  timezone     String?
-  lastLoginAt  DateTime?
-  mfaEnabled   Boolean      @default(false)
+  id                     String       @id @default(cuid())
+  orgId                  String
+  email                  String       @db.Citext
+  passwordHash           String
+  role                   Role
+  status                 UserStatus   @default(ACTIVE)
+  name                   String?
+  phone                  String?
+  profilePhotoUrl        String?
+  permissions            Permission[] @default([])
+  isActive               Boolean      @default(true)
+  canSeeAllTeams         Boolean      @default(false)
+  defaultTeamId          String?
+  timezone               String?
+  appearanceTheme        AppearanceTheme      @default(SYSTEM)
+  appearanceTextScale    AppearanceTextScale  @default(DEFAULT)
+  appearanceContrast     AppearanceContrast   @default(NORMAL)
+  appearanceFontWeight   AppearanceFontWeight @default(NORMAL)
+  appearanceNavDensity   AppearanceNavDensity @default(COMFORTABLE)
+  appearanceMotion       AppearanceMotion     @default(FULL)
+  appearanceFocusRing    AppearanceFocusRing  @default(STANDARD)
+  appearanceColorPreset  AppearanceColorPreset @default(DEFAULT)
+  lastLoginAt            DateTime?
+  mfaEnabled             Boolean      @default(false)
   mfaTotpSecretEncrypted String?
-  mfaRecoveryCodesHash String?
-  mfaEnforced  Boolean      @default(false)
-  createdAt    DateTime     @default(now())
+  mfaRecoveryCodesHash   String?
+  mfaEnforced            Boolean      @default(false)
+  createdAt              DateTime     @default(now())
 
-  org               Organization           @relation(fields: [orgId], references: [id])
-  defaultTeam       Team?                  @relation("UserDefaultTeam", fields: [defaultTeamId], references: [id])
-  sessions          Session[]
-  mfaChallenges     MfaChallenge[]
-  driver            Driver?
-  identities        UserIdentity[]
-  createdLoads      Load[]                 @relation("CreatedLoads")
-  deletedLoads      Load[]                 @relation("DeletedLoads")
-  events            Event[]
-  documents         Document[]             @relation("UploadedDocs")
-  vaultDocuments    VaultDocument[]        @relation("VaultUploads")
-  verifiedDocs      Document[]             @relation("VerifiedDocs")
-  rejectedDocs      Document[]             @relation("RejectedDocs")
-  createdAccessorials Accessorial[]        @relation("AccessorialCreatedBy")
-  approvedAccessorials Accessorial[]       @relation("AccessorialApprovedBy")
-  loadConfirmationDocuments LoadConfirmationDocument[] @relation("LoadConfirmationUploads")
-  audits            AuditLog[]
-  assignedTasks     Task[]                 @relation("AssignedTasks")
-  createdTasks      Task[]                 @relation("CreatedTasks")
-  completedTasks    Task[]                 @relation("CompletedTasks")
-  trackingSessionsStarted LoadTrackingSession[] @relation("TrackingSessionsStarted")
-  notificationPrefs UserNotificationPref[]
-  invitesSent       UserInvite[]           @relation("InvitedByUser")
-  passwordResets    PasswordReset[]
-  teamMemberships   TeamMember[]
-  assignmentSuggestionLogs AssignmentSuggestionLog[] @relation("AssignmentSuggestionDispatcher")
-  billingSubmissions BillingSubmission[] @relation("BillingSubmissionCreatedBy")
-  invoicePaymentsCreated InvoicePayment[] @relation("InvoicePaymentCreatedBy")
-  payableRunsCreated PayableRun[] @relation("PayableRunCreatedBy")
-  settlementPolicyVersionsCreated SettlementPolicyVersion[] @relation("SettlementPolicyVersionCreatedBy")
+  org                             Organization               @relation(fields: [orgId], references: [id])
+  defaultTeam                     Team?                      @relation("UserDefaultTeam", fields: [defaultTeamId], references: [id])
+  sessions                        Session[]
+  mfaChallenges                   MfaChallenge[]
+  driver                          Driver?
+  identities                      UserIdentity[]
+  createdLoads                    Load[]                     @relation("CreatedLoads")
+  deletedLoads                    Load[]                     @relation("DeletedLoads")
+  events                          Event[]
+  documents                       Document[]                 @relation("UploadedDocs")
+  vaultDocuments                  VaultDocument[]            @relation("VaultUploads")
+  verifiedDocs                    Document[]                 @relation("VerifiedDocs")
+  rejectedDocs                    Document[]                 @relation("RejectedDocs")
+  createdAccessorials             Accessorial[]              @relation("AccessorialCreatedBy")
+  approvedAccessorials            Accessorial[]              @relation("AccessorialApprovedBy")
+  loadConfirmationDocuments       LoadConfirmationDocument[] @relation("LoadConfirmationUploads")
+  audits                          AuditLog[]
+  assignedTasks                   Task[]                     @relation("AssignedTasks")
+  createdTasks                    Task[]                     @relation("CreatedTasks")
+  completedTasks                  Task[]                     @relation("CompletedTasks")
+  trackingSessionsStarted         LoadTrackingSession[]      @relation("TrackingSessionsStarted")
+  notificationPrefs               UserNotificationPref[]
+  invitesSent                     UserInvite[]               @relation("InvitedByUser")
+  passwordResets                  PasswordReset[]
+  teamMemberships                 TeamMember[]
+  assignmentSuggestionLogs        AssignmentSuggestionLog[]  @relation("AssignmentSuggestionDispatcher")
+  billingSubmissions              BillingSubmission[]        @relation("BillingSubmissionCreatedBy")
+  invoicePaymentsCreated          InvoicePayment[]           @relation("InvoicePaymentCreatedBy")
+  payableRunsCreated              PayableRun[]               @relation("PayableRunCreatedBy")
+  settlementPolicyVersionsCreated SettlementPolicyVersion[]  @relation("SettlementPolicyVersionCreatedBy")
+  loadNotesCreated                LoadNote[]                 @relation("LoadNoteCreatedBy")
+  loadNotesUpdated                LoadNote[]                 @relation("LoadNoteUpdatedBy")
+  loadNotesDeleted                LoadNote[]                 @relation("LoadNoteDeletedBy")
 
   @@unique([orgId, email])
 }
 
 model UserInvite {
-  id        String   @id @default(cuid())
-  orgId     String
-  email     String   @db.Citext
-  role      Role
-  tokenHash String
-  createdAt DateTime @default(now())
-  expiresAt DateTime
-  acceptedAt DateTime?
+  id              String    @id @default(cuid())
+  orgId           String
+  email           String    @db.Citext
+  role            Role
+  tokenHash       String
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime
+  acceptedAt      DateTime?
   invitedByUserId String?
 
-  org        Organization @relation(fields: [orgId], references: [id])
-  invitedBy  User?        @relation("InvitedByUser", fields: [invitedByUserId], references: [id])
+  org       Organization @relation(fields: [orgId], references: [id])
+  invitedBy User?        @relation("InvitedByUser", fields: [invitedByUserId], references: [id])
 
   @@index([orgId, email])
   @@index([tokenHash])
 }
 
 model PasswordReset {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   orgId     String
   userId    String
   tokenHash String
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
   expiresAt DateTime
   usedAt    DateTime?
 
   org  Organization @relation(fields: [orgId], references: [id])
   user User         @relation(fields: [userId], references: [id])
 
-  @@index([orgId, userId])
   @@unique([tokenHash])
+  @@index([orgId, userId])
 }
 
 model Session {
@@ -758,9 +847,9 @@ model UserIdentity {
 }
 
 model Driver {
-  id               String    @id @default(cuid())
+  id               String       @id @default(cuid())
   orgId            String
-  userId           String?   @unique
+  userId           String?      @unique
   name             String
   status           DriverStatus @default(AVAILABLE)
   profilePhotoUrl  String?
@@ -769,147 +858,157 @@ model Driver {
   licenseState     String?
   licenseExpiresAt DateTime?
   medCardExpiresAt DateTime?
-  payRatePerMile   Decimal?  @db.Decimal(12, 2)
+  payRatePerMile   Decimal?     @db.Decimal(12, 2)
   archivedAt       DateTime?
-  createdAt        DateTime  @default(now())
+  createdAt        DateTime     @default(now())
 
-  org        Organization      @relation(fields: [orgId], references: [id])
-  user       User?             @relation(fields: [userId], references: [id])
-  loads      Load[]            @relation("DriverLoads")
+  org             Organization           @relation(fields: [orgId], references: [id])
+  user            User?                  @relation(fields: [userId], references: [id])
+  loads           Load[]                 @relation("DriverLoads")
   loadAssignments LoadAssignmentMember[] @relation("DriverLoadAssignments")
-  legs       LoadLeg[]
-  manifests  TrailerManifest[]
-  Task       Task[]
-  Settlement Settlement[]
-  locationPings LocationPing[]
-  stats      DriverStats[]
+  legs            LoadLeg[]
+  manifests       TrailerManifest[]
+  trips           Trip[]
+  Task            Task[]
+  Settlement      Settlement[]
+  locationPings   LocationPing[]
+  stats           DriverStats[]
 }
 
 model Truck {
-  id        String   @id @default(cuid())
-  orgId     String
-  unit      String
-  vin       String?
-  plate     String?
+  id         String      @id @default(cuid())
+  orgId      String
+  unit       String
+  vin        String?
+  plate      String?
   plateState String?
-  status    TruckStatus @default(AVAILABLE)
-  active    Boolean  @default(true)
-  createdAt DateTime @default(now())
+  status     TruckStatus @default(AVAILABLE)
+  active     Boolean     @default(true)
+  createdAt  DateTime    @default(now())
 
-  org       Organization      @relation(fields: [orgId], references: [id])
-  loads     Load[]
-  legs      LoadLeg[]
-  manifests TrailerManifest[]
+  org                Organization             @relation(fields: [orgId], references: [id])
+  loads              Load[]
+  legs               LoadLeg[]
+  manifests          TrailerManifest[]
+  trips              Trip[]
   telematicsMappings TruckTelematicsMapping[]
-  fuelSummaries FuelSummary[]
-  locationPings LocationPing[]
+  fuelSummaries      FuelSummary[]
+  locationPings      LocationPing[]
 
   @@unique([orgId, unit])
   @@unique([orgId, vin])
 }
 
 model Trailer {
-  id        String   @id @default(cuid())
-  orgId     String
-  unit      String
-  type      TrailerType @default(OTHER)
-  plate     String?
+  id         String        @id @default(cuid())
+  orgId      String
+  unit       String
+  type       TrailerType   @default(OTHER)
+  plate      String?
   plateState String?
-  status    TrailerStatus @default(AVAILABLE)
-  active    Boolean  @default(true)
-  createdAt DateTime @default(now())
+  status     TrailerStatus @default(AVAILABLE)
+  active     Boolean       @default(true)
+  createdAt  DateTime      @default(now())
 
   org       Organization      @relation(fields: [orgId], references: [id])
   loads     Load[]
   legs      LoadLeg[]
   manifests TrailerManifest[]
+  trips     Trip[]
 
   @@unique([orgId, unit])
 }
 
 model Load {
-  id               String     @id @default(cuid())
-  orgId            String
-  loadNumber       String
-  status           LoadStatus @default(PLANNED)
-  loadType         LoadType   @default(COMPANY)
-  businessType     LoadBusinessType?
-  operatingEntityId String
-  customerId       String?
-  customerName     String?
-  customerRef      String?
-  externalTripId   String?    @db.VarChar(64)
-  tripNumber       String?    @db.VarChar(64)
-  salesRepName     String?    @db.VarChar(128)
-  dropName         String?    @db.VarChar(128)
-  notes            String?
-  desiredInvoiceDate DateTime?
-  bolNumber        String?
-  shipperReferenceNumber   String?  @db.VarChar(64)
-  consigneeReferenceNumber String?  @db.VarChar(64)
-  palletCount      Int?
-  weightLbs        Int?
-  miles            Float?
-  rate             Decimal?   @db.Decimal(12, 2)
-  assignedDriverId String?
-  truckId          String?
-  trailerId        String?
-  assignedDriverAt DateTime?
-  assignedTruckAt  DateTime?
-  assignedTrailerAt DateTime?
-  plannedAt        DateTime?
-  deliveredAt      DateTime?
-  podVerifiedAt    DateTime?
-  billingStatus    BillingStatus @default(BLOCKED)
-  billingBlockingReasons String[] @default([])
-  invoicedAt       DateTime?
-  externalInvoiceRef String?
-  qboSyncStatus    QboSyncJobStatus?
-  qboSyncLastError String?
-  completedAt      DateTime?  @db.Timestamptz(6)
-  lockedAt         DateTime?
-  createdById      String?
-  deletedAt        DateTime?
-  deletedById      String?
-  deletedReason    String?
-  createdAt        DateTime   @default(now())
-  financeStage     FinanceReceivableStage?
-  financeTopBlockerCode String?
-  financeTopBlockerMessage String?
-  financeNextBestAction String?
-  financeNextBestActionReasonCodes String[] @default([])
-  financePriorityScore Int @default(0)
-  financeBlockerOwner FinanceBlockerOwner?
-  financeSnapshotUpdatedAt DateTime?
+  id                               String                  @id @default(cuid())
+  orgId                            String
+  loadNumber                       String
+  status                           LoadStatus              @default(PLANNED)
+  loadType                         LoadType                @default(COMPANY)
+  movementMode                     MovementMode            @default(FTL)
+  businessType                     LoadBusinessType?
+  operatingEntityId                String
+  customerId                       String?
+  customerName                     String?
+  customerRef                      String?
+  externalTripId                   String?                 @db.VarChar(64)
+  tripNumber                       String?                 @db.VarChar(64)
+  salesRepName                     String?                 @db.VarChar(128)
+  dropName                         String?                 @db.VarChar(128)
+  notes                            String?
+  desiredInvoiceDate               DateTime?
+  bolNumber                        String?
+  shipperReferenceNumber           String?                 @db.VarChar(64)
+  consigneeReferenceNumber         String?                 @db.VarChar(64)
+  palletCount                      Int?
+  weightLbs                        Int?
+  miles                            Float?
+  paidMiles                        Float?
+  paidMilesSource                  PayableMilesSource?
+  paidMilesApprovedById            String?
+  paidMilesApprovedAt              DateTime?
+  rate                             Decimal?                @db.Decimal(12, 2)
+  assignedDriverId                 String?
+  truckId                          String?
+  trailerId                        String?
+  assignedDriverAt                 DateTime?
+  assignedTruckAt                  DateTime?
+  assignedTrailerAt                DateTime?
+  plannedAt                        DateTime?
+  deliveredAt                      DateTime?
+  podVerifiedAt                    DateTime?
+  billingStatus                    BillingStatus           @default(BLOCKED)
+  billingBlockingReasons           String[]                @default([])
+  invoicedAt                       DateTime?
+  externalInvoiceRef               String?
+  qboSyncStatus                    QboSyncJobStatus?
+  qboSyncLastError                 String?
+  completedAt                      DateTime?               @db.Timestamptz(6)
+  lockedAt                         DateTime?
+  createdById                      String?
+  deletedAt                        DateTime?
+  deletedById                      String?
+  deletedReason                    String?
+  createdAt                        DateTime                @default(now())
+  financeStage                     FinanceReceivableStage?
+  financeTopBlockerCode            String?
+  financeTopBlockerMessage         String?
+  financeNextBestAction            String?
+  financeNextBestActionReasonCodes String[]                @default([])
+  financePriorityScore             Int                     @default(0)
+  financeBlockerOwner              FinanceBlockerOwner?
+  financeSnapshotUpdatedAt         DateTime?
 
-  org            Organization          @relation(fields: [orgId], references: [id])
-  operatingEntity OperatingEntity      @relation(fields: [operatingEntityId], references: [id])
-  customer       Customer?             @relation(fields: [customerId], references: [id])
-  driver         Driver?               @relation("DriverLoads", fields: [assignedDriverId], references: [id])
-  truck          Truck?                @relation(fields: [truckId], references: [id])
-  trailer        Trailer?              @relation(fields: [trailerId], references: [id])
-  createdBy      User?                 @relation("CreatedLoads", fields: [createdById], references: [id])
-  deletedBy      User?                 @relation("DeletedLoads", fields: [deletedById], references: [id])
-  stops          Stop[]
-  docs           Document[]
-  events         Event[]
-  assignmentSuggestionLogs AssignmentSuggestionLog[]
-  tasks          Task[]
-  invoices       Invoice[]
-  accessorials   Accessorial[]
-  storage        StorageRecord[]
-  trackingSessions LoadTrackingSession[]
-  locationPings LocationPing[]
-  legs           LoadLeg[]
-  manifestItems  TrailerManifestItem[]
-  SettlementItem SettlementItem[]
+  org                       Organization               @relation(fields: [orgId], references: [id])
+  operatingEntity           OperatingEntity            @relation(fields: [operatingEntityId], references: [id])
+  customer                  Customer?                  @relation(fields: [customerId], references: [id])
+  driver                    Driver?                    @relation("DriverLoads", fields: [assignedDriverId], references: [id])
+  truck                     Truck?                     @relation(fields: [truckId], references: [id])
+  trailer                   Trailer?                   @relation(fields: [trailerId], references: [id])
+  createdBy                 User?                      @relation("CreatedLoads", fields: [createdById], references: [id])
+  deletedBy                 User?                      @relation("DeletedLoads", fields: [deletedById], references: [id])
+  stops                     Stop[]
+  docs                      Document[]
+  events                    Event[]
+  assignmentSuggestionLogs  AssignmentSuggestionLog[]
+  tasks                     Task[]
+  invoices                  Invoice[]
+  accessorials              Accessorial[]
+  storage                   StorageRecord[]
+  trackingSessions          LoadTrackingSession[]
+  locationPings             LocationPing[]
+  legs                      LoadLeg[]
+  manifestItems             TrailerManifestItem[]
+  tripLoads                 TripLoad[]
+  SettlementItem            SettlementItem[]
   loadConfirmationDocuments LoadConfirmationDocument[]
-  charges        LoadCharge[]
-  assignmentMembers LoadAssignmentMember[]
-  billingSubmissions BillingSubmission[]
-  invoicePayments InvoicePayment[]
-  payableLineItems PayableLineItem[]
-  financeOutboxEvents FinanceOutboxEvent[]
+  charges                   LoadCharge[]
+  assignmentMembers         LoadAssignmentMember[]
+  billingSubmissions        BillingSubmission[]
+  invoicePayments           InvoicePayment[]
+  payableLineItems          PayableLineItem[]
+  financeOutboxEvents       FinanceOutboxEvent[]
+  loadNotes                 LoadNote[]
 
   @@unique([orgId, loadNumber])
   @@unique([orgId, tripNumber])
@@ -919,6 +1018,32 @@ model Load {
   @@index([orgId, status, completedAt])
   @@index([orgId, operatingEntityId])
   @@index([orgId, deletedAt])
+  @@index([orgId, movementMode, status])
+}
+
+model LoadNote {
+  id           String             @id @default(cuid())
+  orgId        String
+  loadId       String
+  text         String             @db.VarChar(1000)
+  visibility   LoadNoteVisibility @default(NORMAL)
+  source       LoadNoteSource     @default(OPS)
+  createdById  String
+  updatedById  String?
+  deletedAt    DateTime?
+  deletedById  String?
+  deleteReason String?            @db.VarChar(500)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  load      Load         @relation(fields: [loadId], references: [id])
+  createdBy User         @relation("LoadNoteCreatedBy", fields: [createdById], references: [id])
+  updatedBy User?        @relation("LoadNoteUpdatedBy", fields: [updatedById], references: [id])
+  deletedBy User?        @relation("LoadNoteDeletedBy", fields: [deletedById], references: [id])
+
+  @@index([orgId, loadId, createdAt])
+  @@index([orgId, loadId, deletedAt])
 }
 
 model LoadAssignmentMember {
@@ -953,54 +1078,54 @@ model LoadCharge {
 }
 
 model Accessorial {
-  id              String             @id @default(cuid())
+  id              String            @id @default(cuid())
   orgId           String
   loadId          String
   type            AccessorialType
-  amount          Decimal            @db.Decimal(12, 2)
-  currency        String             @default("USD")
-  requiresProof   Boolean            @default(false)
-  status          AccessorialStatus  @default(PROPOSED)
+  amount          Decimal           @db.Decimal(12, 2)
+  currency        String            @default("USD")
+  requiresProof   Boolean           @default(false)
+  status          AccessorialStatus @default(PROPOSED)
   notes           String?
   createdById     String?
   approvedById    String?
   approvedAt      DateTime?
-  proofDocumentId String?            @unique
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
+  proofDocumentId String?           @unique
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
 
-  org          Organization @relation(fields: [orgId], references: [id])
-  load         Load         @relation(fields: [loadId], references: [id])
-  createdBy    User?        @relation("AccessorialCreatedBy", fields: [createdById], references: [id])
-  approvedBy   User?        @relation("AccessorialApprovedBy", fields: [approvedById], references: [id])
-  proofDocument Document?   @relation("AccessorialProofDoc", fields: [proofDocumentId], references: [id])
+  org           Organization @relation(fields: [orgId], references: [id])
+  load          Load         @relation(fields: [loadId], references: [id])
+  createdBy     User?        @relation("AccessorialCreatedBy", fields: [createdById], references: [id])
+  approvedBy    User?        @relation("AccessorialApprovedBy", fields: [approvedById], references: [id])
+  proofDocument Document?    @relation("AccessorialProofDoc", fields: [proofDocumentId], references: [id])
 
   @@index([orgId, loadId])
   @@index([loadId])
 }
 
 model OperatingEntity {
-  id        String              @id @default(cuid())
-  orgId     String
-  name      String
-  type      OperatingEntityType
-  addressLine1 String?
-  addressLine2 String?
-  city      String?
-  state     String?
-  zip       String?
-  phone     String?
-  email     String?
-  mcNumber  String?
-  dotNumber String?
-  remitToName String?
+  id                  String              @id @default(cuid())
+  orgId               String
+  name                String
+  type                OperatingEntityType
+  addressLine1        String?
+  addressLine2        String?
+  city                String?
+  state               String?
+  zip                 String?
+  phone               String?
+  email               String?
+  mcNumber            String?
+  dotNumber           String?
+  remitToName         String?
   remitToAddressLine1 String?
-  remitToCity String?
-  remitToState String?
-  remitToZip String?
-  isDefault Boolean            @default(false)
-  createdAt DateTime           @default(now())
-  updatedAt DateTime           @updatedAt
+  remitToCity         String?
+  remitToState        String?
+  remitToZip          String?
+  isDefault           Boolean             @default(false)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
   org   Organization @relation(fields: [orgId], references: [id])
   loads Load[]
@@ -1010,16 +1135,16 @@ model OperatingEntity {
 }
 
 model TrackingIntegration {
-  id           String                    @id @default(cuid())
-  orgId        String
-  providerType TrackingProviderType
-  status       TrackingIntegrationStatus @default(DISCONNECTED)
-  configJson   Json?
-  errorMessage String?
-  lastFuelSyncAt DateTime?
+  id                String                    @id @default(cuid())
+  orgId             String
+  providerType      TrackingProviderType
+  status            TrackingIntegrationStatus @default(DISCONNECTED)
+  configJson        Json?
+  errorMessage      String?
+  lastFuelSyncAt    DateTime?
   lastFuelSyncError String?
-  createdAt    DateTime                  @default(now())
-  updatedAt    DateTime                  @updatedAt
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
 
   org Organization @relation(fields: [orgId], references: [id])
 
@@ -1028,13 +1153,13 @@ model TrackingIntegration {
 }
 
 model TruckTelematicsMapping {
-  id           String                @id @default(cuid())
+  id           String               @id @default(cuid())
   orgId        String
   truckId      String
   providerType TrackingProviderType
   externalId   String
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
 
   org   Organization @relation(fields: [orgId], references: [id])
   truck Truck        @relation(fields: [truckId], references: [id])
@@ -1045,7 +1170,7 @@ model TruckTelematicsMapping {
 }
 
 model FuelSummary {
-  id             String             @id @default(cuid())
+  id             String               @id @default(cuid())
   orgId          String
   truckId        String
   providerType   TrackingProviderType
@@ -1053,12 +1178,12 @@ model FuelSummary {
   periodStart    DateTime
   periodEnd      DateTime
   periodDays     Int
-  fuelUsed       Decimal?           @db.Decimal(12, 2)
-  distance       Decimal?           @db.Decimal(12, 2)
-  fuelEfficiency Decimal?           @db.Decimal(12, 4)
+  fuelUsed       Decimal?             @db.Decimal(12, 2)
+  distance       Decimal?             @db.Decimal(12, 2)
+  fuelEfficiency Decimal?             @db.Decimal(12, 4)
   lastSyncedAt   DateTime
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
 
   org   Organization @relation(fields: [orgId], references: [id])
   truck Truck        @relation(fields: [truckId], references: [id])
@@ -1069,14 +1194,14 @@ model FuelSummary {
 }
 
 model LoadTrackingSession {
-  id            String                @id @default(cuid())
-  orgId         String
-  loadId        String
-  providerType  TrackingProviderType
-  status        TrackingSessionStatus @default(OFF)
+  id              String                @id @default(cuid())
+  orgId           String
+  loadId          String
+  providerType    TrackingProviderType
+  status          TrackingSessionStatus @default(OFF)
   startedByUserId String?
-  startedAt     DateTime?
-  endedAt       DateTime?
+  startedAt       DateTime?
+  endedAt         DateTime?
 
   org           Organization @relation(fields: [orgId], references: [id])
   load          Load         @relation(fields: [loadId], references: [id])
@@ -1086,19 +1211,19 @@ model LoadTrackingSession {
 }
 
 model LocationPing {
-  id          String                @id @default(cuid())
-  orgId       String
-  loadId      String?
-  truckId     String?
-  driverId    String?
+  id           String               @id @default(cuid())
+  orgId        String
+  loadId       String?
+  truckId      String?
+  driverId     String?
   providerType TrackingProviderType
-  lat         Decimal               @db.Decimal(9, 6)
-  lng         Decimal               @db.Decimal(9, 6)
-  accuracyM   Float?
-  speedMph    Float?
-  heading     Float?
-  capturedAt  DateTime
-  createdAt   DateTime              @default(now())
+  lat          Decimal              @db.Decimal(9, 6)
+  lng          Decimal              @db.Decimal(9, 6)
+  accuracyM    Float?
+  speedMph     Float?
+  heading      Float?
+  capturedAt   DateTime
+  createdAt    DateTime             @default(now())
 
   org    Organization @relation(fields: [orgId], references: [id])
   load   Load?        @relation(fields: [loadId], references: [id])
@@ -1189,8 +1314,58 @@ model TrailerManifest {
   truck   Truck?                @relation(fields: [truckId], references: [id])
   driver  Driver?               @relation(fields: [driverId], references: [id])
   items   TrailerManifestItem[]
+  trip    Trip?
 
   @@index([orgId, status])
+}
+
+model Trip {
+  id                 String       @id @default(cuid())
+  orgId              String
+  tripNumber         String
+  status             TripStatus   @default(PLANNED)
+  movementMode       MovementMode @default(FTL)
+  driverId           String?
+  truckId            String?
+  trailerId          String?
+  sourceManifestId   String?      @unique
+  origin             String?
+  destination        String?
+  plannedDepartureAt DateTime?
+  plannedArrivalAt   DateTime?
+  departedAt         DateTime?
+  arrivedAt          DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  org            Organization     @relation(fields: [orgId], references: [id])
+  driver         Driver?          @relation(fields: [driverId], references: [id])
+  truck          Truck?           @relation(fields: [truckId], references: [id])
+  trailer        Trailer?         @relation(fields: [trailerId], references: [id])
+  sourceManifest TrailerManifest? @relation(fields: [sourceManifestId], references: [id])
+  loads          TripLoad[]
+
+  @@unique([orgId, tripNumber])
+  @@index([orgId, status])
+  @@index([orgId, movementMode, status])
+  @@index([orgId, driverId])
+}
+
+model TripLoad {
+  id        String   @id @default(cuid())
+  orgId     String
+  tripId    String
+  loadId    String
+  sequence  Int      @default(1)
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  trip Trip         @relation(fields: [tripId], references: [id])
+  load Load         @relation(fields: [loadId], references: [id])
+
+  @@unique([tripId, loadId])
+  @@unique([orgId, loadId])
+  @@index([orgId, tripId, sequence])
 }
 
 model TrailerManifestItem {
@@ -1224,15 +1399,15 @@ model Document {
   rejectedAt   DateTime?
   rejectReason String?
 
-  org        Organization @relation(fields: [orgId], references: [id])
-  load       Load         @relation(fields: [loadId], references: [id])
-  stop       Stop?        @relation(fields: [stopId], references: [id])
-  uploadedBy User?        @relation("UploadedDocs", fields: [uploadedById], references: [id])
-  verifiedBy User?        @relation("VerifiedDocs", fields: [verifiedById], references: [id])
-  rejectedBy User?        @relation("RejectedDocs", fields: [rejectedById], references: [id])
+  org              Organization @relation(fields: [orgId], references: [id])
+  load             Load         @relation(fields: [loadId], references: [id])
+  stop             Stop?        @relation(fields: [stopId], references: [id])
+  uploadedBy       User?        @relation("UploadedDocs", fields: [uploadedById], references: [id])
+  verifiedBy       User?        @relation("VerifiedDocs", fields: [verifiedById], references: [id])
+  rejectedBy       User?        @relation("RejectedDocs", fields: [rejectedById], references: [id])
   accessorialProof Accessorial? @relation("AccessorialProofDoc")
-  Event      Event[]
-  Task       Task[]
+  Event            Event[]
+  Task             Task[]
 
   @@index([loadId, type, status], map: "doc_load_type_status_idx")
   @@index([orgId, type, status])
@@ -1283,10 +1458,10 @@ model LoadConfirmationDocument {
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
 
-  org        Organization @relation(fields: [orgId], references: [id])
-  uploadedBy User?        @relation("LoadConfirmationUploads", fields: [uploadedByUserId], references: [id])
-  createdLoad Load?       @relation(fields: [createdLoadId], references: [id])
-  extractEvents LoadConfirmationExtractEvent[]
+  org              Organization                      @relation(fields: [orgId], references: [id])
+  uploadedBy       User?                             @relation("LoadConfirmationUploads", fields: [uploadedByUserId], references: [id])
+  createdLoad      Load?                             @relation(fields: [createdLoadId], references: [id])
+  extractEvents    LoadConfirmationExtractEvent[]
   learningExamples LoadConfirmationLearningExample[]
 
   @@index([orgId, sha256])
@@ -1305,7 +1480,7 @@ model LoadConfirmationLearningExample {
   sizeBytes      Int
   createdAt      DateTime @default(now())
 
-  org Organization @relation(fields: [orgId], references: [id])
+  org Organization              @relation(fields: [orgId], references: [id])
   doc LoadConfirmationDocument? @relation(fields: [docId], references: [id])
 
   @@index([orgId, createdAt])
@@ -1314,13 +1489,13 @@ model LoadConfirmationLearningExample {
 }
 
 model LearningExample {
-  id            String        @id @default(cuid())
+  id            String         @id @default(cuid())
   orgId         String
   domain        LearningDomain
   inputJson     Json
   correctedJson Json
   contextJson   Json?
-  createdAt     DateTime      @default(now())
+  createdAt     DateTime       @default(now())
 
   org Organization @relation(fields: [orgId], references: [id])
 
@@ -1328,14 +1503,14 @@ model LearningExample {
 }
 
 model LearnedMapping {
-  id         String        @id @default(cuid())
-  orgId      String
-  domain     LearningDomain
-  key        String
-  valueJson  Json
-  count      Int           @default(1)
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
+  id        String         @id @default(cuid())
+  orgId     String
+  domain    LearningDomain
+  key       String
+  valueJson Json
+  count     Int            @default(1)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
 
   org Organization @relation(fields: [orgId], references: [id])
 
@@ -1351,8 +1526,8 @@ model LoadConfirmationExtractEvent {
   message   String
   createdAt DateTime @default(now())
 
-  org Organization              @relation(fields: [orgId], references: [id])
-  doc LoadConfirmationDocument  @relation(fields: [docId], references: [id])
+  org Organization             @relation(fields: [orgId], references: [id])
+  doc LoadConfirmationDocument @relation(fields: [docId], references: [id])
 
   @@index([orgId, docId])
   @@index([orgId, createdAt])
@@ -1390,18 +1565,18 @@ model Event {
 }
 
 model AssignmentSuggestionLog {
-  id              String   @id @default(cuid())
-  orgId           String
-  loadId          String
+  id               String   @id @default(cuid())
+  orgId            String
+  loadId           String
   dispatcherUserId String
-  createdAt       DateTime @default(now())
-  modelVersion    String
-  weightsVersion  String?
-  suggestionsJson Json
-  chosenDriverId  String?
-  chosenTruckId   String?
-  overrideReason  String?
-  overrideNotes   String?
+  createdAt        DateTime @default(now())
+  modelVersion     String
+  weightsVersion   String?
+  suggestionsJson  Json
+  chosenDriverId   String?
+  chosenTruckId    String?
+  overrideReason   String?
+  overrideNotes    String?
 
   org        Organization @relation(fields: [orgId], references: [id])
   load       Load         @relation(fields: [loadId], references: [id])
@@ -1487,56 +1662,56 @@ model StorageRecord {
 }
 
 model OrgSettings {
-  id                           String          @id @default(cuid())
-  orgId                        String          @unique
+  id                           String                             @id @default(cuid())
+  orgId                        String                             @unique
   companyDisplayName           String
   remitToAddress               String
-  currency                     String          @default("USD")
-  operatingMode                OperatingMode   @default(CARRIER)
+  currency                     String                             @default("USD")
+  operatingMode                OperatingMode                      @default(CARRIER)
   invoiceTerms                 String
   invoiceTermsDays             Int?
   invoiceFooter                String
   logoUrl                      String?
   invoicePrefix                String
   nextInvoiceNumber            Int
-  podRequireSignature          Boolean         @default(true)
-  podRequirePrintedName        Boolean         @default(true)
-  podRequireDeliveryDate       Boolean         @default(true)
-  podMinPages                  Int             @default(1)
+  podRequireSignature          Boolean                            @default(true)
+  podRequirePrintedName        Boolean                            @default(true)
+  podRequireDeliveryDate       Boolean                            @default(true)
+  podMinPages                  Int                                @default(1)
   requiredDocs                 DocType[]
   requiredDriverDocs           DriverDocType[]
   collectPodDueMinutes         Int
   missingPodAfterMinutes       Int
   reminderFrequencyMinutes     Int
-  requireRateConBeforeDispatch Boolean         @default(false)
-  requireRateCon               FinanceRateConRequirement @default(BROKERED_ONLY)
-  requireBOL                   FinanceDeliveredDocRequirement @default(DELIVERED_ONLY)
-  requireSignedPOD             FinanceDeliveredDocRequirement @default(DELIVERED_ONLY)
+  requireRateConBeforeDispatch Boolean                            @default(false)
+  requireRateCon               FinanceRateConRequirement          @default(BROKERED_ONLY)
+  requireBOL                   FinanceDeliveredDocRequirement     @default(DELIVERED_ONLY)
+  requireSignedPOD             FinanceDeliveredDocRequirement     @default(DELIVERED_ONLY)
   requireAccessorialProof      FinanceAccessorialProofRequirement @default(WHEN_ACCESSORIAL_PRESENT)
-  requireInvoiceBeforeSend     Boolean         @default(true)
-  requireInvoiceBeforeReady    Boolean         @default(true)
-  allowReadinessOverride       Boolean         @default(false)
-  overrideRoles                Role[]          @default([])
-  factoringEnabled             Boolean         @default(false)
+  requireInvoiceBeforeSend     Boolean                            @default(true)
+  requireInvoiceBeforeReady    Boolean                            @default(true)
+  allowReadinessOverride       Boolean                            @default(false)
+  overrideRoles                Role[]                             @default([])
+  factoringEnabled             Boolean                            @default(false)
   factoringEmail               String?
-  factoringCcEmails            String[]        @default([])
-  factoringAttachmentMode      FactoringAttachmentMode @default(LINK_ONLY)
+  factoringCcEmails            String[]                           @default([])
+  factoringAttachmentMode      FactoringAttachmentMode            @default(LINK_ONLY)
   quickbooksCompanyId          String?
   defaultPaymentTermsDays      Int?
-  trackingPreference           TrackingPreference @default(MANUAL)
-  settlementSchedule           SettlementSchedule @default(WEEKLY)
+  trackingPreference           TrackingPreference                 @default(MANUAL)
+  settlementSchedule           SettlementSchedule                 @default(WEEKLY)
   settlementTemplate           Json?
   timezone                     String?
   // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
   freeStorageMinutes           Int
   // Deprecated in Ops OS: Yard Storage belongs to Yard OS; retained for backward compatibility.
-  storageRatePerDay            Decimal         @db.Decimal(12, 2)
-  pickupFreeDetentionMinutes   Int             @default(120)
-  deliveryFreeDetentionMinutes Int             @default(120)
-  detentionRatePerHour         Decimal?        @db.Decimal(12, 2)
-  driverRatePerMile            Decimal         @default(0.65) @db.Decimal(12, 2)
-  createdAt                    DateTime        @default(now())
-  updatedAt                    DateTime        @updatedAt
+  storageRatePerDay            Decimal                            @db.Decimal(12, 2)
+  pickupFreeDetentionMinutes   Int                                @default(120)
+  deliveryFreeDetentionMinutes Int                                @default(120)
+  detentionRatePerHour         Decimal?                           @db.Decimal(12, 2)
+  driverRatePerMile            Decimal                            @default(0.65) @db.Decimal(12, 2)
+  createdAt                    DateTime                           @default(now())
+  updatedAt                    DateTime                           @updatedAt
 
   org Organization @relation(fields: [orgId], references: [id])
 }
@@ -1559,13 +1734,13 @@ model Invoice {
   pdfPath         String?
   packetPath      String?
 
-  org   Organization      @relation(fields: [orgId], references: [id])
-  load  Load              @relation(fields: [loadId], references: [id])
-  items InvoiceLineItem[]
-  Event Event[]
-  Task  Task[]
+  org                Organization        @relation(fields: [orgId], references: [id])
+  load               Load                @relation(fields: [loadId], references: [id])
+  items              InvoiceLineItem[]
+  Event              Event[]
+  Task               Task[]
   billingSubmissions BillingSubmission[]
-  payments InvoicePayment[]
+  payments           InvoicePayment[]
 
   @@unique([orgId, invoiceNumber])
 }
@@ -1632,18 +1807,18 @@ model InvoicePayment {
 }
 
 model FinanceOutboxEvent {
-  id           String                  @id @default(cuid())
-  orgId        String
-  loadId       String?
-  type         FinanceOutboxEventType
-  payload      Json
-  status       FinanceOutboxEventStatus @default(PENDING)
-  attemptCount Int                     @default(0)
-  nextAttemptAt DateTime               @default(now())
-  lastError    String?
-  dedupeKey    String
-  createdAt    DateTime                @default(now())
-  updatedAt    DateTime                @updatedAt
+  id            String                   @id @default(cuid())
+  orgId         String
+  loadId        String?
+  type          FinanceOutboxEventType
+  payload       Json
+  status        FinanceOutboxEventStatus @default(PENDING)
+  attemptCount  Int                      @default(0)
+  nextAttemptAt DateTime                 @default(now())
+  lastError     String?
+  dedupeKey     String
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
 
   org  Organization @relation(fields: [orgId], references: [id])
   load Load?        @relation(fields: [loadId], references: [id])
@@ -1654,7 +1829,7 @@ model FinanceOutboxEvent {
 }
 
 model QboSyncJob {
-  id               String         @id @default(cuid())
+  id               String           @id @default(cuid())
   orgId            String
   entityType       QboEntityType
   entityId         String
@@ -1664,10 +1839,10 @@ model QboSyncJob {
   qboId            String?
   lastErrorCode    String?
   lastErrorMessage String?
-  attemptCount     Int            @default(0)
-  nextAttemptAt    DateTime       @default(now())
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  attemptCount     Int              @default(0)
+  nextAttemptAt    DateTime         @default(now())
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   org Organization @relation(fields: [orgId], references: [id])
 
@@ -1677,26 +1852,26 @@ model QboSyncJob {
 }
 
 model PayableRun {
-  id               String          @id @default(cuid())
-  orgId            String
-  periodStart      DateTime
-  periodEnd        DateTime
-  status           PayableRunStatus @default(RUN_DRAFT)
-  previewChecksum  String?
+  id                String            @id @default(cuid())
+  orgId             String
+  periodStart       DateTime
+  periodEnd         DateTime
+  status            PayableRunStatus  @default(RUN_DRAFT)
+  previewChecksum   String?
   finalizedChecksum String?
-  holdReasonCode   String?
-  holdOwner        PayableHoldOwner?
-  holdNotes        String?
-  anomaliesJson    Json?
-  anomalyCount     Int             @default(0)
-  createdById      String
-  finalizedAt      DateTime?
-  paidAt           DateTime?
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
+  holdReasonCode    String?
+  holdOwner         PayableHoldOwner?
+  holdNotes         String?
+  anomaliesJson     Json?
+  anomalyCount      Int               @default(0)
+  createdById       String
+  finalizedAt       DateTime?
+  paidAt            DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
-  org       Organization     @relation(fields: [orgId], references: [id])
-  createdBy User             @relation("PayableRunCreatedBy", fields: [createdById], references: [id])
+  org       Organization      @relation(fields: [orgId], references: [id])
+  createdBy User              @relation("PayableRunCreatedBy", fields: [createdById], references: [id])
   lineItems PayableLineItem[]
 
   @@index([orgId, status, createdAt])
@@ -1704,17 +1879,25 @@ model PayableRun {
 }
 
 model PayableLineItem {
-  id          String             @id @default(cuid())
-  orgId       String
-  runId       String
-  partyType   PayablePartyType
-  partyId     String
-  loadId      String?
-  type        PayableLineItemType
-  amountCents Int
-  memo        String?
-  source      Json?
-  createdAt   DateTime           @default(now())
+  id                String              @id @default(cuid())
+  orgId             String
+  runId             String
+  partyType         PayablePartyType
+  partyId           String
+  loadId            String?
+  type              PayableLineItemType
+  amountCents       Int
+  paidMiles         Decimal?            @db.Decimal(10, 2)
+  ratePerMile       Decimal?            @db.Decimal(12, 4)
+  milesSource       PayableMilesSource?
+  milesVariancePct  Decimal?            @db.Decimal(6, 2)
+  requiresReview    Boolean             @default(false)
+  reviewReasonCode  String?
+  milesApprovedById String?
+  milesApprovedAt   DateTime?
+  memo              String?
+  source            Json?
+  createdAt         DateTime            @default(now())
 
   org  Organization @relation(fields: [orgId], references: [id])
   run  PayableRun   @relation(fields: [runId], references: [id])
@@ -1726,13 +1909,13 @@ model PayableLineItem {
 }
 
 model SettlementPolicyVersion {
-  id           String   @id @default(cuid())
-  orgId        String
-  version      Int
+  id            String   @id @default(cuid())
+  orgId         String
+  version       Int
   effectiveFrom DateTime
-  rulesJson    Json
-  createdById  String?
-  createdAt    DateTime @default(now())
+  rulesJson     Json
+  createdById   String?
+  createdAt     DateTime @default(now())
 
   org       Organization @relation(fields: [orgId], references: [id])
   createdBy User?        @relation("SettlementPolicyVersionCreatedBy", fields: [createdById], references: [id])
@@ -1803,15 +1986,15 @@ model AuditLog {
 }
 
 model OnboardingState {
-  id             String   @id @default(cuid())
-  orgId          String   @unique
-  status         OnboardingStatus @default(NOT_ACTIVATED)
-  completedSteps Json
+  id              String           @id @default(cuid())
+  orgId           String           @unique
+  status          OnboardingStatus @default(NOT_ACTIVATED)
+  completedSteps  Json
   percentComplete Int
-  currentStep    Int
-  completedAt    DateTime?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  currentStep     Int
+  completedAt     DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 
   org Organization @relation(fields: [orgId], references: [id])
 }

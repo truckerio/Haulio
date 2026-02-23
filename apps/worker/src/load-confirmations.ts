@@ -886,12 +886,36 @@ function isDraftReady(draft: any) {
   );
 }
 
+function asDraftLoad(value: unknown): DraftLoad | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<DraftLoad>;
+  if (typeof candidate.loadNumber !== "string") return null;
+  if (typeof candidate.customerName !== "string") return null;
+  if (!Array.isArray(candidate.stops)) return null;
+  return candidate as DraftLoad;
+}
+
 async function getLearningExamples(orgId: string) {
-  return prisma.loadConfirmationLearningExample.findMany({
+  const rows = await prisma.loadConfirmationLearningExample.findMany({
     where: { orgId },
     orderBy: { createdAt: "desc" },
     take: LEARNING_EXAMPLE_LIMIT,
-  }) as Promise<LearningExample[]>;
+  });
+  return rows.flatMap((row) => {
+    const correctedDraft = asDraftLoad(row.correctedDraft);
+    if (!correctedDraft) return [];
+    return [
+      {
+        id: row.id,
+        docFingerprint: row.docFingerprint,
+        brokerName: row.brokerName,
+        extractedText: row.extractedText,
+        extractedDraft: asDraftLoad(row.extractedDraft),
+        correctedDraft,
+        createdAt: row.createdAt,
+      } satisfies LearningExample,
+    ];
+  });
 }
 
 function findTemplateMatch(params: {

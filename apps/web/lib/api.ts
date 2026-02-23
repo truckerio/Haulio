@@ -2,6 +2,7 @@ import { API_BASE } from "@/lib/apiBase";
 
 const DEV_ERRORS = process.env.NEXT_PUBLIC_DEV_ERRORS === "true" || process.env.NODE_ENV !== "production";
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
+const DB_SETUP_ERROR_CODES = new Set(["P1001", "P1003", "P2021", "P2022"]);
 
 export type ApiFetchOptions = RequestInit & {
   skipAuthRedirect?: boolean;
@@ -99,6 +100,9 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
       return err;
     };
     if (res.status >= 500) {
+      if (DB_SETUP_ERROR_CODES.has(String(error?.code || ""))) {
+        throw new Error("Database is not ready. Run migrations and restart the stack.");
+      }
       if (DEV_ERRORS) {
         if (error?.detail) {
           throw new Error(`${message} — ${error.detail}`);

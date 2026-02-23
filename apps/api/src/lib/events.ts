@@ -1,4 +1,4 @@
-import { prisma, EventType } from "@truckerio/db";
+import { prisma, EventType, Prisma } from "@truckerio/db";
 
 export async function createEvent(params: {
   orgId: string;
@@ -12,7 +12,7 @@ export async function createEvent(params: {
   customerId?: string | null;
   type: EventType;
   message: string;
-  meta?: Record<string, unknown>;
+  meta?: Prisma.InputJsonValue;
 }) {
   await prisma.event.create({
     data: {
@@ -27,7 +27,7 @@ export async function createEvent(params: {
       userId: params.userId ?? null,
       type: params.type,
       message: params.message,
-      meta: params.meta ?? null,
+      meta: params.meta ?? Prisma.JsonNull,
     },
   });
 }

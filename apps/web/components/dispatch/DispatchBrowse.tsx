@@ -8,6 +8,11 @@ type DispatchItem = {
   id: string;
   loadNumber: string;
   status: string;
+  trip?: {
+    id: string;
+    tripNumber: string;
+    status: string;
+  } | null;
   customerName?: string | null;
   rate?: string | number | null;
   miles?: number | null;
@@ -54,8 +59,8 @@ export function DispatchBrowse({
     return (
       <Card>
         <div className="grid gap-3">
-          <div className="grid grid-cols-[72px_minmax(0,1.6fr)_minmax(0,1fr)_72px] gap-x-3 pl-6 pr-4 text-[11px] font-medium uppercase tracking-wide text-neutral-500 min-[420px]:grid-cols-[72px_minmax(0,1.6fr)_minmax(0,1fr)_72px_64px_64px]">
-            <div className="min-w-0 truncate">Load</div>
+          <div className="grid grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px] gap-x-3 pl-6 pr-4 text-[11px] font-medium uppercase tracking-wide text-neutral-500 min-[420px]:grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px_64px_64px]">
+            <div className="min-w-0 truncate">Trip / Load</div>
             <div className="min-w-0 truncate">Customer</div>
             <div className="min-w-0 truncate">Driver</div>
             <div className="min-w-0 truncate">Status</div>
@@ -71,11 +76,14 @@ export function DispatchBrowse({
                 type="button"
                 onClick={() => onSelectLoad(load.id)}
                 data-selected={selectedLoadId === load.id}
-                className={`relative grid grid-cols-[72px_minmax(0,1.6fr)_minmax(0,1fr)_72px] gap-x-3 rounded-md border border-neutral-200/40 bg-white overflow-hidden py-3 pl-6 pr-4 text-left transition-colors duration-150 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] min-[420px]:grid-cols-[72px_minmax(0,1.6fr)_minmax(0,1fr)_72px_64px_64px] ${
+                className={`relative grid grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px] gap-x-3 rounded-md border border-neutral-200/40 bg-white overflow-hidden py-3 pl-6 pr-4 text-left transition-colors duration-150 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] min-[420px]:grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px_64px_64px] ${
                   selectedLoadId === load.id ? "border-neutral-300 bg-neutral-50" : ""
                 }`}
               >
-                <div className="min-w-0 text-[12px] font-medium text-neutral-900">{load.loadNumber}</div>
+                <div className="min-w-0">
+                  <div className="truncate text-[11px] font-semibold text-neutral-700">{load.trip?.tripNumber ?? "No trip"}</div>
+                  <div className="truncate text-[12px] font-medium text-neutral-900">{load.loadNumber}</div>
+                </div>
                 <div className="min-w-0">
                   <div className="truncate text-[13px] font-medium text-neutral-900">{load.customerName ?? "Customer"}</div>
                   <div className="mt-1 text-[12px] text-neutral-600 min-[420px]:hidden">
@@ -130,6 +138,9 @@ export function DispatchBrowse({
                 <button type="button" className="w-full p-5 pl-6 text-left" onClick={() => onSelectLoad(load.id)}>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
+                      {load.trip?.tripNumber ? (
+                        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">{load.trip.tripNumber}</div>
+                      ) : null}
                       <div className="text-xl font-semibold">{load.loadNumber}</div>
                       <div className="text-sm text-[color:var(--color-text-muted)]">{load.customerName ?? "Customer"}</div>
                       {load.route?.shipperCity || load.route?.consigneeCity ? (

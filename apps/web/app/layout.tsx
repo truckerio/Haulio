@@ -3,6 +3,7 @@ import "./globals.css";
 import { IdleLogout } from "@/components/idle-logout";
 import { CanonicalHost } from "@/components/canonical-host";
 import { UserProvider } from "@/components/auth/user-context";
+import { AppearanceRuntime } from "@/components/appearance/appearance-runtime";
 
 export const metadata: Metadata = {
   title: "Haulio",
@@ -20,6 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-screen">
         <UserProvider>
           <CanonicalHost />
+          <AppearanceRuntime />
           <IdleLogout />
           {children}
         </UserProvider>

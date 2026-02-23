@@ -4,6 +4,8 @@ import { logAudit } from "./audit";
 const LOAD_IMPACT_FIELDS = [
   "rate",
   "miles",
+  "paidMiles",
+  "movementMode",
   "customerId",
   "customerName",
   "customerRef",
@@ -21,6 +23,8 @@ type LoadRecord = {
   loadNumber: string;
   rate?: Prisma.Decimal | null;
   miles?: number | null;
+  paidMiles?: number | null;
+  movementMode?: string | null;
   customerId?: string | null;
   customerName?: string | null;
   customerRef?: string | null;
@@ -61,8 +65,8 @@ export async function logLoadFieldAudit(params: {
   before: LoadRecord;
   after: LoadRecord;
 }) {
-  const beforeDiff: Record<string, unknown> = {};
-  const afterDiff: Record<string, unknown> = {};
+  const beforeDiff: Record<string, Prisma.InputJsonValue | null> = {};
+  const afterDiff: Record<string, Prisma.InputJsonValue | null> = {};
   const changedFields: string[] = [];
   for (const field of LOAD_IMPACT_FIELDS) {
     const beforeVal = normalizeValue((params.before as any)[field]);
@@ -81,8 +85,8 @@ export async function logLoadFieldAudit(params: {
     entity: "Load",
     entityId: params.after.id,
     summary: `Updated load ${params.after.loadNumber} fields: ${changedFields.join(", ")}`,
-    before: beforeDiff,
-    after: afterDiff,
+    before: beforeDiff as unknown as Prisma.InputJsonValue,
+    after: afterDiff as unknown as Prisma.InputJsonValue,
   });
 }
 
@@ -92,8 +96,8 @@ export async function logStopTimeAudit(params: {
   before: StopRecord;
   after: StopRecord;
 }) {
-  const beforeDiff: Record<string, unknown> = {};
-  const afterDiff: Record<string, unknown> = {};
+  const beforeDiff: Record<string, Prisma.InputJsonValue | null> = {};
+  const afterDiff: Record<string, Prisma.InputJsonValue | null> = {};
   const changedFields: string[] = [];
   for (const field of STOP_TIME_FIELDS) {
     const beforeVal = normalizeValue((params.before as any)[field]);
@@ -113,7 +117,7 @@ export async function logStopTimeAudit(params: {
     entity: "Stop",
     entityId: params.after.id,
     summary: `Updated stop times${stopLabel}: ${changedFields.join(", ")}`,
-    before: beforeDiff,
-    after: afterDiff,
+    before: beforeDiff as unknown as Prisma.InputJsonValue,
+    after: afterDiff as unknown as Prisma.InputJsonValue,
   });
 }

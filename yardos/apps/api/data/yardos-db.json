@@ -1,0 +1,177 @@
+{
+  "orgId": "acme-logistics",
+  "trailerSpecDefaults": {
+    "interiorLengthM": 16,
+    "interiorWidthM": 2.46,
+    "interiorHeightM": 2.67,
+    "laneCount": 2,
+    "slotCount": 60,
+    "legalWeightLbs": 44000,
+    "driveAxleX": -2.2,
+    "trailerAxleX": 4
+  },
+  "loads": [
+    {
+      "id": "L17491",
+      "loadNumber": "L17491",
+      "pallets": 12,
+      "weightLbs": 17500,
+      "cubeFt": 620,
+      "stopWindow": "2026-02-23T09:00:00.000Z..2026-02-23T14:00:00.000Z",
+      "lane": "East Hub -> Austin, TX",
+      "constraints": [
+        "NO_MIX"
+      ],
+      "destinationCode": "AUS",
+      "trailerId": null,
+      "trailerUnit": null,
+      "status": "PLANNED"
+    },
+    {
+      "id": "L17765",
+      "loadNumber": "L17765",
+      "pallets": 8,
+      "weightLbs": 4000,
+      "cubeFt": 300,
+      "stopWindow": "2026-02-23T07:00:00.000Z..2026-02-23T10:00:00.000Z",
+      "lane": "East Hub -> Waco, TX",
+      "constraints": [],
+      "destinationCode": "ACT",
+      "trailerId": null,
+      "trailerUnit": null,
+      "status": "PLANNED"
+    },
+    {
+      "id": "L18236",
+      "loadNumber": "L18236",
+      "pallets": 16,
+      "weightLbs": 21000,
+      "cubeFt": 780,
+      "stopWindow": "2026-02-23T08:00:00.000Z..2026-02-23T11:00:00.000Z",
+      "lane": "East Hub -> Dallas, TX",
+      "constraints": [
+        "NO_SPLIT"
+      ],
+      "destinationCode": "DFW",
+      "trailerId": null,
+      "trailerUnit": null,
+      "status": "PLANNED"
+    },
+    {
+      "id": "L18440",
+      "loadNumber": "L18440",
+      "pallets": 10,
+      "weightLbs": 12000,
+      "cubeFt": 500,
+      "stopWindow": "2026-02-24T10:00:00.000Z..2026-02-24T16:00:00.000Z",
+      "lane": "East Hub -> San Antonio, TX",
+      "constraints": [],
+      "destinationCode": "SAT",
+      "trailerId": null,
+      "trailerUnit": null,
+      "status": "PLANNED"
+    },
+    {
+      "id": "L19025",
+      "loadNumber": "L19025",
+      "pallets": 20,
+      "weightLbs": 24500,
+      "cubeFt": 900,
+      "stopWindow": "2026-02-24T08:00:00.000Z..2026-02-24T12:00:00.000Z",
+      "lane": "East Hub -> Houston, TX",
+      "constraints": [
+        "DIRECT_NO_TOUCH"
+      ],
+      "destinationCode": "HOU",
+      "trailerId": null,
+      "trailerUnit": null,
+      "status": "PLANNED"
+    },
+    {
+      "id": "L60001",
+      "loadNumber": "L60001",
+      "pallets": 7,
+      "weightLbs": 7600,
+      "cubeFt": 310,
+      "stopWindow": "2026-02-27T08:00:00Z..2026-02-27T10:00:00Z",
+      "lane": "East Hub -> Reno",
+      "constraints": [
+        "NO_MIX"
+      ],
+      "destinationCode": "RNO",
+      "trailerId": null,
+      "trailerUnit": null,
+      "status": "PLANNED"
+    }
+  ],
+  "trailers": [
+    {
+      "id": "TR-5301",
+      "unit": "53V-01",
+      "type": "53 VAN",
+      "status": "AVAILABLE"
+    },
+    {
+      "id": "TR-5302",
+      "unit": "53V-02",
+      "type": "53 VAN",
+      "status": "AVAILABLE"
+    },
+    {
+      "id": "TR-RFR1",
+      "unit": "RFR-01",
+      "type": "REEFER",
+      "status": "AVAILABLE"
+    }
+  ],
+  "events": [
+    {
+      "id": "c5816243-0f7f-4bb5-898d-31d03aa16ff5",
+      "createdAt": "2026-02-22T23:27:36.905Z",
+      "type": "TRAILER_SPEC_UPDATED",
+      "loadId": null,
+      "message": "Trailer default specification updated.",
+      "meta": {
+        "interiorLengthM": 16,
+        "interiorWidthM": 2.46,
+        "interiorHeightM": 2.67,
+        "laneCount": 3,
+        "slotCount": 24,
+        "legalWeightLbs": 46000,
+        "driveAxleX": -2.2,
+        "trailerAxleX": 4
+      }
+    },
+    {
+      "id": "8c384e47-876f-4093-9eee-466063ed6567",
+      "createdAt": "2026-02-22T23:27:36.921Z",
+      "type": "LOADS_IMPORTED",
+      "loadId": null,
+      "message": "Imported load file yardos-loads-2.csv.",
+      "meta": {
+        "fileName": "yardos-loads-2.csv",
+        "mode": "upsert",
+        "imported": 1,
+        "updated": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "id": "482212d1-529c-4bce-83a7-59519e9ce0c6",
+      "createdAt": "2026-02-22T23:44:51.880Z",
+      "type": "TRAILER_SPEC_UPDATED",
+      "loadId": null,
+      "message": "Trailer default specification updated.",
+      "meta": {
+        "interiorLengthM": 16,
+        "interiorWidthM": 2.46,
+        "interiorHeightM": 2.67,
+        "laneCount": 2,
+        "slotCount": 60,
+        "legalWeightLbs": 44000,
+        "driveAxleX": -2.2,
+        "trailerAxleX": 4
+      }
+    }
+  ]
+}

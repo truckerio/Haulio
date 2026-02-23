@@ -160,6 +160,7 @@ function LoadsPageContent() {
     loadNumber: "",
     status: "PLANNED",
     loadType: "BROKERED",
+    movementMode: "FTL",
     tripNumber: "",
     operatingEntityId: "",
     customerId: "",
@@ -171,6 +172,7 @@ function LoadsPageContent() {
     rate: "",
     miles: "",
     pickupDate: "",
+    pickupDateEnd: "",
     pickupTimeStart: "",
     pickupTimeEnd: "",
     pickupName: "",
@@ -181,6 +183,7 @@ function LoadsPageContent() {
     pickupNotes: "",
     deliveryDateStart: "",
     deliveryDateEnd: "",
+    deliveryTimeStart: "",
     deliveryTimeEnd: "",
     deliveryName: "",
     deliveryAddress: "",
@@ -191,6 +194,7 @@ function LoadsPageContent() {
     salesRepName: "",
     dropName: "",
     desiredInvoiceDate: "",
+    loadNotes: "",
   });
 
   const canImport = user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
@@ -419,10 +423,10 @@ function LoadsPageContent() {
     };
     const pickupStart = combineDateTime(form.pickupDate, form.pickupTimeStart || undefined);
     const pickupEnd = combineDateTime(
-      form.pickupDate,
+      form.pickupDateEnd || form.pickupDate,
       form.pickupTimeEnd || form.pickupTimeStart || undefined
     );
-    const deliveryStart = combineDateTime(form.deliveryDateStart, undefined);
+    const deliveryStart = combineDateTime(form.deliveryDateStart, form.deliveryTimeStart || undefined);
     const deliveryEnd = form.deliveryTimeEnd
       ? combineDateTime(form.deliveryDateEnd || form.deliveryDateStart, form.deliveryTimeEnd)
       : undefined;
@@ -464,6 +468,7 @@ function LoadsPageContent() {
           tripNumber: form.tripNumber.trim() ? form.tripNumber : undefined,
           status: form.status || undefined,
           loadType: form.loadType || undefined,
+          movementMode: form.movementMode || undefined,
           businessType: resolvedBusinessType,
           operatingEntityId: form.operatingEntityId || undefined,
           customerId: form.customerId || undefined,
@@ -477,6 +482,7 @@ function LoadsPageContent() {
           salesRepName: form.salesRepName || undefined,
           dropName: form.dropName || undefined,
           desiredInvoiceDate: form.desiredInvoiceDate || undefined,
+          notes: form.loadNotes.trim() ? form.loadNotes.trim() : undefined,
           stops,
         }),
       });
@@ -484,6 +490,7 @@ function LoadsPageContent() {
         loadNumber: "",
         status: "PLANNED",
         loadType: form.loadType === "BROKERED" ? "BROKERED" : "COMPANY",
+        movementMode: form.movementMode || "FTL",
         tripNumber: "",
         operatingEntityId: form.operatingEntityId,
         customerId: "",
@@ -495,6 +502,7 @@ function LoadsPageContent() {
         rate: "",
         miles: "",
         pickupDate: "",
+        pickupDateEnd: "",
         pickupTimeStart: "",
         pickupTimeEnd: "",
         pickupName: "",
@@ -505,6 +513,7 @@ function LoadsPageContent() {
         pickupNotes: "",
         deliveryDateStart: "",
         deliveryDateEnd: "",
+        deliveryTimeStart: "",
         deliveryTimeEnd: "",
         deliveryName: "",
         deliveryAddress: "",
@@ -515,6 +524,7 @@ function LoadsPageContent() {
         salesRepName: "",
         dropName: "",
         desiredInvoiceDate: "",
+        loadNotes: "",
       });
       setCustomerSuggestion(null);
       setCustomerLearnedApplied(false);
@@ -1048,6 +1058,13 @@ function LoadsPageContent() {
                   <option value="BROKERED">Brokered load</option>
                 </Select>
               </FormField>
+              <FormField label="Movement mode" htmlFor="movementMode">
+                <Select value={form.movementMode} onChange={(e) => setForm({ ...form, movementMode: e.target.value })}>
+                  <option value="FTL">FTL</option>
+                  <option value="LTL">LTL</option>
+                  <option value="POOL_DISTRIBUTION">Pool distribution</option>
+                </Select>
+              </FormField>
               <FormField label="Operating entity" htmlFor="operatingEntity">
                 {operatingEntities.length > 0 ? (
                   <Select
@@ -1139,6 +1156,15 @@ function LoadsPageContent() {
                   onChange={(e) => setForm({ ...form, desiredInvoiceDate: e.target.value })}
                 />
               </FormField>
+              <FormField label="Load notes" htmlFor="loadNotes" className="lg:col-span-3">
+                <Textarea
+                  id="loadNotes"
+                  className="min-h-[84px]"
+                  placeholder="General load notes for dispatch and driver"
+                  value={form.loadNotes}
+                  onChange={(e) => setForm({ ...form, loadNotes: e.target.value })}
+                />
+              </FormField>
             </div>
             {customerSuggestion ? (
               <div className="flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-info-soft)] bg-[color:var(--color-info-soft)]/30 px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
@@ -1182,6 +1208,13 @@ function LoadsPageContent() {
                   type="date"
                   value={form.pickupDate}
                   onChange={(e) => setForm({ ...form, pickupDate: e.target.value })}
+                />
+              </FormField>
+              <FormField label="PU Date T" htmlFor="puDateT">
+                <Input
+                  type="date"
+                  value={form.pickupDateEnd}
+                  onChange={(e) => setForm({ ...form, pickupDateEnd: e.target.value })}
                 />
               </FormField>
               <FormField label="PU Time F" htmlFor="puTimeF">
@@ -1345,6 +1378,13 @@ function LoadsPageContent() {
                   type="date"
                   value={form.deliveryDateEnd}
                   onChange={(e) => setForm({ ...form, deliveryDateEnd: e.target.value })}
+                />
+              </FormField>
+              <FormField label="Del Time F" htmlFor="delTimeF">
+                <Input
+                  type="time"
+                  value={form.deliveryTimeStart}
+                  onChange={(e) => setForm({ ...form, deliveryTimeStart: e.target.value })}
                 />
               </FormField>
               <FormField label="Del Time T" htmlFor="delTimeT">
@@ -1756,6 +1796,7 @@ function LoadsPageContent() {
                 </div>
                 <div className="mt-2 flex flex-wrap gap-3 text-xs text-[color:var(--color-text-muted)]">
                   <div>Driver: {load.driver?.name ?? "Unassigned"}</div>
+                  <div>Mode: {load.movementMode ?? "FTL"}</div>
                   {load.miles ? <div>Miles: {load.miles}</div> : null}
                   {load.rate ? <div>Rate: {load.rate}</div> : null}
                   <div>{trackingText}</div>

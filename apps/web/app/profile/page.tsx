@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
+import { LogoutButton } from "@/components/auth/logout-button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -184,6 +186,24 @@ export default function ProfilePage() {
             <div className="text-sm text-[color:var(--color-text-muted)]">
               Keep your contact info and timezone current.
             </div>
+          </Card>
+
+          <Card className="space-y-3">
+            <div className="text-sm font-semibold">Appearance & accessibility</div>
+            <div className="text-sm text-[color:var(--color-text-muted)]">
+              Control theme, text size, contrast, motion, and navigation density.
+            </div>
+            <Link href="/profile/appearance">
+              <Button variant="secondary">Open appearance settings</Button>
+            </Link>
+          </Card>
+
+          <Card className="space-y-3">
+            <div className="text-sm font-semibold">Session</div>
+            <div className="text-sm text-[color:var(--color-text-muted)]">
+              Manage your active session from your profile.
+            </div>
+            <LogoutButton className="w-fit min-w-36" />
           </Card>
 
           {error ? (

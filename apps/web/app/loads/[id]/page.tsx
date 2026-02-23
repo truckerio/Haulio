@@ -113,13 +113,20 @@ export default function LoadDetailsPage() {
   const [proofTargetId, setProofTargetId] = useState<string | null>(null);
   const proofInputRef = useRef<HTMLInputElement | null>(null);
   const [billingActionError, setBillingActionError] = useState<string | null>(null);
+  const [noteText, setNoteText] = useState("");
+  const [noteVisibility, setNoteVisibility] = useState<"NORMAL" | "LOCKED">("NORMAL");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [noteStatus, setNoteStatus] = useState<string | null>(null);
   const [freightForm, setFreightForm] = useState({
     loadType: "COMPANY",
+    movementMode: "FTL",
     operatingEntityId: "",
     shipperReferenceNumber: "",
     consigneeReferenceNumber: "",
     palletCount: "",
     weightLbs: "",
+    paidMiles: "",
   });
   const tabParam = searchParams?.get("tab");
   const docTypeParam = searchParams?.get("docType");
@@ -173,6 +180,61 @@ export default function LoadDetailsPage() {
       setDeleteError((err as Error).message || "Failed to delete load.");
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleCreateNote = async () => {
+    if (!loadId) return;
+    const text = noteText.trim();
+    if (!text) {
+      setNoteError("Note text is required.");
+      return;
+    }
+    setNoteSaving(true);
+    setNoteError(null);
+    setNoteStatus(null);
+    try {
+      await apiFetch(`/loads/${loadId}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, visibility: noteVisibility }),
+      });
+      setNoteText("");
+      setNoteVisibility("NORMAL");
+      setNoteStatus("Saved");
+      await loadData();
+    } catch (err) {
+      setNoteError((err as Error).message || "Failed to save note.");
+    } finally {
+      setNoteSaving(false);
+      window.setTimeout(() => setNoteStatus(null), 2000);
+    }
+  };
+
+  const handleDeleteNote = async (note: any) => {
+    if (!loadId || !note?.id) return;
+    const isLocked = note.visibility === "LOCKED";
+    const reason = isLocked ? window.prompt("Reason required to delete locked note:") ?? "" : "";
+    if (isLocked && !reason.trim()) {
+      setNoteError("Reason required to delete locked note.");
+      return;
+    }
+    setNoteSaving(true);
+    setNoteError(null);
+    setNoteStatus(null);
+    try {
+      await apiFetch(`/loads/${loadId}/notes/${note.id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: reason.trim() || undefined }),
+      });
+      setNoteStatus("Deleted");
+      await loadData();
+    } catch (err) {
+      setNoteError((err as Error).message || "Failed to delete note.");
+    } finally {
+      setNoteSaving(false);
+      window.setTimeout(() => setNoteStatus(null), 2000);
     }
   };
 
@@ -275,11 +337,13 @@ export default function LoadDetailsPage() {
     if (!load || freightEditing) return;
     setFreightForm({
       loadType: load.loadType ?? "COMPANY",
+      movementMode: load.movementMode ?? "FTL",
       operatingEntityId: load.operatingEntityId ?? "",
       shipperReferenceNumber: load.shipperReferenceNumber ?? "",
       consigneeReferenceNumber: load.consigneeReferenceNumber ?? "",
       palletCount: load.palletCount !== null && load.palletCount !== undefined ? String(load.palletCount) : "",
       weightLbs: load.weightLbs !== null && load.weightLbs !== undefined ? String(load.weightLbs) : "",
+      paidMiles: load.paidMiles !== null && load.paidMiles !== undefined ? String(load.paidMiles) : "",
     });
   }, [load, freightEditing]);
 
@@ -635,11 +699,33 @@ export default function LoadDetailsPage() {
     try {
       const payload: Record<string, any> = {
         loadType: freightForm.loadType,
+        movementMode: freightForm.movementMode,
         shipperReferenceNumber: freightForm.shipperReferenceNumber,
         consigneeReferenceNumber: freightForm.consigneeReferenceNumber,
         palletCount: freightForm.palletCount,
         weightLbs: freightForm.weightLbs,
       };
+      let overrideReason: string | undefined;
+      if (freightForm.paidMiles.trim()) {
+        const paidMiles = Number(freightForm.paidMiles.trim());
+        if (Number.isFinite(paidMiles)) {
+          payload.paidMiles = paidMiles;
+          const plannedMiles = Number(load?.miles ?? 0);
+          if (plannedMiles > 0) {
+            const variancePct = Math.abs(((paidMiles - plannedMiles) / plannedMiles) * 100);
+            if (variancePct > 10) {
+              const reason = window.prompt("Paid miles differs by more than 10%. Enter override reason:");
+              if (!reason || !reason.trim()) {
+                throw new Error("Override reason is required when paid miles variance exceeds 10%");
+              }
+              overrideReason = reason.trim();
+            }
+          }
+        }
+      }
+      if (overrideReason) {
+        payload.overrideReason = overrideReason;
+      }
       if (freightForm.operatingEntityId) {
         payload.operatingEntityId = freightForm.operatingEntityId;
       }
@@ -1099,10 +1185,12 @@ export default function LoadDetailsPage() {
         </div>
       </Card>
 
-      <Card className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+      <Card className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
         {[
           { label: "Rate", value: load?.rate ?? "-" },
           { label: "Miles", value: load?.miles ?? "-" },
+          { label: "Paid miles", value: load?.paidMiles ?? "-" },
+          { label: "Movement", value: load?.movementMode ?? "FTL" },
           { label: "Driver", value: load?.driver?.name ?? "Unassigned" },
           { label: "Truck/Trailer", value: `${load?.truck?.unit ?? "-"} · ${load?.trailer?.unit ?? "-"}` },
         ].map((item) => (
@@ -1208,8 +1296,67 @@ export default function LoadDetailsPage() {
                 </details>
                 <details className="group">
                   <summary className="cursor-pointer text-sm font-medium text-ink">Notes</summary>
-                  <div className="mt-3 text-sm text-[color:var(--color-text-muted)]">
-                    {load?.notes ?? "No notes yet."}
+                  <div className="mt-3 space-y-3">
+                    <div className="grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3">
+                      <FormField label="Add note" htmlFor="loadNoteText">
+                        <textarea
+                          id="loadNoteText"
+                          className="min-h-[84px] w-full rounded-[var(--radius-input)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-base)] px-3 py-2 text-sm text-ink focus:border-[color:var(--color-accent-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--color-accent-soft)]/30"
+                          placeholder="Add context for dispatch, billing, or driver handoff"
+                          value={noteText}
+                          onChange={(event) => {
+                            setNoteText(event.target.value);
+                            if (noteError) setNoteError(null);
+                          }}
+                        />
+                      </FormField>
+                      <div className="flex flex-wrap items-end gap-2">
+                        <FormField label="Type" htmlFor="loadNoteVisibility">
+                          <Select
+                            id="loadNoteVisibility"
+                            value={noteVisibility}
+                            onChange={(event) => setNoteVisibility(event.target.value as "NORMAL" | "LOCKED")}
+                          >
+                            <option value="NORMAL">Normal (creator can delete)</option>
+                            <option value="LOCKED">Locked (admin/head dispatcher only)</option>
+                          </Select>
+                        </FormField>
+                        <Button size="sm" onClick={handleCreateNote} disabled={noteSaving}>
+                          {noteSaving ? "Saving..." : "Save note"}
+                        </Button>
+                        {noteStatus ? <div className="text-xs text-[color:var(--color-text-muted)]">{noteStatus}</div> : null}
+                      </div>
+                      {noteError ? <ErrorBanner message={noteError} /> : null}
+                    </div>
+
+                    <div className="space-y-2">
+                      {(load?.loadNotes ?? []).map((note: any) => {
+                        const canDeleteLocked = user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER";
+                        const canDeleteNote =
+                          canDeleteLocked || (note.visibility !== "LOCKED" && note.createdById === user?.id);
+                        return (
+                          <div
+                            key={note.id}
+                            className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="text-xs text-[color:var(--color-text-muted)]">
+                                {(note.createdBy?.name || "User")} · {note.source} · {note.visibility} · {formatDateTime(note.createdAt)}
+                              </div>
+                              {canDeleteNote ? (
+                                <Button size="sm" variant="ghost" onClick={() => handleDeleteNote(note)} disabled={noteSaving}>
+                                  Delete
+                                </Button>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 whitespace-pre-wrap text-sm text-ink">{note.text}</div>
+                          </div>
+                        );
+                      })}
+                      {(load?.loadNotes ?? []).length === 0 ? (
+                        <div className="text-sm text-[color:var(--color-text-muted)]">No notes yet.</div>
+                      ) : null}
+                    </div>
                   </div>
                 </details>
                 <details className="group">
@@ -1798,6 +1945,16 @@ export default function LoadDetailsPage() {
                       <option value="BROKERED">Brokered</option>
                     </Select>
                   </FormField>
+                  <FormField label="Movement mode" htmlFor="freightMovementMode">
+                    <Select
+                      value={freightForm.movementMode}
+                      onChange={(e) => setFreightForm({ ...freightForm, movementMode: e.target.value })}
+                    >
+                      <option value="FTL">FTL</option>
+                      <option value="LTL">LTL</option>
+                      <option value="POOL_DISTRIBUTION">Pool distribution</option>
+                    </Select>
+                  </FormField>
                   <FormField label="Operating entity" htmlFor="freightOperatingEntity">
                     {user?.role === "ADMIN" && operatingEntities.length > 0 ? (
                       <Select
@@ -1842,6 +1999,13 @@ export default function LoadDetailsPage() {
                       onChange={(e) => setFreightForm({ ...freightForm, weightLbs: e.target.value })}
                     />
                   </FormField>
+                  <FormField label="Paid miles (settlement)" htmlFor="freightPaidMiles">
+                    <Input
+                      placeholder={String(load?.miles ?? "0")}
+                      value={freightForm.paidMiles}
+                      onChange={(e) => setFreightForm({ ...freightForm, paidMiles: e.target.value })}
+                    />
+                  </FormField>
                   <Button size="sm" onClick={saveFreight} disabled={freightSaving}>
                     {freightSaving ? "Saving..." : "Save"}
                   </Button>
@@ -1850,6 +2014,7 @@ export default function LoadDetailsPage() {
                 <>
                   <div className="text-sm text-[color:var(--color-text-muted)]">Pallets: {load?.palletCount ?? "-"}</div>
                   <div className="text-sm text-[color:var(--color-text-muted)]">Weight: {load?.weightLbs ?? "-"} lbs</div>
+                  <div className="text-sm text-[color:var(--color-text-muted)]">Paid miles: {load?.paidMiles ?? "-"}</div>
                   <div className="text-sm text-[color:var(--color-text-muted)]">Shipper ref: {load?.shipperReferenceNumber ?? "-"}</div>
                   <div className="text-sm text-[color:var(--color-text-muted)]">Consignee ref: {load?.consigneeReferenceNumber ?? "-"}</div>
                 </>

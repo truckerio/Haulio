@@ -1,0 +1,16 @@
+{
+  "name": "yardos",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "sh -c 'pnpm --filter @yardos/api dev & pnpm --filter @yardos/web dev; wait'",
+    "dev:api": "pnpm --filter @yardos/api dev",
+    "dev:web": "pnpm --filter @yardos/web dev",
+    "build": "pnpm --filter @yardos/contracts build && pnpm --filter @yardos/planning-core build && pnpm --filter @yardos/api build && pnpm --filter @yardos/web build",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
+  }
+}

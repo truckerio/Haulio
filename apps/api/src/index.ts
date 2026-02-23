@@ -23,9 +23,11 @@ import {
   LoadConfirmationStatus,
   LoadChargeType,
   StopType,
+  StopStatus,
   LegType,
   LegStatus,
   ManifestStatus,
+  TripStatus,
   LoadAssignmentRole,
   EventType,
   TaskPriority,
@@ -49,24 +51,51 @@ import {
   BillingSubmissionStatus,
   FinancePaymentMethod,
   PayableLineItemType,
+  PayableMilesSource,
   PayableHoldOwner,
   PayablePartyType,
   PayableRunStatus,
   QboSyncJobStatus,
   AccessorialStatus,
   AccessorialType,
+  AppearanceColorPreset,
+  AppearanceContrast,
+  AppearanceFocusRing,
+  AppearanceFontWeight,
+  AppearanceMotion,
+  AppearanceNavDensity,
+  AppearanceTextScale,
+  AppearanceTheme,
   MfaChallengePurpose,
   UserStatus,
   VaultDocType,
   VaultScopeType,
   LearningDomain,
   TeamEntityType,
+  LoadNoteSource,
+  LoadNoteVisibility,
+  MovementMode,
   add,
   formatUSD,
   mul,
   toDecimal,
   toDecimalFixed,
 } from "@truckerio/db";
+import type {
+  YardOsContextResponse,
+  YardOsLoad,
+  YardOsPlanApplyRequest,
+  YardOsPlanApplyResponse,
+  YardOsPlanPreviewRequest,
+  YardOsPlanPreviewResponse,
+  YardOsPlanRejectRequest,
+  YardOsPlanRejectResponse,
+  YardOsPlanSummary,
+  YardOsTrailerSpec,
+  YardOsViolationSeverity,
+  YardOsViolationType,
+  YardOsEventsResponse,
+} from "@truckerio/shared";
 import { createSession, setSessionCookie, clearSessionCookie, requireAuth, destroySession } from "./lib/auth";
 import { createCsrfToken, setCsrfCookie, requireCsrf } from "./lib/csrf";
 import { requireRole } from "./lib/rbac";
@@ -94,7 +123,6 @@ import { requireOrgEntity } from "./lib/tenant";
 import { requireOperationalOrg } from "./lib/onboarding";
 import { fetchSamsaraVehicleLocation, fetchSamsaraVehicles, formatSamsaraError, validateSamsaraToken } from "./lib/samsara";
 import { assertLoadStatusTransition, formatLoadStatusLabel, mapExternalLoadStatus } from "./lib/load-status";
-import { buildAssignmentPlan, validateAssignmentDrivers } from "./lib/load-assignment";
 import { evaluateBillingReadiness, evaluateBillingReadinessSnapshot } from "./lib/billing-readiness";
 import {
   FINANCE_RECEIVABLE_STAGE,
@@ -183,12 +211,70 @@ const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 
 const DEV_ERRORS = process.env.NODE_ENV !== "production";
 const DEFAULT_TEAM_NAME = "Default";
 
+const APPEARANCE_DEFAULTS = {
+  theme: AppearanceTheme.SYSTEM,
+  textScale: AppearanceTextScale.DEFAULT,
+  contrast: AppearanceContrast.NORMAL,
+  fontWeight: AppearanceFontWeight.NORMAL,
+  navDensity: AppearanceNavDensity.COMFORTABLE,
+  motion: AppearanceMotion.FULL,
+  focusRing: AppearanceFocusRing.STANDARD,
+  colorPreset: AppearanceColorPreset.DEFAULT,
+} as const;
+
+const APPEARANCE_SELECT = {
+  appearanceTheme: true,
+  appearanceTextScale: true,
+  appearanceContrast: true,
+  appearanceFontWeight: true,
+  appearanceNavDensity: true,
+  appearanceMotion: true,
+  appearanceFocusRing: true,
+  appearanceColorPreset: true,
+} as const;
+
+const appearancePayloadSchema = z.object({
+  theme: z.nativeEnum(AppearanceTheme).optional(),
+  textScale: z.nativeEnum(AppearanceTextScale).optional(),
+  contrast: z.nativeEnum(AppearanceContrast).optional(),
+  fontWeight: z.nativeEnum(AppearanceFontWeight).optional(),
+  navDensity: z.nativeEnum(AppearanceNavDensity).optional(),
+  motion: z.nativeEnum(AppearanceMotion).optional(),
+  focusRing: z.nativeEnum(AppearanceFocusRing).optional(),
+  colorPreset: z.nativeEnum(AppearanceColorPreset).optional(),
+});
+
+type AppearanceRecord = {
+  appearanceTheme?: AppearanceTheme | null;
+  appearanceTextScale?: AppearanceTextScale | null;
+  appearanceContrast?: AppearanceContrast | null;
+  appearanceFontWeight?: AppearanceFontWeight | null;
+  appearanceNavDensity?: AppearanceNavDensity | null;
+  appearanceMotion?: AppearanceMotion | null;
+  appearanceFocusRing?: AppearanceFocusRing | null;
+  appearanceColorPreset?: AppearanceColorPreset | null;
+} | null;
+
+function normalizeAppearanceSettings(record: AppearanceRecord) {
+  return {
+    theme: record?.appearanceTheme ?? APPEARANCE_DEFAULTS.theme,
+    textScale: record?.appearanceTextScale ?? APPEARANCE_DEFAULTS.textScale,
+    contrast: record?.appearanceContrast ?? APPEARANCE_DEFAULTS.contrast,
+    fontWeight: record?.appearanceFontWeight ?? APPEARANCE_DEFAULTS.fontWeight,
+    navDensity: record?.appearanceNavDensity ?? APPEARANCE_DEFAULTS.navDensity,
+    motion: record?.appearanceMotion ?? APPEARANCE_DEFAULTS.motion,
+    focusRing: record?.appearanceFocusRing ?? APPEARANCE_DEFAULTS.focusRing,
+    colorPreset: record?.appearanceColorPreset ?? APPEARANCE_DEFAULTS.colorPreset,
+  };
+}
+
 function sendServerError(res: Response, message: string, error?: unknown) {
   const detail = error instanceof Error ? error.message : error ? String(error) : null;
+  const code = (error as { code?: string } | undefined)?.code;
   if (DEV_ERRORS && detail) {
-    return res.status(500).json({ error: message, detail });
+    return res.status(500).json({ error: message, detail, code });
   }
-  return res.status(500).json({ error: message });
+  return res.status(500).json({ error: message, code });
 }
 
 const parseTermsDays = (terms?: string | null) => {
@@ -196,6 +282,248 @@ const parseTermsDays = (terms?: string | null) => {
   const match = terms.match(/(\\d+)/);
   return match ? Number(match[1]) : null;
 };
+
+const PAYABLE_MILES_VARIANCE_REVIEW_PCT = Number(process.env.PAYABLE_MILES_VARIANCE_REVIEW_PCT || "10");
+const clampNumber = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+const YARDOS_DEFAULT_TRAILER_SPEC: YardOsTrailerSpec = {
+  interiorLengthM: 16.0,
+  interiorWidthM: 2.46,
+  interiorHeightM: 2.67,
+  laneCount: 2,
+  slotCount: 20,
+  legalWeightLbs: 44000,
+  driveAxleX: -2.2,
+  trailerAxleX: 4.0,
+};
+
+const yardOsLoadSchema = z.object({
+  id: z.string().min(1),
+  loadNumber: z.string().nullable().optional(),
+  pallets: z.number().int().nonnegative(),
+  weightLbs: z.number().nonnegative(),
+  cubeFt: z.number().nonnegative().nullable().optional(),
+  stopWindow: z.string().nullable().optional(),
+  lane: z.string().nullable().optional(),
+  constraints: z.array(z.string()),
+  destinationCode: z.string().nullable().optional(),
+  trailerId: z.string().nullable().optional(),
+  trailerUnit: z.string().nullable().optional(),
+  status: z.string().nullable().optional(),
+});
+
+const yardOsPlacementSchema = z.object({
+  loadId: z.string().min(1),
+  palletIndex: z.number().int().nonnegative(),
+  slotIndex: z.number().int().nonnegative(),
+  laneIndex: z.number().int().nonnegative(),
+  dims: z
+    .object({
+      x: z.number().positive(),
+      y: z.number().positive(),
+      z: z.number().positive(),
+    })
+    .optional(),
+  dimsLabel: z.string().optional(),
+  weightLbs: z.number().nonnegative(),
+  sequenceIndex: z.number().int().optional(),
+  destinationCode: z.string().nullable().optional(),
+  stopWindow: z.string().nullable().optional(),
+});
+
+const yardOsViolationSchema = z.object({
+  loadId: z.string().nullable().optional(),
+  palletIndices: z.array(z.number().int().nonnegative()).optional(),
+  severity: z.enum(["low", "warning", "high", "critical"]),
+  reason: z.string().min(1),
+  suggestedFix: z.string().optional(),
+  type: z.string(),
+});
+
+const yardOsTrailerSpecSchema = z.object({
+  trailerId: z.string().optional(),
+  trailerUnit: z.string().optional(),
+  trailerType: z.string().optional(),
+  interiorLengthM: z.number().positive().optional(),
+  interiorWidthM: z.number().positive().optional(),
+  interiorHeightM: z.number().positive().optional(),
+  laneCount: z.number().int().positive().optional(),
+  slotCount: z.number().int().positive().optional(),
+  legalWeightLbs: z.number().positive().optional(),
+  driveAxleX: z.number().optional(),
+  trailerAxleX: z.number().optional(),
+});
+
+const yardOsPlanBaseSchema = z.object({
+  trailerId: z.union([z.string().min(1), z.literal(""), z.null()]).optional(),
+  trailerSpec: yardOsTrailerSpecSchema.optional(),
+  loads: z.array(yardOsLoadSchema),
+  placements: z.array(yardOsPlacementSchema),
+  violations: z.array(yardOsViolationSchema).optional(),
+  source: z.string().optional(),
+});
+
+const normalizeYardOsTrailerSpec = (partial?: Partial<YardOsTrailerSpec> | null): YardOsTrailerSpec => ({
+  ...YARDOS_DEFAULT_TRAILER_SPEC,
+  ...(partial ?? {}),
+});
+
+const formatStopWindow = (start?: Date | null, end?: Date | null) => {
+  if (!start && !end) return null;
+  const from = start ? start.toISOString() : "";
+  const to = end ? end.toISOString() : "";
+  if (from && to) return `${from}..${to}`;
+  return from || to || null;
+};
+
+const compactLocation = (city?: string | null, state?: string | null) =>
+  [city?.trim(), state?.trim()].filter(Boolean).join(", ") || null;
+
+function buildYardOsLoadFromDb(load: {
+  id: string;
+  loadNumber: string;
+  status: LoadStatus;
+  palletCount: number | null;
+  weightLbs: number | null;
+  movementMode: MovementMode;
+  trailerId: string | null;
+  trailer?: { unit: string | null } | null;
+  stops: Array<{
+    type: StopType;
+    city: string;
+    state: string;
+    appointmentStart: Date | null;
+    appointmentEnd: Date | null;
+    sequence: number;
+  }>;
+}): YardOsLoad {
+  const orderedStops = [...load.stops].sort((a, b) => a.sequence - b.sequence);
+  const firstStop = orderedStops[0] ?? null;
+  const lastStop = orderedStops[orderedStops.length - 1] ?? null;
+  const pickup = orderedStops.find((stop) => stop.type === StopType.PICKUP) ?? firstStop;
+  const delivery = [...orderedStops].reverse().find((stop) => stop.type === StopType.DELIVERY) ?? lastStop;
+  const lane = pickup || delivery ? `${compactLocation(pickup?.city, pickup?.state) ?? "-"} -> ${compactLocation(delivery?.city, delivery?.state) ?? "-"}` : null;
+  const stopWindow = formatStopWindow(delivery?.appointmentStart ?? null, delivery?.appointmentEnd ?? null);
+  const destinationCode = delivery?.state || delivery?.city || null;
+  const constraints: YardOsLoad["constraints"] = [];
+  if (load.movementMode !== MovementMode.FTL) constraints.push("NO_SPLIT");
+  return {
+    id: load.id,
+    loadNumber: load.loadNumber,
+    pallets: Math.max(0, load.palletCount ?? 0),
+    weightLbs: Math.max(0, load.weightLbs ?? 0),
+    cubeFt: null,
+    stopWindow,
+    lane,
+    constraints,
+    destinationCode,
+    trailerId: load.trailerId ?? null,
+    trailerUnit: load.trailer?.unit ?? null,
+    status: load.status,
+  };
+}
+
+const summarizeYardOsPlan = (params: {
+  trailerSpec?: Partial<YardOsTrailerSpec> | null;
+  loads: YardOsLoad[];
+  placements: Array<{ weightLbs: number; slotIndex: number }>;
+  violations?: Array<{ severity: YardOsViolationSeverity; type: string }> | null;
+}): YardOsPlanSummary => {
+  const spec = normalizeYardOsTrailerSpec(params.trailerSpec);
+  const placementWeight = params.placements.reduce((sum, row) => sum + Math.max(0, Number(row.weightLbs || 0)), 0);
+  const loadWeight = params.loads.reduce((sum, row) => sum + Math.max(0, Number(row.weightLbs || 0)), 0);
+  const totalWeightLbs = Math.round(placementWeight > 0 ? placementWeight : loadWeight);
+  const palletCount =
+    params.placements.length > 0
+      ? params.placements.length
+      : params.loads.reduce((sum, row) => sum + Math.max(0, Number(row.pallets || 0)), 0);
+
+  const slotCount = Math.max(1, spec.slotCount);
+  let frontWeight = 0;
+  let rearWeight = 0;
+  for (const placement of params.placements) {
+    const safeSlot = clampNumber(Number(placement.slotIndex || 0), 0, slotCount - 1);
+    const xNorm = (safeSlot + 0.5) / slotCount;
+    const weight = Math.max(0, Number(placement.weightLbs || 0));
+    frontWeight += weight * (1 - xNorm);
+    rearWeight += weight * xNorm;
+  }
+  if (params.placements.length === 0 && totalWeightLbs > 0) {
+    frontWeight = totalWeightLbs * 0.5;
+    rearWeight = totalWeightLbs * 0.5;
+  }
+  const frontPct = totalWeightLbs > 0 ? frontWeight / totalWeightLbs : 0.5;
+  const axleDelta = Math.abs(frontPct - 0.5);
+  const overweight = totalWeightLbs > spec.legalWeightLbs;
+  const axleStatus: YardOsPlanSummary["axleBalance"]["status"] = overweight
+    ? "BAD"
+    : axleDelta > 0.12
+    ? "BAD"
+    : axleDelta > 0.07
+    ? "WARNING"
+    : "GOOD";
+
+  const severities: Record<YardOsViolationSeverity, number> = {
+    low: 0,
+    warning: 0,
+    high: 0,
+    critical: 0,
+  };
+  const types: Partial<Record<YardOsViolationType, number>> = {};
+  for (const violation of params.violations ?? []) {
+    const severity = violation.severity ?? "warning";
+    if (severities[severity] !== undefined) severities[severity] += 1;
+    const type = String(violation.type || "OTHER") as YardOsViolationType;
+    types[type] = (types[type] ?? 0) + 1;
+  }
+  if (overweight) {
+    severities.high += 1;
+    types.OVERWEIGHT_TRAILER = (types.OVERWEIGHT_TRAILER ?? 0) + 1;
+  }
+  if (axleStatus !== "GOOD") {
+    const key = axleStatus === "BAD" ? "high" : "warning";
+    severities[key] += 1;
+    types.AXLE_IMBALANCE = (types.AXLE_IMBALANCE ?? 0) + 1;
+  }
+
+  return {
+    loadCount: params.loads.length,
+    palletCount,
+    totalWeightLbs,
+    legalWeightLbs: spec.legalWeightLbs,
+    overweight,
+    axleBalance: {
+      status: axleStatus,
+      frontWeightLbs: Math.round(frontWeight),
+      rearWeightLbs: Math.round(rearWeight),
+      frontPct: Number(frontPct.toFixed(4)),
+    },
+    violationsBySeverity: severities,
+    violationsByType: types,
+  };
+};
+
+function canDeleteLockedLoadNote(role: Role | string) {
+  return role === Role.ADMIN || role === Role.HEAD_DISPATCHER;
+}
+
+async function userCanAccessLoad(params: { user: any; loadId: string }) {
+  const loadScope = await getUserTeamScope(params.user);
+  if (loadScope.canSeeAllTeams) {
+    return true;
+  }
+  let assignment = await prisma.teamAssignment.findFirst({
+    where: { orgId: params.user.orgId, entityType: TeamEntityType.LOAD, entityId: params.loadId },
+  });
+  if (!assignment) {
+    assignment = await ensureEntityAssignedToDefaultTeam(
+      params.user.orgId,
+      TeamEntityType.LOAD,
+      params.loadId,
+      loadScope.defaultTeamId!
+    );
+  }
+  return loadScope.teamIds.includes(assignment.teamId);
+}
 
 const RESET_TOKEN_TTL_MINUTES = 60;
 
@@ -236,11 +564,11 @@ function normalizeReference(value?: string | null) {
 
 function parseOptionalNonNegativeInt(value: unknown, label: string) {
   if (value === undefined || value === null || value === "") return null;
-  const num = typeof value === "string" ? Number(value) : value;
+  const num = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(num) || !Number.isInteger(num) || num < 0) {
     throw new Error(`${label} must be a non-negative integer`);
   }
-  return num as number;
+  return num;
 }
 
 function parseOptionalNumber(value: unknown, label: string) {
@@ -356,6 +684,311 @@ function mapLoadTypeForInput(value?: string | null) {
   return LoadType.COMPANY;
 }
 
+function mapMovementModeForInput(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return MovementMode.FTL;
+  const key = trimmed.toUpperCase().replace(/[^A-Z]/g, "");
+  if (["FTL", "DIRECT", "SINGLELEG", "SINGLE"].includes(key)) return MovementMode.FTL;
+  if (["LTL", "CONSOLIDATED", "CONSOLIDATION"].includes(key)) return MovementMode.LTL;
+  if (["POOLDISTRIBUTION", "POOL", "POOLDIST", "HUBDISTRIBUTION"].includes(key)) {
+    return MovementMode.POOL_DISTRIBUTION;
+  }
+  return MovementMode.FTL;
+}
+
+async function allocateTripNumberOnly(orgId: string) {
+  const sequence = await prisma.$transaction(async (tx) => {
+    try {
+      return await tx.orgSequence.upsert({
+        where: { orgId },
+        update: { nextTripNumber: { increment: 1 } },
+        create: {
+          orgId,
+          nextLoadNumber: 1001,
+          nextTripNumber: 1002,
+          loadPrefix: "LD-",
+          tripPrefix: "TR-",
+        },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return tx.orgSequence.update({
+          where: { orgId },
+          data: { nextTripNumber: { increment: 1 } },
+        });
+      }
+      throw error;
+    }
+  });
+  return `${sequence.tripPrefix}${sequence.nextTripNumber - 1}`;
+}
+
+const TRIP_INCLUDE = {
+  driver: { select: { id: true, name: true, status: true } },
+  truck: { select: { id: true, unit: true, status: true } },
+  trailer: { select: { id: true, unit: true, status: true } },
+  sourceManifest: { select: { id: true, status: true, origin: true, destination: true } },
+  loads: {
+    orderBy: { sequence: "asc" },
+    include: {
+      load: {
+        select: {
+          id: true,
+          loadNumber: true,
+          tripNumber: true,
+          status: true,
+          movementMode: true,
+          customerName: true,
+          assignedDriverId: true,
+          truckId: true,
+          trailerId: true,
+          deliveredAt: true,
+        },
+      },
+    },
+  },
+} as const;
+
+function getTripCargoInclude(): Prisma.TripInclude {
+  return {
+    ...TRIP_INCLUDE,
+    sourceManifest: {
+      include: {
+        trailer: { select: { id: true, unit: true } },
+        truck: { select: { id: true, unit: true } },
+        driver: { select: { id: true, name: true } },
+        items: {
+          orderBy: { id: "asc" },
+          include: {
+            load: { select: { id: true, loadNumber: true, status: true, customerName: true } },
+          },
+        },
+      },
+    },
+  };
+}
+
+const CONSOLIDATION_MOVEMENT_MODES = new Set<MovementMode>([
+  MovementMode.LTL,
+  MovementMode.POOL_DISTRIBUTION,
+]);
+
+function isConsolidationMovementMode(mode: MovementMode | null | undefined) {
+  return Boolean(mode && CONSOLIDATION_MOVEMENT_MODES.has(mode));
+}
+
+function mapTripStatusToManifestStatus(status: TripStatus): ManifestStatus {
+  if (status === TripStatus.IN_TRANSIT) return ManifestStatus.IN_TRANSIT;
+  if (status === TripStatus.ARRIVED) return ManifestStatus.ARRIVED;
+  if (status === TripStatus.COMPLETE) return ManifestStatus.COMPLETE;
+  if (status === TripStatus.ASSIGNED) return ManifestStatus.LOADED;
+  return ManifestStatus.PLANNED;
+}
+
+function buildTripCargoPlanResponse(trip: any) {
+  const canUseCargoPlan = isConsolidationMovementMode(trip.movementMode);
+  const canEdit = canUseCargoPlan && TRIP_EDITABLE_STATUSES.includes(trip.status);
+  if (!trip.sourceManifest) {
+    return {
+      movementMode: trip.movementMode,
+      canUseCargoPlan,
+      canEdit,
+      cargoPlan: null,
+    };
+  }
+  const sequenceByLoadId = new Map<string, number>(
+    (trip.loads ?? []).map((item: any) => [item.loadId as string, item.sequence as number])
+  );
+  const items = (trip.sourceManifest.items ?? [])
+    .map((item: any) => ({
+      id: item.id,
+      loadId: item.loadId,
+      loadNumber: item.load?.loadNumber ?? "Unknown",
+      loadStatus: item.load?.status ?? null,
+      customerName: item.load?.customerName ?? null,
+      sequence: sequenceByLoadId.get(item.loadId) ?? null,
+    }))
+    .sort((a: any, b: any) => {
+      const aSeq = a.sequence ?? Number.MAX_SAFE_INTEGER;
+      const bSeq = b.sequence ?? Number.MAX_SAFE_INTEGER;
+      if (aSeq !== bSeq) return aSeq - bSeq;
+      return a.loadNumber.localeCompare(b.loadNumber);
+    });
+
+  return {
+    movementMode: trip.movementMode,
+    canUseCargoPlan,
+    canEdit,
+    cargoPlan: {
+      id: trip.sourceManifest.id,
+      status: trip.sourceManifest.status,
+      origin: trip.sourceManifest.origin ?? null,
+      destination: trip.sourceManifest.destination ?? null,
+      trailer: trip.sourceManifest.trailer
+        ? { id: trip.sourceManifest.trailer.id, unit: trip.sourceManifest.trailer.unit ?? null }
+        : null,
+      truck: trip.sourceManifest.truck
+        ? { id: trip.sourceManifest.truck.id, unit: trip.sourceManifest.truck.unit ?? null }
+        : null,
+      driver: trip.sourceManifest.driver
+        ? { id: trip.sourceManifest.driver.id, name: trip.sourceManifest.driver.name ?? null }
+        : null,
+      loadCount: items.length,
+      items,
+    },
+  };
+}
+
+async function syncTripCargoPlan(tripId: string, orgId: string) {
+  return prisma.$transaction(async (tx) => {
+    const trip = await tx.trip.findFirst({
+      where: { id: tripId, orgId },
+      include: {
+        loads: { orderBy: { sequence: "asc" }, select: { id: true, loadId: true, sequence: true } },
+        sourceManifest: {
+          include: {
+            items: { select: { id: true, loadId: true } },
+          },
+        },
+      },
+    });
+    if (!trip) {
+      throw new Error("Trip not found");
+    }
+    if (!isConsolidationMovementMode(trip.movementMode)) {
+      throw new Error("Cargo plan is only available for LTL and Pool Distribution trips");
+    }
+    if (trip.loads.length === 0) {
+      throw new Error("Trip has no loads to sync");
+    }
+
+    const loadIds = trip.loads.map((item) => item.loadId);
+    const manifestStatus = mapTripStatusToManifestStatus(trip.status);
+    let manifestId = trip.sourceManifestId ?? null;
+
+    if (!manifestId) {
+      if (!trip.trailerId) {
+        throw new Error("Assign a trailer before creating a cargo plan");
+      }
+      const createdManifest = await tx.trailerManifest.create({
+        data: {
+          orgId,
+          trailerId: trip.trailerId,
+          truckId: trip.truckId ?? null,
+          driverId: trip.driverId ?? null,
+          status: manifestStatus,
+          origin: trip.origin ?? null,
+          destination: trip.destination ?? null,
+          plannedDepartureAt: trip.plannedDepartureAt ?? null,
+          plannedArrivalAt: trip.plannedArrivalAt ?? null,
+          departedAt: trip.departedAt ?? null,
+          arrivedAt: trip.arrivedAt ?? null,
+          items: {
+            create: loadIds.map((loadId) => ({ loadId })),
+          },
+        },
+      });
+      manifestId = createdManifest.id;
+      await tx.trip.update({
+        where: { id: trip.id },
+        data: { sourceManifestId: createdManifest.id },
+      });
+    } else {
+      const updateData: Prisma.TrailerManifestUncheckedUpdateInput = {
+        status: manifestStatus,
+        truckId: trip.truckId ?? null,
+        driverId: trip.driverId ?? null,
+        origin: trip.origin ?? null,
+        destination: trip.destination ?? null,
+        plannedDepartureAt: trip.plannedDepartureAt ?? null,
+        plannedArrivalAt: trip.plannedArrivalAt ?? null,
+        departedAt: trip.departedAt ?? null,
+        arrivedAt: trip.arrivedAt ?? null,
+      };
+      if (trip.trailerId) {
+        updateData.trailerId = trip.trailerId;
+      }
+      await tx.trailerManifest.update({
+        where: { id: manifestId },
+        data: updateData,
+      });
+    }
+
+    const existingItems = await tx.trailerManifestItem.findMany({
+      where: { manifestId },
+      select: { loadId: true },
+    });
+    const existingLoadIds = new Set(existingItems.map((item) => item.loadId));
+    const missingLoadIds = loadIds.filter((loadId) => !existingLoadIds.has(loadId));
+    if (missingLoadIds.length) {
+      await tx.trailerManifestItem.createMany({
+        data: missingLoadIds.map((loadId) => ({ manifestId, loadId })),
+        skipDuplicates: true,
+      });
+    }
+    const staleLoadIds = [...existingLoadIds].filter((loadId) => !loadIds.includes(loadId));
+    if (staleLoadIds.length) {
+      await tx.trailerManifestItem.deleteMany({
+        where: { manifestId, loadId: { in: staleLoadIds } },
+      });
+    }
+
+    const syncedTrip = await tx.trip.findFirst({
+      where: { id: trip.id, orgId },
+      include: getTripCargoInclude(),
+    });
+    if (!syncedTrip) {
+      throw new Error("Trip not found after cargo sync");
+    }
+    return syncedTrip;
+  });
+}
+
+function normalizeTripStatusForLoad(current: LoadStatus, tripStatus: TripStatus) {
+  if (tripStatus === TripStatus.ASSIGNED) {
+    if (current === LoadStatus.DRAFT || current === LoadStatus.PLANNED) return LoadStatus.ASSIGNED;
+    return current;
+  }
+  if (tripStatus === TripStatus.IN_TRANSIT) {
+    if (current === LoadStatus.DRAFT || current === LoadStatus.PLANNED || current === LoadStatus.ASSIGNED) {
+      return LoadStatus.IN_TRANSIT;
+    }
+    return current;
+  }
+  return current;
+}
+
+async function applyTripAssignmentToLoads(params: {
+  orgId: string;
+  loadIds: string[];
+  driverId?: string | null;
+  truckId?: string | null;
+  trailerId?: string | null;
+  tripStatus?: TripStatus | null;
+}) {
+  if (!params.loadIds.length) return;
+  const loads = await prisma.load.findMany({
+    where: { orgId: params.orgId, id: { in: params.loadIds } },
+    select: { id: true, status: true },
+  });
+  const now = new Date();
+  for (const load of loads) {
+    const nextStatus = params.tripStatus ? normalizeTripStatusForLoad(load.status, params.tripStatus) : load.status;
+    await prisma.load.update({
+      where: { id: load.id },
+      data: {
+        assignedDriverId: params.driverId ?? null,
+        truckId: params.truckId ?? null,
+        trailerId: params.trailerId ?? null,
+        assignedDriverAt: params.driverId ? now : null,
+        assignedTruckAt: params.truckId ? now : null,
+        assignedTrailerAt: params.trailerId ? now : null,
+        status: nextStatus,
+      },
+    });
+  }
+}
+
 function normalizeStopLocation(stop?: { city?: string | null; state?: string | null; zip?: string | null }) {
   const city = stop?.city?.trim() ?? "";
   const state = stop?.state?.trim() ?? "";
@@ -372,6 +1005,14 @@ function median(values: number[]) {
     return (sorted[mid - 1] + sorted[mid]) / 2;
   }
   return sorted[mid];
+}
+
+function calculateMilesVariancePct(plannedMiles: number | null | undefined, paidMiles: number | null | undefined) {
+  if (!Number.isFinite(plannedMiles) || !Number.isFinite(paidMiles)) return null;
+  const planned = Number(plannedMiles);
+  const paid = Number(paidMiles);
+  if (planned <= 0) return null;
+  return Math.abs(((paid - planned) / planned) * 100);
 }
 
 async function fetchMatchingMiles(params: {
@@ -460,7 +1101,131 @@ type LoadStatusRecord = {
   status: LoadStatus;
   completedAt?: Date | null;
   deliveredAt?: Date | null;
+  miles?: number | null;
+  paidMiles?: number | null;
 };
+
+const LOAD_EXECUTION_STATUSES = new Set<LoadStatus>([
+  LoadStatus.ASSIGNED,
+  LoadStatus.IN_TRANSIT,
+  LoadStatus.DELIVERED,
+  LoadStatus.POD_RECEIVED,
+  LoadStatus.READY_TO_INVOICE,
+  LoadStatus.INVOICED,
+  LoadStatus.PAID,
+]);
+
+const TERMINAL_LOAD_STATUSES: LoadStatus[] = [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED];
+const READY_STAGE_LOAD_STATUSES: LoadStatus[] = [LoadStatus.DELIVERED, LoadStatus.POD_RECEIVED, LoadStatus.READY_TO_INVOICE];
+const REMINDER_INVOICE_STATUSES: InvoiceStatus[] = [InvoiceStatus.SENT, InvoiceStatus.ACCEPTED, InvoiceStatus.DISPUTED];
+const TRIP_EDITABLE_STATUSES: TripStatus[] = [TripStatus.PLANNED, TripStatus.ASSIGNED];
+const TRIP_DISPATCHED_STATUSES: TripStatus[] = [TripStatus.ASSIGNED, TripStatus.IN_TRANSIT];
+
+const DRIVER_ACTIVE_TRIP_STATUSES: TripStatus[] = [
+  TripStatus.PLANNED,
+  TripStatus.ASSIGNED,
+  TripStatus.IN_TRANSIT,
+  TripStatus.ARRIVED,
+];
+
+const TRIP_ASSET_ACTIVE_STATUSES = DRIVER_ACTIVE_TRIP_STATUSES;
+
+function isTripAssetActive(status: TripStatus) {
+  return TRIP_ASSET_ACTIVE_STATUSES.includes(status);
+}
+
+async function isAssetUsedByOtherActiveTrip(params: {
+  orgId: string;
+  tripId: string;
+  field: "driverId" | "truckId" | "trailerId";
+  assetId: string;
+}) {
+  const where: Prisma.TripWhereInput = {
+    orgId: params.orgId,
+    id: { not: params.tripId },
+    status: { in: TRIP_ASSET_ACTIVE_STATUSES },
+  };
+  if (params.field === "driverId") where.driverId = params.assetId;
+  if (params.field === "truckId") where.truckId = params.assetId;
+  if (params.field === "trailerId") where.trailerId = params.assetId;
+  const other = await prisma.trip.findFirst({ where, select: { id: true } });
+  return Boolean(other);
+}
+
+async function syncTripAssetStatuses(params: {
+  orgId: string;
+  tripId: string;
+  previous: { status: TripStatus; driverId?: string | null; truckId?: string | null; trailerId?: string | null };
+  next: { status: TripStatus; driverId?: string | null; truckId?: string | null; trailerId?: string | null };
+}) {
+  const previousActive = isTripAssetActive(params.previous.status);
+  const nextActive = isTripAssetActive(params.next.status);
+
+  const maybeReleaseDriver = async (driverId: string | null | undefined) => {
+    if (!driverId) return;
+    const stillUsed = await isAssetUsedByOtherActiveTrip({
+      orgId: params.orgId,
+      tripId: params.tripId,
+      field: "driverId",
+      assetId: driverId,
+    });
+    if (!stillUsed) {
+      await prisma.driver.update({ where: { id: driverId }, data: { status: DriverStatus.AVAILABLE } });
+    }
+  };
+
+  const maybeReleaseTruck = async (truckId: string | null | undefined) => {
+    if (!truckId) return;
+    const stillUsed = await isAssetUsedByOtherActiveTrip({
+      orgId: params.orgId,
+      tripId: params.tripId,
+      field: "truckId",
+      assetId: truckId,
+    });
+    if (!stillUsed) {
+      await prisma.truck.update({ where: { id: truckId }, data: { status: TruckStatus.AVAILABLE } });
+    }
+  };
+
+  const maybeReleaseTrailer = async (trailerId: string | null | undefined) => {
+    if (!trailerId) return;
+    const stillUsed = await isAssetUsedByOtherActiveTrip({
+      orgId: params.orgId,
+      tripId: params.tripId,
+      field: "trailerId",
+      assetId: trailerId,
+    });
+    if (!stillUsed) {
+      await prisma.trailer.update({ where: { id: trailerId }, data: { status: TrailerStatus.AVAILABLE } });
+    }
+  };
+
+  if (previousActive) {
+    if (!nextActive || params.previous.driverId !== params.next.driverId) {
+      await maybeReleaseDriver(params.previous.driverId);
+    }
+    if (!nextActive || params.previous.truckId !== params.next.truckId) {
+      await maybeReleaseTruck(params.previous.truckId);
+    }
+    if (!nextActive || params.previous.trailerId !== params.next.trailerId) {
+      await maybeReleaseTrailer(params.previous.trailerId);
+    }
+  }
+
+  if (nextActive) {
+    await Promise.all([
+      params.next.driverId
+        ? prisma.driver.update({ where: { id: params.next.driverId }, data: { status: DriverStatus.ON_LOAD } })
+        : Promise.resolve(),
+      params.next.truckId
+        ? prisma.truck.update({ where: { id: params.next.truckId }, data: { status: TruckStatus.ASSIGNED } })
+        : Promise.resolve(),
+      params.next.trailerId
+        ? prisma.trailer.update({ where: { id: params.next.trailerId }, data: { status: TrailerStatus.ASSIGNED } })
+        : Promise.resolve(),
+    ]);
+  }
+}
 
 const DELIVERY_REACHED_STATUSES = new Set<LoadStatus>([
   LoadStatus.DELIVERED,
@@ -469,6 +1234,31 @@ const DELIVERY_REACHED_STATUSES = new Set<LoadStatus>([
   LoadStatus.INVOICED,
   LoadStatus.PAID,
 ]);
+
+async function assertLoadTripExecutionInvariant(params: {
+  orgId: string;
+  loadId: string;
+  loadNumber: string;
+  nextStatus: LoadStatus;
+}) {
+  if (!LOAD_EXECUTION_STATUSES.has(params.nextStatus)) {
+    return;
+  }
+  const tripMembershipCount = await prisma.tripLoad.count({
+    where: { orgId: params.orgId, loadId: params.loadId },
+  });
+  if (tripMembershipCount === 1) {
+    return;
+  }
+  if (tripMembershipCount === 0) {
+    throw new Error(
+      `Load ${params.loadNumber} must be added to a trip before moving to ${params.nextStatus}.`
+    );
+  }
+  throw new Error(
+    `Load ${params.loadNumber} has conflicting trip assignments. Resolve to exactly one trip before status changes.`
+  );
+}
 
 const resolveCompletedAtUpdate = (params: { current: LoadStatus; next: LoadStatus; existing?: Date | null }) => {
   if (params.current === params.next) return undefined;
@@ -496,6 +1286,15 @@ const resolveDeliveredAtUpdate = (params: { current: LoadStatus; next: LoadStatu
   return undefined;
 };
 
+function extractMilesFromUpdateInput(value: Prisma.LoadUpdateInput["miles"]) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value === "object" && "set" in value) {
+    const setValue = (value as { set?: unknown }).set;
+    if (typeof setValue === "number" && Number.isFinite(setValue)) return setValue;
+  }
+  return undefined;
+}
+
 async function transitionLoadStatus(params: {
   load: LoadStatusRecord;
   nextStatus: LoadStatus;
@@ -509,6 +1308,12 @@ async function transitionLoadStatus(params: {
   if (params.load.status === params.nextStatus) {
     return params.load;
   }
+  await assertLoadTripExecutionInvariant({
+    orgId: params.orgId,
+    loadId: params.load.id,
+    loadNumber: params.load.loadNumber,
+    nextStatus: params.nextStatus,
+  });
   const { overridden } = assertLoadStatusTransition({
     current: params.load.status,
     next: params.nextStatus,
@@ -532,6 +1337,30 @@ async function transitionLoadStatus(params: {
   };
   if ((!params.data || !Object.prototype.hasOwnProperty.call(params.data, "deliveredAt")) && deliveredAt !== undefined) {
     updateData.deliveredAt = deliveredAt;
+  }
+  const reachesDeliveredState =
+    !DELIVERY_REACHED_STATUSES.has(params.load.status) && DELIVERY_REACHED_STATUSES.has(params.nextStatus);
+  const hasExplicitPaidMilesUpdate = Boolean(params.data && Object.prototype.hasOwnProperty.call(params.data, "paidMiles"));
+  if (reachesDeliveredState && !hasExplicitPaidMilesUpdate) {
+    let sourceMiles = extractMilesFromUpdateInput(params.data?.miles);
+    let existingMiles = params.load.miles;
+    let existingPaidMiles = params.load.paidMiles;
+    if (existingMiles === undefined || existingPaidMiles === undefined || sourceMiles === undefined) {
+      const snapshot = await prisma.load.findUnique({
+        where: { id: params.load.id },
+        select: { miles: true, paidMiles: true },
+      });
+      existingMiles = existingMiles ?? snapshot?.miles ?? null;
+      existingPaidMiles = existingPaidMiles ?? snapshot?.paidMiles ?? null;
+      sourceMiles = sourceMiles ?? snapshot?.miles ?? undefined;
+    }
+    const candidateMiles = sourceMiles ?? existingMiles ?? undefined;
+    if ((existingPaidMiles ?? null) === null && Number.isFinite(candidateMiles) && Number(candidateMiles) > 0) {
+      updateData.paidMiles = Number(candidateMiles);
+      if (!params.data || !Object.prototype.hasOwnProperty.call(params.data, "paidMilesSource")) {
+        updateData.paidMilesSource = PayableMilesSource.PLANNED;
+      }
+    }
   }
   const updated = await prisma.load.update({
     where: { id: params.load.id },
@@ -573,131 +1402,6 @@ async function transitionLoadStatus(params: {
   return updated;
 }
 
-async function applyLoadAssignment(params: {
-  load: {
-    id: string;
-    loadNumber: string;
-    status: LoadStatus;
-    assignedDriverId: string | null;
-    truckId: string | null;
-    trailerId: string | null;
-    assignedDriverAt: Date | null;
-    assignedTruckAt: Date | null;
-    assignedTrailerAt: Date | null;
-  };
-  driverId: string;
-  truckId?: string | null;
-  trailerId?: string | null;
-  orgId: string;
-  userId: string;
-  role: Role;
-  overrideReason?: string | null;
-}) {
-  const now = new Date();
-  const assignedDriverAt =
-    params.driverId !== params.load.assignedDriverId ? now : params.load.assignedDriverAt ?? null;
-  const assignedTruckAt =
-    params.truckId !== params.load.truckId ? (params.truckId ? now : null) : params.load.assignedTruckAt ?? null;
-  const assignedTrailerAt =
-    params.trailerId !== params.load.trailerId ? (params.trailerId ? now : null) : params.load.assignedTrailerAt ?? null;
-  const assignmentData = {
-    assignedDriverId: params.driverId,
-    truckId: params.truckId ?? null,
-    trailerId: params.trailerId ?? null,
-    assignedDriverAt,
-    assignedTruckAt,
-    assignedTrailerAt,
-  };
-
-  let updatedLoad: typeof params.load;
-  if (params.load.status !== LoadStatus.ASSIGNED) {
-    updatedLoad = (await transitionLoadStatus({
-      load: { id: params.load.id, loadNumber: params.load.loadNumber, status: params.load.status },
-      nextStatus: LoadStatus.ASSIGNED,
-      userId: params.userId,
-      orgId: params.orgId,
-      role: params.role,
-      overrideReason: params.overrideReason,
-      data: assignmentData,
-      message: `Load ${params.load.loadNumber} assigned`,
-    })) as typeof params.load;
-  } else {
-    updatedLoad = (await prisma.load.update({
-      where: { id: params.load.id },
-      data: assignmentData,
-    })) as typeof params.load;
-  }
-
-  const resetStatusIfIdle = async (asset: "driver" | "truck" | "trailer", id: string | null) => {
-    if (!id) return;
-    const where: Prisma.LoadWhereInput = {
-      orgId: params.orgId,
-      deletedAt: null,
-      id: { not: params.load.id },
-      status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
-    };
-    if (asset === "driver") where.assignedDriverId = id;
-    if (asset === "truck") where.truckId = id;
-    if (asset === "trailer") where.trailerId = id;
-    const other = await prisma.load.findFirst({ where, select: { id: true } });
-    if (other) return;
-    if (asset === "driver") {
-      await prisma.driver.update({ where: { id }, data: { status: DriverStatus.AVAILABLE } });
-    } else if (asset === "truck") {
-      await prisma.truck.update({ where: { id }, data: { status: TruckStatus.AVAILABLE } });
-    } else {
-      await prisma.trailer.update({ where: { id }, data: { status: TrailerStatus.AVAILABLE } });
-    }
-  };
-
-  if (params.load.assignedDriverId && params.load.assignedDriverId !== params.driverId) {
-    await resetStatusIfIdle("driver", params.load.assignedDriverId);
-  }
-  if (params.load.truckId && params.load.truckId !== (params.truckId ?? null)) {
-    await resetStatusIfIdle("truck", params.load.truckId);
-  }
-  if (params.load.trailerId && params.load.trailerId !== (params.trailerId ?? null)) {
-    await resetStatusIfIdle("trailer", params.load.trailerId);
-  }
-
-  await Promise.all([
-    prisma.driver.update({ where: { id: params.driverId }, data: { status: DriverStatus.ON_LOAD } }),
-    params.truckId ? prisma.truck.update({ where: { id: params.truckId }, data: { status: TruckStatus.ASSIGNED } }) : Promise.resolve(null),
-    params.trailerId
-      ? prisma.trailer.update({ where: { id: params.trailerId }, data: { status: TrailerStatus.ASSIGNED } })
-      : Promise.resolve(null),
-  ]);
-
-  await createEvent({
-    orgId: params.orgId,
-    loadId: params.load.id,
-    userId: params.userId,
-    type: EventType.LOAD_ASSIGNED,
-    message: `Load ${params.load.loadNumber} assigned`,
-  });
-  await logAudit({
-    orgId: params.orgId,
-    userId: params.userId,
-    action: "LOAD_ASSIGNED",
-    entity: "Load",
-    entityId: params.load.id,
-    summary: `Assigned load ${params.load.loadNumber}`,
-    meta: { overrideReason: params.overrideReason ?? null },
-    before: {
-      assignedDriverId: params.load.assignedDriverId,
-      truckId: params.load.truckId,
-      trailerId: params.load.trailerId,
-    },
-    after: {
-      assignedDriverId: updatedLoad.assignedDriverId,
-      truckId: updatedLoad.truckId,
-      trailerId: updatedLoad.trailerId,
-    },
-  });
-
-  return updatedLoad;
-}
-
 const ONBOARDING_STEPS = [
   "basics",
   "operating",
@@ -720,8 +1424,9 @@ function normalizeOnboardingSteps(values: string[]) {
 }
 
 function calculateOnboardingPercent(completed: string[]) {
-  if (ONBOARDING_STEPS.length === 0) return 0;
-  return Math.round((completed.length / ONBOARDING_STEPS.length) * 100);
+  const totalSteps = Number(ONBOARDING_STEPS.length);
+  if (totalSteps <= 0) return 0;
+  return Math.round((completed.length / totalSteps) * 100);
 }
 
 async function upsertOnboardingState(params: {
@@ -907,6 +1612,7 @@ type DraftLoad = {
   loadNumber: string | null;
   status: string | null;
   loadType: string | null;
+  movementMode: string | null;
   customerName: string | null;
   customerRef: string | null;
   externalTripId: string | null;
@@ -949,6 +1655,7 @@ function normalizeLoadDraft(raw: any): DraftLoad {
     loadNumber: normalizeDraftText(raw?.loadNumber) || null,
     status: normalizeDraftText(raw?.status) || null,
     loadType: normalizeDraftText(raw?.loadType ?? raw?.type) || null,
+    movementMode: normalizeDraftText(raw?.movementMode ?? raw?.movementType) || null,
     customerName: normalizeDraftText(raw?.customerName ?? raw?.customer) || null,
     customerRef: normalizeDraftText(raw?.customerRef ?? raw?.custRef) || null,
     externalTripId: normalizeDraftText(raw?.externalTripId ?? raw?.trip) || null,
@@ -1146,8 +1853,18 @@ const setupLimiter = rateLimit({
 });
 
 app.get("/setup/status", async (_req, res) => {
-  const org = await prisma.organization.findFirst({ select: { id: true } });
-  res.json({ hasOrg: Boolean(org) });
+  try {
+    const org = await prisma.organization.findFirst({ select: { id: true } });
+    res.json({ hasOrg: Boolean(org) });
+  } catch (error) {
+    // Keep login/setup screen usable even if DB schema is not initialized yet.
+    const knownCode = (error as { code?: string })?.code;
+    if (knownCode === "P1001" || knownCode === "P1003" || knownCode === "P2021" || knownCode === "P2022") {
+      res.json({ hasOrg: false });
+      return;
+    }
+    sendServerError(res, "Failed to check setup status.", error);
+  }
 });
 
 app.post("/setup/validate", setupLimiter, async (req, res) => {
@@ -1484,57 +2201,61 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
     res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
     return;
   }
-  const email = normalizeEmail(parsed.data.email);
-  const users = await prisma.user.findMany({ where: { email } });
-  if (users.length !== 1) {
-    res.status(401).json({ error: "Invalid credentials" });
-    return;
+  try {
+    const email = normalizeEmail(parsed.data.email);
+    const users = await prisma.user.findMany({ where: { email } });
+    if (users.length !== 1) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
+    const user = users[0];
+    if (!user.isActive || user.status !== UserStatus.ACTIVE || !user.passwordHash) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
+    const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
+    if (!ok) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
+    const enforceMfa =
+      user.mfaEnforced || (((process.env.MFA_ENFORCE_ADMIN || "").toLowerCase() === "true") && user.role === "ADMIN");
+    if (user.mfaEnabled) {
+      const tempToken = await createMfaChallenge(user.id, MfaChallengePurpose.LOGIN);
+      res.json({ mfaRequired: true, tempToken });
+      return;
+    }
+    if (enforceMfa) {
+      const tempToken = await createMfaChallenge(user.id, MfaChallengePurpose.SETUP);
+      res.json({ mfaSetupRequired: true, tempToken });
+      return;
+    }
+    const ipAddress =
+      (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
+      req.socket.remoteAddress ||
+      null;
+    const userAgent = req.headers["user-agent"] || null;
+    const session = await createSession({ userId: user.id, ipAddress, userAgent: userAgent ? String(userAgent) : null });
+    setSessionCookie(res, session.token, session.expiresAt);
+    const csrfToken = createCsrfToken();
+    setCsrfCookie(res, csrfToken);
+    await prisma.user.updateMany({
+      where: { id: user.id, orgId: user.orgId },
+      data: { lastLoginAt: new Date() },
+    });
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        name: user.name,
+        permissions: user.permissions,
+      },
+      csrfToken,
+    });
+  } catch (error) {
+    sendServerError(res, "Unable to sign in.", error);
   }
-  const user = users[0];
-  if (!user.isActive || user.status !== UserStatus.ACTIVE || !user.passwordHash) {
-    res.status(401).json({ error: "Invalid credentials" });
-    return;
-  }
-  const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
-  if (!ok) {
-    res.status(401).json({ error: "Invalid credentials" });
-    return;
-  }
-  const enforceMfa =
-    user.mfaEnforced || (((process.env.MFA_ENFORCE_ADMIN || "").toLowerCase() === "true") && user.role === "ADMIN");
-  if (user.mfaEnabled) {
-    const tempToken = await createMfaChallenge(user.id, MfaChallengePurpose.LOGIN);
-    res.json({ mfaRequired: true, tempToken });
-    return;
-  }
-  if (enforceMfa) {
-    const tempToken = await createMfaChallenge(user.id, MfaChallengePurpose.SETUP);
-    res.json({ mfaSetupRequired: true, tempToken });
-    return;
-  }
-  const ipAddress =
-    (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
-    req.socket.remoteAddress ||
-    null;
-  const userAgent = req.headers["user-agent"] || null;
-  const session = await createSession({ userId: user.id, ipAddress, userAgent: userAgent ? String(userAgent) : null });
-  setSessionCookie(res, session.token, session.expiresAt);
-  const csrfToken = createCsrfToken();
-  setCsrfCookie(res, csrfToken);
-  await prisma.user.updateMany({
-    where: { id: user.id, orgId: user.orgId },
-    data: { lastLoginAt: new Date() },
-  });
-  res.json({
-    user: {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      name: user.name,
-      permissions: user.permissions,
-    },
-    csrfToken,
-  });
 });
 
 app.post("/auth/login/mfa", mfaLimiter, async (req, res) => {
@@ -1872,46 +2593,50 @@ app.post("/auth/mfa/disable", requireAuth, requireCsrf, mfaLimiter, async (req, 
   res.json({ ok: true });
 });
 
-app.get("/auth/me", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
-  const [org, userRecord] = await Promise.all([
-    prisma.organization.findFirst({
-      where: { id: req.user!.orgId },
-      select: {
-        id: true,
-        name: true,
-        settings: { select: { companyDisplayName: true, operatingMode: true } },
+app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
+  try {
+    const [org, userRecord] = await Promise.all([
+      prisma.organization.findFirst({
+        where: { id: req.user!.orgId },
+        select: {
+          id: true,
+          name: true,
+          settings: { select: { companyDisplayName: true, operatingMode: true } },
+        },
+      }),
+      prisma.user.findFirst({
+        where: { id: req.user!.id, orgId: req.user!.orgId },
+        select: { canSeeAllTeams: true, mfaEnabled: true, mfaEnforced: true },
+      }),
+    ]);
+    res.json({
+      user: {
+        ...req.user,
+        canSeeAllTeams: userRecord?.canSeeAllTeams ?? false,
+        mfaEnabled: userRecord?.mfaEnabled ?? false,
+        mfaEnforced: userRecord?.mfaEnforced ?? false,
       },
-    }),
-    prisma.user.findFirst({
-      where: { id: req.user!.id, orgId: req.user!.orgId },
-      select: { canSeeAllTeams: true, mfaEnabled: true, mfaEnforced: true },
-    }),
-  ]);
-  res.json({
-    user: {
-      ...req.user,
-      canSeeAllTeams: userRecord?.canSeeAllTeams ?? false,
-      mfaEnabled: userRecord?.mfaEnabled ?? false,
-      mfaEnforced: userRecord?.mfaEnforced ?? false,
-    },
-    org: org
-      ? {
-        id: org.id,
-          name: org.name,
-          companyDisplayName: org.settings?.companyDisplayName ?? null,
-          operatingMode: org.settings?.operatingMode ?? null,
-        }
-      : null,
-  });
+      org: org
+        ? {
+          id: org.id,
+            name: org.name,
+            companyDisplayName: org.settings?.companyDisplayName ?? null,
+            operatingMode: org.settings?.operatingMode ?? null,
+          }
+        : null,
+    });
+  } catch (error) {
+    sendServerError(res, "Unable to load session.", error);
+  }
 });
 
-app.get("/auth/csrf", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"), (req, res) => {
+app.get("/auth/csrf", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), (req, res) => {
   const csrfToken = createCsrfToken();
   setCsrfCookie(res, csrfToken);
   res.json({ csrfToken });
 });
 
-app.post("/auth/logout", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"), requireCsrf, async (req, res) => {
+app.post("/auth/logout", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), requireCsrf, async (req, res) => {
   const token = req.cookies?.session;
   if (token) {
     await destroySession(token);
@@ -2243,6 +2968,16 @@ app.get("/today", requireAuth, async (req, res) => {
     console.warn(`[today] Large scopedLoadIds (${scopedLoadIds.length}) for org ${orgId}.`);
   }
   const loadScopeFilter = teamScoped ? { id: { in: scopedLoadIds ?? [] } } : {};
+  const tripScopeFilter: Prisma.TripWhereInput =
+    teamScoped && scopedLoadIds
+      ? {
+          loads: {
+            some: {
+              loadId: { in: scopedLoadIds },
+            },
+          },
+        }
+      : {};
 
   const addBlock = (item: Omit<TodayItem, "severity">) => blocks.push({ severity: "block", ...item });
   const addWarning = (item: Omit<TodayItem, "severity">) => warnings.push({ severity: "warning", ...item });
@@ -2252,22 +2987,20 @@ app.get("/today", requireAuth, async (req, res) => {
     const [settings, unassignedCount, unassignedSample, rateConCount, rateConSample, activeAssignments, transitLoads] =
       await Promise.all([
         prisma.orgSettings.findFirst({ where: { orgId }, select: { requireRateConBeforeDispatch: true } }),
-        prisma.load.count({
+        prisma.trip.count({
           where: {
             orgId,
-            deletedAt: null,
-            ...loadScopeFilter,
-            status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
-            OR: [{ assignedDriverId: null }, { truckId: null }, { trailerId: null }],
+            ...tripScopeFilter,
+            status: { in: [TripStatus.PLANNED, TripStatus.ASSIGNED] },
+            OR: [{ driverId: null }, { truckId: null }, { trailerId: null }],
           },
         }),
-        prisma.load.findFirst({
+        prisma.trip.findFirst({
           where: {
             orgId,
-            deletedAt: null,
-            ...loadScopeFilter,
-            status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] },
-            OR: [{ assignedDriverId: null }, { truckId: null }, { trailerId: null }],
+            ...tripScopeFilter,
+            status: { in: [TripStatus.PLANNED, TripStatus.ASSIGNED] },
+            OR: [{ driverId: null }, { truckId: null }, { trailerId: null }],
           },
           select: { id: true },
         }),
@@ -2323,10 +3056,10 @@ app.get("/today", requireAuth, async (req, res) => {
       warningSummary.dispatch_unassigned_loads = unassignedCount;
       addWarning({
         ruleId: "dispatch_unassigned_loads",
-        title: "Unassigned loads need coverage",
-        detail: `${unassignedCount} load${unassignedCount === 1 ? "" : "s"} missing driver, truck, or trailer.`,
-        href: "/dispatch",
-        entityType: "load",
+        title: "Unassigned trips need coverage",
+        detail: `${unassignedCount} trip${unassignedCount === 1 ? "" : "s"} missing driver, truck, or trailer.`,
+        href: "/trips",
+        entityType: "trip",
         entityId: unassignedSample?.id ?? null,
       });
     }
@@ -2343,23 +3076,36 @@ app.get("/today", requireAuth, async (req, res) => {
     }
 
     if (activeAssignments.length > 1) {
-      const driverMap = new Map<string, string[]>();
-      const truckMap = new Map<string, string[]>();
-      const trailerMap = new Map<string, string[]>();
+      const tripLoads = await prisma.tripLoad.findMany({
+        where: { orgId, loadId: { in: activeAssignments.map((load) => load.id) } },
+        select: { loadId: true, tripId: true },
+      });
+      const loadToTripId = new Map(tripLoads.map((item) => [item.loadId, item.tripId]));
+      const driverSlots = new Map<string, Set<string>>();
+      const truckSlots = new Map<string, Set<string>>();
+      const trailerSlots = new Map<string, Set<string>>();
       for (const load of activeAssignments) {
+        const tripId = loadToTripId.get(load.id);
+        const slotKey = tripId ? `trip:${tripId}` : `load:${load.id}`;
         if (load.assignedDriverId) {
-          driverMap.set(load.assignedDriverId, [...(driverMap.get(load.assignedDriverId) ?? []), load.loadNumber]);
+          const slots = driverSlots.get(load.assignedDriverId) ?? new Set<string>();
+          slots.add(slotKey);
+          driverSlots.set(load.assignedDriverId, slots);
         }
         if (load.truckId) {
-          truckMap.set(load.truckId, [...(truckMap.get(load.truckId) ?? []), load.loadNumber]);
+          const slots = truckSlots.get(load.truckId) ?? new Set<string>();
+          slots.add(slotKey);
+          truckSlots.set(load.truckId, slots);
         }
         if (load.trailerId) {
-          trailerMap.set(load.trailerId, [...(trailerMap.get(load.trailerId) ?? []), load.loadNumber]);
+          const slots = trailerSlots.get(load.trailerId) ?? new Set<string>();
+          slots.add(slotKey);
+          trailerSlots.set(load.trailerId, slots);
         }
       }
-      const driverConflicts = [...driverMap.values()].filter((loads) => loads.length > 1).length;
-      const truckConflicts = [...truckMap.values()].filter((loads) => loads.length > 1).length;
-      const trailerConflicts = [...trailerMap.values()].filter((loads) => loads.length > 1).length;
+      const driverConflicts = [...driverSlots.values()].filter((slots) => slots.size > 1).length;
+      const truckConflicts = [...truckSlots.values()].filter((slots) => slots.size > 1).length;
+      const trailerConflicts = [...trailerSlots.values()].filter((slots) => slots.size > 1).length;
       const conflictParts = [];
       if (driverConflicts > 0) conflictParts.push(`${driverConflicts} driver${driverConflicts === 1 ? "" : "s"}`);
       if (truckConflicts > 0) conflictParts.push(`${truckConflicts} truck${truckConflicts === 1 ? "" : "s"}`);
@@ -2368,7 +3114,7 @@ app.get("/today", requireAuth, async (req, res) => {
         addBlock({
           ruleId: "dispatch_assignment_conflicts",
           title: "Assignment conflicts detected",
-          detail: `${conflictParts.join(", ")} double-booked across active loads.`,
+          detail: `${conflictParts.join(", ")} double-booked across active trips.`,
           href: "/dispatch",
           entityType: "dispatch",
           entityId: activeAssignments[0]?.id ?? null,
@@ -2388,9 +3134,9 @@ app.get("/today", requireAuth, async (req, res) => {
       warningSummary.dispatch_stuck_in_transit = stuckLoads.length;
       addWarning({
         ruleId: "dispatch_stuck_in_transit",
-        title: "Loads stuck in transit",
-        detail: `${stuckLoads.length} load${stuckLoads.length === 1 ? "" : "s"} with no recent stop activity.`,
-        href: "/loads",
+        title: "Trips stuck in transit",
+        detail: `${stuckLoads.length} dispatch run${stuckLoads.length === 1 ? "" : "s"} with no recent stop activity.`,
+        href: "/trips",
         entityType: "load",
         entityId: stuckLoads[0]?.id ?? null,
       });
@@ -2650,6 +3396,8 @@ app.get("/today/warnings/details", requireAuth, async (req, res) => {
   let loads: Array<{
     id: string;
     loadNumber?: string | null;
+    tripId?: string | null;
+    tripNumber?: string | null;
     customerName?: string | null;
     status?: string | null;
     warningReason: string;
@@ -2682,6 +3430,17 @@ app.get("/today/warnings/details", requireAuth, async (req, res) => {
         trailerId: true,
         createdAt: true,
         driver: { select: { name: true } },
+        tripLoads: {
+          take: 1,
+          select: {
+            trip: {
+              select: {
+                id: true,
+                tripNumber: true,
+              },
+            },
+          },
+        },
         stops: { select: { type: true, city: true, state: true, arrivedAt: true, departedAt: true, sequence: true } },
       },
     });
@@ -2703,6 +3462,8 @@ app.get("/today/warnings/details", requireAuth, async (req, res) => {
       return {
         id: load.id,
         loadNumber: load.loadNumber ?? null,
+        tripId: load.tripLoads[0]?.trip?.id ?? null,
+        tripNumber: load.tripLoads[0]?.trip?.tripNumber ?? null,
         customerName: load.customerName ?? null,
         status: load.status ?? null,
         warningReason: missing.length ? `Missing ${missing.join(", ")}` : WARNING_TYPE_MAP.dispatch_unassigned_loads.reason,
@@ -2731,6 +3492,17 @@ app.get("/today/warnings/details", requireAuth, async (req, res) => {
         status: true,
         createdAt: true,
         driver: { select: { name: true } },
+        tripLoads: {
+          take: 1,
+          select: {
+            trip: {
+              select: {
+                id: true,
+                tripNumber: true,
+              },
+            },
+          },
+        },
         stops: { select: { type: true, city: true, state: true, arrivedAt: true, departedAt: true, sequence: true } },
       },
     });
@@ -2756,6 +3528,8 @@ app.get("/today/warnings/details", requireAuth, async (req, res) => {
       return {
         id: load.id,
         loadNumber: load.loadNumber ?? null,
+        tripId: load.tripLoads[0]?.trip?.id ?? null,
+        tripNumber: load.tripLoads[0]?.trip?.tripNumber ?? null,
         customerName: load.customerName ?? null,
         status: load.status ?? null,
         warningReason: WARNING_TYPE_MAP.dispatch_stuck_in_transit.reason,
@@ -2863,7 +3637,15 @@ app.get("/admin/attention-tuning", requireAuth, requireRole("ADMIN"), async (req
     const ruleId = String(input?.ruleId ?? "unknown");
     const outcome = String(corrected?.outcome ?? "");
     const entry =
-      statsByRule.get(ruleId) ?? { total: 0, fixed: 0, ignored: 0, snoozed: 0, times: [], severity: input?.severity };
+      statsByRule.get(ruleId) ??
+      ({ total: 0, fixed: 0, ignored: 0, snoozed: 0, times: [] as number[], severity: input?.severity } as {
+        total: number;
+        fixed: number;
+        ignored: number;
+        snoozed: number;
+        times: number[];
+        severity?: string;
+      });
     entry.total += 1;
     if (outcome === "FIXED") entry.fixed += 1;
     if (outcome === "IGNORED") entry.ignored += 1;
@@ -2901,7 +3683,7 @@ app.get("/admin/attention-tuning", requireAuth, requireRole("ADMIN"), async (req
   res.json({ suggestions });
 });
 
-app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
+app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
   try {
     const archived = parseBooleanParam(typeof req.query.archived === "string" ? req.query.archived : undefined);
     const { where } = buildLoadFilters(req, { archived });
@@ -3014,6 +3796,24 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
               },
             },
             legs: { select: { status: true } },
+            tripLoads: {
+              take: 1,
+              select: {
+                trip: {
+                  select: {
+                    id: true,
+                    tripNumber: true,
+                    status: true,
+                    driverId: true,
+                    truckId: true,
+                    trailerId: true,
+                    driver: { select: { id: true, name: true } },
+                    truck: { select: { id: true, unit: true } },
+                    trailer: { select: { id: true, unit: true } },
+                  },
+                },
+              },
+            },
             trackingSessions: {
               where: { status: "ON" },
               orderBy: { startedAt: "desc" },
@@ -3035,6 +3835,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
 
       const now = Date.now();
       const items = rows.map((load) => {
+        const primaryTrip = load.tripLoads[0]?.trip ?? null;
         const shipper = load.stops.find((stop) => stop.type === StopType.PICKUP);
         const consignee = load.stops.slice().reverse().find((stop) => stop.type === StopType.DELIVERY);
         const nextStop = load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ?? null;
@@ -3055,7 +3856,11 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
           !nextStop?.arrivedAt;
         const trackingOff = load.status === LoadStatus.IN_TRANSIT && trackingState === "OFF";
         const needsAssign =
-          !load.assignedDriverId || !load.truck?.id || load.status === LoadStatus.PLANNED || load.status === LoadStatus.DRAFT;
+          !primaryTrip ||
+          !primaryTrip.driverId ||
+          !primaryTrip.truckId ||
+          !primaryTrip.trailerId ||
+          primaryTrip.status === TripStatus.PLANNED;
         const atRiskFlag = trackingOff || overdueStop;
         const nextStopTime = nextStop?.appointmentStart ?? nextStop?.appointmentEnd ?? null;
         const legSummary = {
@@ -3070,10 +3875,17 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
           rate: load.rate,
           miles: load.miles,
           assignment: {
-            driver: load.driver,
-            truck: load.truck,
-            trailer: load.trailer,
+            driver: primaryTrip?.driver ?? load.driver,
+            truck: primaryTrip?.truck ?? load.truck,
+            trailer: primaryTrip?.trailer ?? load.trailer,
           },
+          trip: primaryTrip
+            ? {
+                id: primaryTrip.id,
+                tripNumber: primaryTrip.tripNumber,
+                status: primaryTrip.status,
+              }
+            : null,
           operatingEntity: load.operatingEntity,
           route: {
             shipperCity: shipper?.city ?? null,
@@ -3141,6 +3953,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
           loadNumber: true,
           status: true,
           loadType: true,
+          movementMode: true,
           customerName: true,
           customerRef: true,
           bolNumber: true,
@@ -3149,6 +3962,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
           palletCount: true,
           weightLbs: true,
           miles: true,
+          paidMiles: true,
           rate: true,
           plannedAt: true,
           deliveredAt: true,
@@ -3229,6 +4043,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
         loadNumber: load.loadNumber,
         status: load.status,
         loadType: load.loadType,
+        movementMode: load.movementMode,
         customerName: load.customerName,
         customerRef: load.customerRef,
         bolNumber: load.bolNumber,
@@ -3237,6 +4052,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), as
         palletCount: load.palletCount,
         weightLbs: load.weightLbs,
         miles: load.miles,
+        paidMiles: load.paidMiles,
         rate: load.rate,
         plannedAt: load.plannedAt,
         deliveredAt: load.deliveredAt,
@@ -3672,7 +4488,7 @@ app.get("/loads/export", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLIN
   }
 });
 
-app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
+app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
   const [loadResult, settings] = await Promise.all([
     prisma.load.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId },
@@ -3693,6 +4509,14 @@ app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING")
           },
         },
         invoices: true,
+        loadNotes: {
+          where: { deletedAt: null },
+          orderBy: { createdAt: "desc" },
+          include: {
+            createdBy: { select: { id: true, name: true, role: true } },
+            deletedBy: { select: { id: true, name: true, role: true } },
+          },
+        },
       },
     }),
     prisma.orgSettings.findFirst({
@@ -3733,6 +4557,140 @@ app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING")
   res.json({ load, settings, billingReadiness });
 });
 
+app.post(
+  "/loads/:id/notes",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      text: z.string().trim().min(1).max(1000),
+      visibility: z.nativeEnum(LoadNoteVisibility).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: { id: true, loadNumber: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user!, loadId: load.id }))) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    const note = await prisma.loadNote.create({
+      data: {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        text: parsed.data.text.trim(),
+        visibility: parsed.data.visibility ?? LoadNoteVisibility.NORMAL,
+        source: LoadNoteSource.OPS,
+        createdById: req.user!.id,
+      },
+      include: { createdBy: { select: { id: true, name: true, role: true } } },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "LOAD_NOTE_CREATED",
+      entity: "Load",
+      entityId: load.id,
+      summary: `Load note added on ${load.loadNumber}`,
+      meta: { loadNoteId: note.id, visibility: note.visibility },
+    });
+    res.json({ note });
+  }
+);
+
+app.delete(
+  "/loads/:id/notes/:noteId",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      reason: z.string().trim().max(500).optional(),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: { id: true, loadNumber: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user!, loadId: load.id }))) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    const note = await prisma.loadNote.findFirst({
+      where: {
+        id: req.params.noteId,
+        orgId: req.user!.orgId,
+        loadId: load.id,
+      },
+      select: {
+        id: true,
+        text: true,
+        visibility: true,
+        createdById: true,
+        deletedAt: true,
+      },
+    });
+    if (!note) {
+      res.status(404).json({ error: "Note not found" });
+      return;
+    }
+    if (note.deletedAt) {
+      res.json({ ok: true });
+      return;
+    }
+    const canDeleteLocked = canDeleteLockedLoadNote(req.user!.role);
+    if (note.visibility === LoadNoteVisibility.LOCKED && !canDeleteLocked) {
+      res.status(403).json({ error: "Only admin or head dispatcher can delete locked notes" });
+      return;
+    }
+    if (note.visibility === LoadNoteVisibility.NORMAL && note.createdById !== req.user!.id && !canDeleteLocked) {
+      res.status(403).json({ error: "You can only delete notes you created" });
+      return;
+    }
+    const reason = parsed.data.reason?.trim() || null;
+    if (note.visibility === LoadNoteVisibility.LOCKED && !reason) {
+      res.status(400).json({ error: "Reason is required to delete locked notes" });
+      return;
+    }
+    await prisma.loadNote.update({
+      where: { id: note.id },
+      data: {
+        deletedAt: new Date(),
+        deletedById: req.user!.id,
+        deleteReason: reason,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "LOAD_NOTE_DELETED",
+      entity: "Load",
+      entityId: load.id,
+      summary: `Load note deleted on ${load.loadNumber}`,
+      meta: { loadNoteId: note.id, visibility: note.visibility, reason },
+    });
+    res.json({ ok: true });
+  }
+);
+
 app.post("/loads/:id/delete", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
     reason: z.string().min(3, "Reason required"),
@@ -3771,7 +4729,7 @@ app.post("/loads/:id/delete", requireAuth, requireCsrf, requireRole("ADMIN"), as
         nextStatus: LoadStatus.CANCELLED,
         userId: req.user!.id,
         orgId: req.user!.orgId,
-        role: req.user!.role,
+        role: req.user!.role as Role,
         overrideReason: reason,
         data: assignmentReset,
         message: `Load ${load.loadNumber} cancelled (deleted)`,
@@ -4076,7 +5034,8 @@ app.post(
       res.status(400).json({ error: "Amount required" });
       return;
     }
-    const requiresProofDefault = [AccessorialType.LUMPER, AccessorialType.DETENTION].includes(parsed.data.type);
+    const requiresProofTypes: AccessorialType[] = [AccessorialType.LUMPER, AccessorialType.DETENTION];
+    const requiresProofDefault = requiresProofTypes.includes(parsed.data.type);
     const requiresProof = parsed.data.requiresProof ?? requiresProofDefault;
     const status = requiresProof ? AccessorialStatus.NEEDS_PROOF : AccessorialStatus.PENDING_APPROVAL;
     const accessorial = await prisma.accessorial.create({
@@ -4319,6 +5278,23 @@ app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.
         },
         assignmentMembers: {
           include: { driver: { select: { id: true, name: true } } },
+        },
+        tripLoads: {
+          include: {
+            trip: {
+              select: {
+                id: true,
+                tripNumber: true,
+                status: true,
+                movementMode: true,
+                driverId: true,
+                truckId: true,
+                trailerId: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 1,
         },
         docs: {
           where: { type: { in: [DocType.POD, DocType.RATECON, DocType.RATE_CONFIRMATION] } },
@@ -4765,6 +5741,7 @@ app.post(
         ? "BROKER"
         : "COMPANY";
     const loadType = mapLoadTypeForInput(draft.loadType);
+    const movementMode = mapMovementModeForInput(draft.movementMode);
 
     const pickupStop = draft.stops.find((stop) => stop.type === "PICKUP") ?? draft.stops[0];
     const deliveryStop =
@@ -4794,6 +5771,7 @@ app.post(
           tripNumber: assignedTripNumber,
           status: statusMapped,
           loadType,
+          movementMode,
           businessType,
           operatingEntityId: operatingEntity.id,
           customerId,
@@ -5002,24 +5980,6 @@ app.post("/loads/:id/legs", requireAuth, requireCsrf, requirePermission(Permissi
     include: { driver: true, truck: true, trailer: true },
   });
 
-  if (parsed.data.setActive && parsed.data.driverId) {
-    try {
-      await applyLoadAssignment({
-        load,
-        driverId: parsed.data.driverId,
-        truckId: parsed.data.truckId ?? null,
-        trailerId: parsed.data.trailerId ?? null,
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        role: req.user!.role as Role,
-        overrideReason: parsed.data.overrideReason,
-      });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-      return;
-    }
-  }
-
   await logAudit({
     orgId: req.user!.orgId,
     userId: req.user!.id,
@@ -5096,24 +6056,6 @@ app.post("/legs/:id/assign", requireAuth, requireCsrf, requirePermission(Permiss
     include: { driver: true, truck: true, trailer: true },
   });
 
-  if (parsed.data.setActive && parsed.data.driverId) {
-    try {
-      await applyLoadAssignment({
-        load: leg.load,
-        driverId: parsed.data.driverId,
-        truckId: parsed.data.truckId ?? null,
-        trailerId: parsed.data.trailerId ?? null,
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        role: req.user!.role as Role,
-        overrideReason: parsed.data.overrideReason,
-      });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-      return;
-    }
-  }
-
   await logAudit({
     orgId: req.user!.orgId,
     userId: req.user!.id,
@@ -5167,24 +6109,6 @@ app.post("/legs/:id/status", requireAuth, requireCsrf, requirePermission(Permiss
     include: { driver: true, truck: true, trailer: true },
   });
 
-  if (parsed.data.status === "IN_PROGRESS" && leg.driverId) {
-    try {
-      await applyLoadAssignment({
-        load: leg.load,
-        driverId: leg.driverId,
-        truckId: leg.truckId ?? null,
-        trailerId: leg.trailerId ?? null,
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        role: req.user!.role as Role,
-        overrideReason: parsed.data.overrideReason,
-      });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-      return;
-    }
-  }
-
   await logAudit({
     orgId: req.user!.orgId,
     userId: req.user!.id,
@@ -5196,6 +6120,832 @@ app.post("/legs/:id/status", requireAuth, requireCsrf, requirePermission(Permiss
 
   res.json({ leg: updated });
 });
+
+app.get(
+  "/trips",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const statusRaw = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
+    const movementRaw =
+      typeof req.query.movementMode === "string" ? req.query.movementMode.trim().toUpperCase() : "";
+
+    const where: Prisma.TripWhereInput = { orgId: req.user!.orgId };
+    if ((Object.values(TripStatus) as string[]).includes(statusRaw)) {
+      where.status = statusRaw as TripStatus;
+    }
+    if ((Object.values(MovementMode) as string[]).includes(movementRaw)) {
+      where.movementMode = movementRaw as MovementMode;
+    }
+    if (search) {
+      where.OR = [
+        { tripNumber: { contains: search, mode: "insensitive" } },
+        { origin: { contains: search, mode: "insensitive" } },
+        { destination: { contains: search, mode: "insensitive" } },
+        { loads: { some: { load: { loadNumber: { contains: search, mode: "insensitive" } } } } },
+        { loads: { some: { load: { customerName: { contains: search, mode: "insensitive" } } } } },
+      ];
+    }
+
+    const [trips, total] = await Promise.all([
+      prisma.trip.findMany({
+        where,
+        include: TRIP_INCLUDE,
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
+      prisma.trip.count({ where }),
+    ]);
+    res.json({ total, trips });
+  }
+);
+
+app.get(
+  "/trips/:id",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: TRIP_INCLUDE,
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+    res.json({ trip });
+  }
+);
+
+app.get(
+  "/trips/:id/cargo-plan",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: getTripCargoInclude(),
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+    const payload = buildTripCargoPlanResponse(trip);
+    const canMutateRole = ["ADMIN", "DISPATCHER", "HEAD_DISPATCHER"].includes(req.user!.role);
+    res.json({ ...payload, canEdit: payload.canEdit && canMutateRole });
+  }
+);
+
+app.post(
+  "/trips/:id/cargo-plan/sync",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    try {
+      const trip = await syncTripCargoPlan(req.params.id, req.user!.orgId);
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "TRIP_CARGO_PLAN_SYNCED",
+        entity: "Trip",
+        entityId: req.params.id,
+        summary: `Synced cargo plan for trip ${trip.tripNumber}`,
+        meta: {
+          sourceManifestId: trip.sourceManifest?.id ?? null,
+          loadCount: trip.loads.length,
+        },
+      });
+      res.json({ trip, ...buildTripCargoPlanResponse(trip) });
+    } catch (error) {
+      const message = (error as Error).message || "Unable to sync cargo plan";
+      if (message === "Trip not found") {
+        res.status(404).json({ error: message });
+        return;
+      }
+      res.status(400).json({ error: message });
+    }
+  }
+);
+
+app.post(
+  "/trips",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      tripNumber: z.string().trim().min(2).optional(),
+      movementMode: z.nativeEnum(MovementMode).optional(),
+      status: z.nativeEnum(TripStatus).optional(),
+      driverId: z.string().optional().nullable(),
+      truckId: z.string().optional().nullable(),
+      trailerId: z.string().optional().nullable(),
+      origin: z.string().trim().optional().nullable(),
+      destination: z.string().trim().optional().nullable(),
+      plannedDepartureAt: z.string().optional().nullable(),
+      plannedArrivalAt: z.string().optional().nullable(),
+      loadNumbers: z.array(z.string()).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const loadNumbers = (parsed.data.loadNumbers ?? []).map((item) => item.trim()).filter(Boolean);
+    const loads = loadNumbers.length
+      ? await prisma.load.findMany({
+          where: { orgId: req.user!.orgId, loadNumber: { in: loadNumbers } },
+          select: { id: true, loadNumber: true },
+        })
+      : [];
+    const loadMap = new Map(loads.map((load) => [load.loadNumber, load]));
+    const missingLoadNumbers = loadNumbers.filter((num) => !loadMap.has(num));
+    if (missingLoadNumbers.length) {
+      res.status(400).json({ error: "Some loads were not found", missingLoadNumbers });
+      return;
+    }
+
+    const [driver, truck, trailer] = await Promise.all([
+      parsed.data.driverId
+        ? prisma.driver.findFirst({ where: { id: parsed.data.driverId, orgId: req.user!.orgId }, select: { id: true } })
+        : Promise.resolve(null),
+      parsed.data.truckId
+        ? prisma.truck.findFirst({ where: { id: parsed.data.truckId, orgId: req.user!.orgId }, select: { id: true } })
+        : Promise.resolve(null),
+      parsed.data.trailerId
+        ? prisma.trailer.findFirst({
+            where: { id: parsed.data.trailerId, orgId: req.user!.orgId },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+    if (parsed.data.driverId && !driver) {
+      res.status(400).json({ error: "Driver not found" });
+      return;
+    }
+    if (parsed.data.truckId && !truck) {
+      res.status(400).json({ error: "Truck not found" });
+      return;
+    }
+    if (parsed.data.trailerId && !trailer) {
+      res.status(400).json({ error: "Trailer not found" });
+      return;
+    }
+
+    const conflicts = loads.length
+      ? await prisma.tripLoad.findMany({
+          where: { orgId: req.user!.orgId, loadId: { in: loads.map((load) => load.id) } },
+          include: {
+            load: { select: { loadNumber: true } },
+            trip: { select: { id: true, tripNumber: true } },
+          },
+        })
+      : [];
+    if (conflicts.length > 0) {
+      res.status(409).json({
+        error: "One or more loads are already assigned to another trip",
+        conflicts: conflicts.map((conflict) => ({
+          loadNumber: conflict.load.loadNumber,
+          tripId: conflict.tripId,
+          tripNumber: conflict.trip.tripNumber,
+        })),
+      });
+      return;
+    }
+
+    let tripNumber = parsed.data.tripNumber?.trim() || "";
+    if (tripNumber) {
+      const existing = await prisma.trip.findFirst({
+        where: { orgId: req.user!.orgId, tripNumber },
+        select: { id: true },
+      });
+      if (existing) {
+        const sequence = await getOrgSequence(req.user!.orgId);
+        res.status(409).json({
+          error: `Trip number already exists. Next suggested is ${sequence.tripPrefix}${sequence.nextTripNumber}.`,
+          suggestedTripNumber: `${sequence.tripPrefix}${sequence.nextTripNumber}`,
+        });
+        return;
+      }
+    } else {
+      tripNumber = await allocateTripNumberOnly(req.user!.orgId);
+    }
+
+    const trip = await prisma.trip.create({
+      data: {
+        orgId: req.user!.orgId,
+        tripNumber,
+        status: parsed.data.status ?? TripStatus.PLANNED,
+        movementMode: parsed.data.movementMode ?? MovementMode.FTL,
+        driverId: parsed.data.driverId ?? null,
+        truckId: parsed.data.truckId ?? null,
+        trailerId: parsed.data.trailerId ?? null,
+        origin: parsed.data.origin?.trim() || null,
+        destination: parsed.data.destination?.trim() || null,
+        plannedDepartureAt: parsed.data.plannedDepartureAt ? new Date(parsed.data.plannedDepartureAt) : null,
+        plannedArrivalAt: parsed.data.plannedArrivalAt ? new Date(parsed.data.plannedArrivalAt) : null,
+        loads: {
+          create: loads.map((load, index) => ({
+            orgId: req.user!.orgId,
+            loadId: load.id,
+            sequence: index + 1,
+          })),
+        },
+      },
+      include: TRIP_INCLUDE,
+    });
+
+    await applyTripAssignmentToLoads({
+      orgId: req.user!.orgId,
+      loadIds: loads.map((load) => load.id),
+      driverId: trip.driverId,
+      truckId: trip.truckId,
+      trailerId: trip.trailerId,
+      tripStatus: trip.status,
+    });
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: trip.id,
+      previous: { status: TripStatus.CANCELLED, driverId: null, truckId: null, trailerId: null },
+      next: { status: trip.status, driverId: trip.driverId, truckId: trip.truckId, trailerId: trip.trailerId },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_CREATED",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: `Created trip ${trip.tripNumber} with ${trip.loads.length} loads`,
+      meta: { tripNumber: trip.tripNumber, loadNumbers },
+    });
+
+    res.json({ trip, missingLoadNumbers });
+  }
+);
+
+app.post(
+  "/trips/:id/loads",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      loadNumbers: z.array(z.string()).min(1),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { loads: { select: { loadId: true } } },
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+    if (!TRIP_EDITABLE_STATUSES.includes(trip.status)) {
+      res.status(400).json({ error: "Cannot change trip loads after dispatch has started" });
+      return;
+    }
+
+    const loadNumbers = parsed.data.loadNumbers.map((value) => value.trim()).filter(Boolean);
+    const loads = await prisma.load.findMany({
+      where: { orgId: req.user!.orgId, loadNumber: { in: loadNumbers } },
+      select: { id: true, loadNumber: true },
+    });
+    const loadMap = new Map(loads.map((load) => [load.loadNumber, load]));
+    const missingLoadNumbers = loadNumbers.filter((num) => !loadMap.has(num));
+
+    const existingLoadIds = new Set(trip.loads.map((item) => item.loadId));
+    const conflicts = await prisma.tripLoad.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        loadId: { in: loads.map((load) => load.id) },
+        tripId: { not: trip.id },
+      },
+      include: { load: { select: { loadNumber: true } }, trip: { select: { id: true, tripNumber: true } } },
+    });
+    if (conflicts.length > 0) {
+      res.status(409).json({
+        error: "Some loads are already assigned to another trip",
+        conflicts: conflicts.map((conflict) => ({
+          loadNumber: conflict.load.loadNumber,
+          tripId: conflict.tripId,
+          tripNumber: conflict.trip.tripNumber,
+        })),
+      });
+      return;
+    }
+
+    const newLoads = loads.filter((load) => !existingLoadIds.has(load.id));
+    const nextSequence = trip.loads.length + 1;
+    if (newLoads.length) {
+      await prisma.tripLoad.createMany({
+        data: newLoads.map((load, index) => ({
+          orgId: req.user!.orgId,
+          tripId: trip.id,
+          loadId: load.id,
+          sequence: nextSequence + index,
+        })),
+        skipDuplicates: true,
+      });
+      await applyTripAssignmentToLoads({
+        orgId: req.user!.orgId,
+        loadIds: newLoads.map((load) => load.id),
+        driverId: trip.driverId,
+        truckId: trip.truckId,
+        trailerId: trip.trailerId,
+        tripStatus: trip.status,
+      });
+      if (trip.sourceManifestId) {
+        await prisma.trailerManifestItem.createMany({
+          data: newLoads.map((load) => ({ manifestId: trip.sourceManifestId!, loadId: load.id })),
+          skipDuplicates: true,
+        });
+      }
+    }
+
+    const updated = await prisma.trip.findFirst({
+      where: { id: trip.id, orgId: req.user!.orgId },
+      include: TRIP_INCLUDE,
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_LOADS_UPDATED",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: `Added ${newLoads.length} loads to trip ${trip.tripNumber}`,
+      meta: { addedLoadNumbers: newLoads.map((load) => load.loadNumber) },
+    });
+    res.json({ trip: updated, missingLoadNumbers });
+  }
+);
+
+app.post(
+  "/trips/:id/split-load",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z
+      .object({
+        loadId: z.string().trim().min(1).optional(),
+        loadNumber: z.string().trim().min(1).optional(),
+      })
+      .refine((value) => Boolean(value.loadId || value.loadNumber), {
+        message: "Provide loadId or loadNumber",
+      });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: {
+        loads: {
+          orderBy: { sequence: "asc" },
+          include: {
+            load: { select: { id: true, loadNumber: true } },
+          },
+        },
+      },
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+    if (!isConsolidationMovementMode(trip.movementMode)) {
+      res.status(400).json({ error: "Split is only available for LTL and Pool Distribution trips" });
+      return;
+    }
+    if (!TRIP_EDITABLE_STATUSES.includes(trip.status)) {
+      res.status(400).json({ error: "Cannot split loads after dispatch has started" });
+      return;
+    }
+    if (trip.loads.length <= 1) {
+      res.status(400).json({ error: "Trip must contain at least two loads to split" });
+      return;
+    }
+
+    const target = trip.loads.find((item) => {
+      if (parsed.data.loadId) return item.loadId === parsed.data.loadId;
+      return item.load.loadNumber.toLowerCase() === (parsed.data.loadNumber ?? "").toLowerCase();
+    });
+    if (!target) {
+      res.status(404).json({ error: "Load not found on this trip" });
+      return;
+    }
+
+    const splitTripNumber = await allocateTripNumberOnly(req.user!.orgId);
+    const result = await prisma.$transaction(async (tx) => {
+      const splitTrip = await tx.trip.create({
+        data: {
+          orgId: req.user!.orgId,
+          tripNumber: splitTripNumber,
+          status: TripStatus.PLANNED,
+          movementMode: trip.movementMode,
+          origin: trip.origin ?? null,
+          destination: trip.destination ?? null,
+          plannedDepartureAt: trip.plannedDepartureAt ?? null,
+          plannedArrivalAt: trip.plannedArrivalAt ?? null,
+          loads: {
+            create: [{ orgId: req.user!.orgId, loadId: target.loadId, sequence: 1 }],
+          },
+        },
+      });
+
+      await tx.tripLoad.deleteMany({
+        where: { tripId: trip.id, loadId: target.loadId },
+      });
+      const remainingLoads = await tx.tripLoad.findMany({
+        where: { tripId: trip.id },
+        orderBy: { sequence: "asc" },
+      });
+      for (const [index, tripLoad] of remainingLoads.entries()) {
+        await tx.tripLoad.update({
+          where: { id: tripLoad.id },
+          data: { sequence: index + 1 },
+        });
+      }
+
+      if (trip.sourceManifestId) {
+        await tx.trailerManifestItem.deleteMany({
+          where: { manifestId: trip.sourceManifestId, loadId: target.loadId },
+        });
+      }
+
+      await tx.load.update({
+        where: { id: target.loadId },
+        data: {
+          assignedDriverId: null,
+          truckId: null,
+          trailerId: null,
+          assignedDriverAt: null,
+          assignedTruckAt: null,
+          assignedTrailerAt: null,
+          status: LoadStatus.PLANNED,
+        },
+      });
+
+      const [updatedTrip, createdTrip] = await Promise.all([
+        tx.trip.findFirst({
+          where: { id: trip.id, orgId: req.user!.orgId },
+          include: TRIP_INCLUDE,
+        }),
+        tx.trip.findFirst({
+          where: { id: splitTrip.id, orgId: req.user!.orgId },
+          include: TRIP_INCLUDE,
+        }),
+      ]);
+
+      if (!updatedTrip || !createdTrip) {
+        throw new Error("Unable to load split result");
+      }
+
+      return { updatedTrip, createdTrip };
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_LOAD_SPLIT",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: `Split load ${target.load.loadNumber} from trip ${trip.tripNumber}`,
+      meta: {
+        sourceTripId: trip.id,
+        sourceTripNumber: trip.tripNumber,
+        splitTripId: result.createdTrip.id,
+        splitTripNumber: result.createdTrip.tripNumber,
+        loadNumber: target.load.loadNumber,
+      },
+    });
+
+    res.json({
+      trip: result.updatedTrip,
+      splitTrip: result.createdTrip,
+      splitLoadNumber: target.load.loadNumber,
+    });
+  }
+);
+
+app.post(
+  "/trips/:id/assign",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      driverId: z.string().optional().nullable(),
+      truckId: z.string().optional().nullable(),
+      trailerId: z.string().optional().nullable(),
+      status: z.nativeEnum(TripStatus).optional(),
+      plannedDepartureAt: z.string().optional().nullable(),
+      plannedArrivalAt: z.string().optional().nullable(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { loads: { select: { loadId: true } } },
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+
+    const hasDriver = Object.prototype.hasOwnProperty.call(parsed.data, "driverId");
+    const hasTruck = Object.prototype.hasOwnProperty.call(parsed.data, "truckId");
+    const hasTrailer = Object.prototype.hasOwnProperty.call(parsed.data, "trailerId");
+
+    const [driver, truck, trailer] = await Promise.all([
+      hasDriver && parsed.data.driverId
+        ? prisma.driver.findFirst({ where: { id: parsed.data.driverId, orgId: req.user!.orgId }, select: { id: true } })
+        : Promise.resolve(null),
+      hasTruck && parsed.data.truckId
+        ? prisma.truck.findFirst({ where: { id: parsed.data.truckId, orgId: req.user!.orgId }, select: { id: true } })
+        : Promise.resolve(null),
+      hasTrailer && parsed.data.trailerId
+        ? prisma.trailer.findFirst({
+            where: { id: parsed.data.trailerId, orgId: req.user!.orgId },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+    if (hasDriver && parsed.data.driverId && !driver) {
+      res.status(400).json({ error: "Driver not found" });
+      return;
+    }
+    if (hasTruck && parsed.data.truckId && !truck) {
+      res.status(400).json({ error: "Truck not found" });
+      return;
+    }
+    if (hasTrailer && parsed.data.trailerId && !trailer) {
+      res.status(400).json({ error: "Trailer not found" });
+      return;
+    }
+
+    const now = new Date();
+    const status = parsed.data.status ?? trip.status;
+    const nextDriverId = hasDriver ? parsed.data.driverId ?? null : trip.driverId;
+    const nextTruckId = hasTruck ? parsed.data.truckId ?? null : trip.truckId;
+    const nextTrailerId = hasTrailer ? parsed.data.trailerId ?? null : trip.trailerId;
+    if (TRIP_DISPATCHED_STATUSES.includes(status) && !nextDriverId) {
+      res.status(400).json({ error: "Trip requires a primary driver before dispatch status can advance" });
+      return;
+    }
+    const updated = await prisma.trip.update({
+      where: { id: trip.id },
+      data: {
+        driverId: hasDriver ? nextDriverId : undefined,
+        truckId: hasTruck ? nextTruckId : undefined,
+        trailerId: hasTrailer ? nextTrailerId : undefined,
+        status,
+        plannedDepartureAt:
+          parsed.data.plannedDepartureAt === undefined
+            ? undefined
+            : parsed.data.plannedDepartureAt
+              ? new Date(parsed.data.plannedDepartureAt)
+              : null,
+        plannedArrivalAt:
+          parsed.data.plannedArrivalAt === undefined
+            ? undefined
+            : parsed.data.plannedArrivalAt
+              ? new Date(parsed.data.plannedArrivalAt)
+              : null,
+        departedAt:
+          status === TripStatus.IN_TRANSIT
+            ? trip.departedAt ?? now
+            : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED
+              ? null
+              : undefined,
+        arrivedAt:
+          status === TripStatus.ARRIVED || status === TripStatus.COMPLETE
+            ? trip.arrivedAt ?? now
+            : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED || status === TripStatus.IN_TRANSIT
+              ? null
+              : undefined,
+      },
+      include: TRIP_INCLUDE,
+    });
+
+    await applyTripAssignmentToLoads({
+      orgId: req.user!.orgId,
+      loadIds: trip.loads.map((item) => item.loadId),
+      driverId: updated.driverId,
+      truckId: updated.truckId,
+      trailerId: updated.trailerId,
+      tripStatus: updated.status,
+    });
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: trip.id,
+      previous: { status: trip.status, driverId: trip.driverId, truckId: trip.truckId, trailerId: trip.trailerId },
+      next: {
+        status: updated.status,
+        driverId: updated.driverId,
+        truckId: updated.truckId,
+        trailerId: updated.trailerId,
+      },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_ASSIGNED",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: `Updated assignment on trip ${updated.tripNumber}`,
+      meta: {
+        driverId: updated.driverId,
+        truckId: updated.truckId,
+        trailerId: updated.trailerId,
+        status: updated.status,
+      },
+    });
+    res.json({ trip: updated });
+  }
+);
+
+app.post(
+  "/trips/:id/status",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({ status: z.nativeEnum(TripStatus) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { loads: { select: { loadId: true } } },
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+    if (TRIP_DISPATCHED_STATUSES.includes(parsed.data.status) && !trip.driverId) {
+      res.status(400).json({ error: "Trip requires a primary driver before dispatch status can advance" });
+      return;
+    }
+    const now = new Date();
+    const updated = await prisma.trip.update({
+      where: { id: trip.id },
+      data: {
+        status: parsed.data.status,
+        departedAt:
+          parsed.data.status === TripStatus.IN_TRANSIT
+            ? trip.departedAt ?? now
+            : parsed.data.status === TripStatus.PLANNED || parsed.data.status === TripStatus.ASSIGNED
+              ? null
+              : undefined,
+        arrivedAt:
+          parsed.data.status === TripStatus.ARRIVED || parsed.data.status === TripStatus.COMPLETE
+            ? trip.arrivedAt ?? now
+            : parsed.data.status === TripStatus.PLANNED || parsed.data.status === TripStatus.ASSIGNED
+              ? null
+              : undefined,
+      },
+      include: TRIP_INCLUDE,
+    });
+
+    await applyTripAssignmentToLoads({
+      orgId: req.user!.orgId,
+      loadIds: trip.loads.map((item) => item.loadId),
+      driverId: updated.driverId,
+      truckId: updated.truckId,
+      trailerId: updated.trailerId,
+      tripStatus: updated.status,
+    });
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: trip.id,
+      previous: { status: trip.status, driverId: trip.driverId, truckId: trip.truckId, trailerId: trip.trailerId },
+      next: {
+        status: updated.status,
+        driverId: updated.driverId,
+        truckId: updated.truckId,
+        trailerId: updated.trailerId,
+      },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_STATUS",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: `Set trip ${updated.tripNumber} to ${updated.status}`,
+    });
+    res.json({ trip: updated });
+  }
+);
+
+app.post(
+  "/manifests/:id/dispatch-as-trip",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const manifest = await prisma.trailerManifest.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { items: { include: { load: { select: { id: true, loadNumber: true, movementMode: true } } } } },
+    });
+    if (!manifest) {
+      res.status(404).json({ error: "Manifest not found" });
+      return;
+    }
+    if (manifest.items.length === 0) {
+      res.status(400).json({ error: "Manifest has no loads" });
+      return;
+    }
+
+    const existing = await prisma.trip.findFirst({
+      where: { orgId: req.user!.orgId, sourceManifestId: manifest.id },
+      include: TRIP_INCLUDE,
+    });
+    if (existing) {
+      res.json({ trip: existing, created: false });
+      return;
+    }
+
+    const loadIds = manifest.items.map((item) => item.loadId);
+    const movementModes = new Set(manifest.items.map((item) => item.load.movementMode));
+    const trip = await prisma.trip.create({
+      data: {
+        orgId: req.user!.orgId,
+        tripNumber: await allocateTripNumberOnly(req.user!.orgId),
+        status:
+          manifest.status === ManifestStatus.IN_TRANSIT
+            ? TripStatus.IN_TRANSIT
+            : manifest.status === ManifestStatus.ARRIVED || manifest.status === ManifestStatus.COMPLETE
+              ? TripStatus.ARRIVED
+              : TripStatus.PLANNED,
+        movementMode: movementModes.size === 1 ? manifest.items[0].load.movementMode : MovementMode.LTL,
+        driverId: manifest.driverId,
+        truckId: manifest.truckId,
+        trailerId: manifest.trailerId,
+        sourceManifestId: manifest.id,
+        origin: manifest.origin,
+        destination: manifest.destination,
+        plannedDepartureAt: manifest.plannedDepartureAt,
+        plannedArrivalAt: manifest.plannedArrivalAt,
+        departedAt: manifest.departedAt,
+        arrivedAt: manifest.arrivedAt,
+        loads: {
+          create: manifest.items.map((item, index) => ({
+            orgId: req.user!.orgId,
+            loadId: item.loadId,
+            sequence: index + 1,
+          })),
+        },
+      },
+      include: TRIP_INCLUDE,
+    });
+
+    await applyTripAssignmentToLoads({
+      orgId: req.user!.orgId,
+      loadIds,
+      driverId: trip.driverId,
+      truckId: trip.truckId,
+      trailerId: trip.trailerId,
+      tripStatus: trip.status,
+    });
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: trip.id,
+      previous: { status: TripStatus.CANCELLED, driverId: null, truckId: null, trailerId: null },
+      next: { status: trip.status, driverId: trip.driverId, truckId: trip.truckId, trailerId: trip.trailerId },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_CREATED_FROM_MANIFEST",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: `Created trip ${trip.tripNumber} from manifest ${manifest.id}`,
+      meta: { manifestId: manifest.id, loadNumbers: manifest.items.map((item) => item.load.loadNumber) },
+    });
+
+    res.json({ trip, created: true });
+  }
+);
 
 app.get("/manifests", requireAuth, requireRole("ADMIN", "DISPATCHER"), async (req, res) => {
   const manifests = await prisma.trailerManifest.findMany({
@@ -5402,12 +7152,14 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
     loadNumber: z.string().trim().min(2).optional(),
     tripNumber: z.string().trim().min(2).optional(),
     loadType: z.enum(["COMPANY", "BROKERED", "VAN", "REEFER", "FLATBED", "OTHER"]).optional(),
+    movementMode: z.enum(["FTL", "LTL", "POOL_DISTRIBUTION"]).optional(),
     businessType: z.enum(["COMPANY", "BROKER"]).optional(),
     status: z.string().optional(),
     operatingEntityId: z.string().optional(),
     customerId: z.string().optional(),
     customerName: z.string().optional(),
     customerRef: z.string().optional(),
+    notes: z.string().optional(),
     externalTripId: z.string().optional(),
     salesRepName: z.string().optional(),
     dropName: z.string().optional(),
@@ -5460,6 +7212,7 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
   }
 
   const loadType = mapLoadTypeForInput(parsed.data.loadType ?? null);
+  const movementMode = mapMovementModeForInput(parsed.data.movementMode ?? null);
   const settingsForMode = await prisma.orgSettings.findFirst({
     where: { orgId: req.user!.orgId },
     select: { operatingMode: true },
@@ -5470,6 +7223,12 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
       ? "BROKER"
       : "COMPANY");
   const statusMapped = parsed.data.status ? mapExternalLoadStatus(parsed.data.status).status : LoadStatus.PLANNED;
+  if (LOAD_EXECUTION_STATUSES.has(statusMapped)) {
+    res.status(400).json({
+      error: "New loads must start in PLANNED. Add the load to a trip before dispatch/execution statuses.",
+    });
+    return;
+  }
   const operatingEntity = parsed.data.operatingEntityId
     ? await prisma.operatingEntity.findFirst({
         where: { id: parsed.data.operatingEntityId, orgId: req.user!.orgId },
@@ -5584,17 +7343,20 @@ app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermi
       status: statusMapped,
       completedAt: isCompletedStatus(statusMapped) ? new Date() : null,
       loadType,
+      movementMode,
       businessType,
       operatingEntityId: operatingEntity.id,
       customerId,
       customerName,
       customerRef: parsed.data.customerRef ?? null,
+      notes: parsed.data.notes ?? null,
       externalTripId: parsed.data.externalTripId ?? null,
       salesRepName: parsed.data.salesRepName ?? null,
       dropName: parsed.data.dropName ?? null,
       desiredInvoiceDate: parsed.data.desiredInvoiceDate ? new Date(parsed.data.desiredInvoiceDate) : null,
-      truckId: truck?.id ?? null,
-      trailerId: trailer?.id ?? null,
+      // Trip is the only assignment authority; load asset fields are mirrors only.
+      truckId: null,
+      trailerId: null,
       bolNumber: parsed.data.bolNumber ?? null,
       shipperReferenceNumber,
       consigneeReferenceNumber,
@@ -5716,6 +7478,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     customerRef: z.string().optional(),
     bolNumber: z.string().optional(),
     loadType: z.enum(["COMPANY", "BROKERED", "VAN", "REEFER", "FLATBED", "OTHER"]).optional(),
+    movementMode: z.enum(["FTL", "LTL", "POOL_DISTRIBUTION"]).optional(),
     operatingEntityId: z.string().optional(),
     shipperReferenceNumber: z.string().max(64).optional(),
     consigneeReferenceNumber: z.string().max(64).optional(),
@@ -5723,6 +7486,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     weightLbs: z.union([z.number(), z.string()]).optional(),
     rate: z.union([z.number(), z.string()]).optional(),
     miles: z.number().optional(),
+    paidMiles: z.union([z.number(), z.string()]).optional(),
     status: z
       .enum([
         "DRAFT",
@@ -5756,18 +7520,29 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     res.status(403).json({ error: "Missing permission to edit rate" });
     return;
   }
+  if (
+    parsed.data.paidMiles !== undefined &&
+    req.user!.role !== "ADMIN" &&
+    req.user!.role !== "HEAD_DISPATCHER" &&
+    req.user!.role !== "BILLING"
+  ) {
+    res.status(403).json({ error: "Only admin, head dispatcher, or billing can approve paid miles" });
+    return;
+  }
   const lockedFieldsChanged: string[] = [];
   if (parsed.data.rate !== undefined) lockedFieldsChanged.push("rate");
   if (parsed.data.customerId !== undefined || parsed.data.customerName !== undefined) lockedFieldsChanged.push("customer");
   if (parsed.data.customerRef !== undefined) lockedFieldsChanged.push("customerRef");
   if (parsed.data.bolNumber !== undefined) lockedFieldsChanged.push("bolNumber");
   if (parsed.data.loadType !== undefined) lockedFieldsChanged.push("loadType");
+  if (parsed.data.movementMode !== undefined) lockedFieldsChanged.push("movementMode");
   if (parsed.data.operatingEntityId !== undefined) lockedFieldsChanged.push("operatingEntityId");
   if (parsed.data.shipperReferenceNumber !== undefined) lockedFieldsChanged.push("shipperReferenceNumber");
   if (parsed.data.consigneeReferenceNumber !== undefined) lockedFieldsChanged.push("consigneeReferenceNumber");
   if (parsed.data.palletCount !== undefined) lockedFieldsChanged.push("palletCount");
   if (parsed.data.weightLbs !== undefined) lockedFieldsChanged.push("weightLbs");
   if (parsed.data.miles !== undefined) lockedFieldsChanged.push("miles");
+  if (parsed.data.paidMiles !== undefined) lockedFieldsChanged.push("paidMiles");
   const attemptingLockedEdit = existing.lockedAt && lockedFieldsChanged.length > 0;
   if (attemptingLockedEdit && req.user!.role !== "ADMIN") {
     res.status(403).json({ error: "Load is locked" });
@@ -5822,6 +7597,8 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
   let consigneeReferenceNumber: string | null | undefined = undefined;
   let palletCount: number | null | undefined = undefined;
   let weightLbs: number | null | undefined = undefined;
+  let paidMiles: number | undefined = undefined;
+  let paidMilesVariancePct: number | null = null;
   try {
     if (parsed.data.shipperReferenceNumber !== undefined) {
       shipperReferenceNumber = normalizeReference(parsed.data.shipperReferenceNumber ?? null);
@@ -5835,6 +7612,24 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     if (parsed.data.weightLbs !== undefined) {
       weightLbs = parseOptionalNonNegativeInt(parsed.data.weightLbs, "Weight (lbs)");
     }
+    if (parsed.data.paidMiles !== undefined) {
+      const candidate =
+        typeof parsed.data.paidMiles === "string" ? Number(parsed.data.paidMiles) : parsed.data.paidMiles;
+      if (!Number.isFinite(candidate) || candidate <= 0) {
+        throw new Error("Paid miles must be greater than 0");
+      }
+      paidMiles = Number(candidate);
+      paidMilesVariancePct = calculateMilesVariancePct(existing.miles ?? null, paidMiles);
+      if (
+        paidMilesVariancePct !== null &&
+        paidMilesVariancePct > PAYABLE_MILES_VARIANCE_REVIEW_PCT &&
+        !parsed.data.overrideReason?.trim()
+      ) {
+        throw new Error(
+          `Override reason required when paid miles variance exceeds ${PAYABLE_MILES_VARIANCE_REVIEW_PCT}%`
+        );
+      }
+    }
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
     return;
@@ -5844,6 +7639,17 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
   const statusChanged = statusRequested !== undefined && statusRequested !== existing.status;
   let statusResult = { overridden: false };
   if (statusChanged) {
+    try {
+      await assertLoadTripExecutionInvariant({
+        orgId: req.user!.orgId,
+        loadId: existing.id,
+        loadNumber: existing.loadNumber,
+        nextStatus: statusRequested as LoadStatus,
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
     try {
       statusResult = assertLoadStatusTransition({
         current: existing.status,
@@ -5872,6 +7678,18 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
           existing: existing.deliveredAt ?? null,
         })
       : undefined;
+  const reachesDeliveredState =
+    statusChanged && statusRequested
+      ? !DELIVERY_REACHED_STATUSES.has(existing.status) && DELIVERY_REACHED_STATUSES.has(statusRequested as LoadStatus)
+      : false;
+  const autoPaidMiles =
+    reachesDeliveredState &&
+    parsed.data.paidMiles === undefined &&
+    (existing.paidMiles ?? null) === null &&
+    Number.isFinite(parsed.data.miles ?? existing.miles ?? NaN) &&
+    Number(parsed.data.miles ?? existing.miles ?? 0) > 0
+      ? Number(parsed.data.miles ?? existing.miles)
+      : undefined;
 
   const load = await prisma.load.update({
     where: { id: existing.id },
@@ -5881,6 +7699,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       customerRef: parsed.data.customerRef ?? existing.customerRef ?? null,
       bolNumber: parsed.data.bolNumber ?? existing.bolNumber ?? null,
       loadType: parsed.data.loadType ?? existing.loadType,
+      movementMode: parsed.data.movementMode ?? existing.movementMode,
       operatingEntityId: operatingEntityId ?? existing.operatingEntityId,
       shipperReferenceNumber:
         shipperReferenceNumber !== undefined ? shipperReferenceNumber : existing.shipperReferenceNumber ?? null,
@@ -5890,6 +7709,17 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       weightLbs: weightLbs !== undefined ? weightLbs : existing.weightLbs ?? null,
       rate: parsed.data.rate !== undefined ? toDecimal(parsed.data.rate) : undefined,
       miles: parsed.data.miles,
+      paidMiles: paidMiles !== undefined ? paidMiles : autoPaidMiles !== undefined ? autoPaidMiles : undefined,
+      paidMilesSource:
+        paidMiles !== undefined
+          ? paidMilesVariancePct !== null && paidMilesVariancePct <= 0.01
+            ? PayableMilesSource.PLANNED
+            : PayableMilesSource.MANUAL_OVERRIDE
+          : autoPaidMiles !== undefined
+          ? PayableMilesSource.PLANNED
+          : undefined,
+      paidMilesApprovedById: paidMiles !== undefined ? req.user!.id : undefined,
+      paidMilesApprovedAt: paidMiles !== undefined ? new Date() : undefined,
       status: statusRequested,
       completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
       deliveredAt: deliveredAtUpdate !== undefined ? deliveredAtUpdate : undefined,
@@ -6050,466 +7880,23 @@ app.post(
   }
 );
 
-app.post("/loads/:id/assign", requireAuth, requireOperationalOrg, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
-  const schema = z.object({
-    primaryDriverId: z.string().optional(),
-    coDriverId: z.string().optional().nullable(),
-    driverId: z.string().optional(),
-    truckId: z.string().optional(),
-    trailerId: z.string().optional(),
-    overrideReason: z.string().optional(),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Invalid payload" });
-    return;
-  }
-  const primaryDriverId = parsed.data.primaryDriverId ?? parsed.data.driverId ?? "";
-  const coDriverId =
-    parsed.data.coDriverId && parsed.data.coDriverId.trim() ? parsed.data.coDriverId.trim() : null;
-  const validation = validateAssignmentDrivers(primaryDriverId, coDriverId);
-  if (!validation.ok) {
-    res.status(400).json({ error: validation.error });
-    return;
-  }
-  const assignmentPlan = buildAssignmentPlan({ primaryDriverId, coDriverId });
-  const load = await prisma.load.findFirst({
-    where: { id: req.params.id, orgId: req.user!.orgId },
-    select: {
-      id: true,
-      loadNumber: true,
-      loadType: true,
-      status: true,
-      assignedDriverId: true,
-      truckId: true,
-      trailerId: true,
-      assignedDriverAt: true,
-      assignedTruckAt: true,
-      assignedTrailerAt: true,
-    },
-  });
-  if (!load) {
-    res.status(404).json({ error: "Load not found" });
-    return;
-  }
-  const existingMembers = await prisma.loadAssignmentMember.findMany({
-    where: { loadId: load.id },
-  });
-  const existingPrimaryId =
-    existingMembers.find((member) => member.role === LoadAssignmentRole.PRIMARY)?.driverId ??
-    load.assignedDriverId ??
-    null;
-  const existingCoId =
-    existingMembers.find((member) => member.role === LoadAssignmentRole.CO_DRIVER)?.driverId ?? null;
-
-  const [driverCheck, coDriverCheck, truckCheck, trailerCheck, settings] = await Promise.all([
-    prisma.driver.findFirst({ where: { id: primaryDriverId, orgId: req.user!.orgId } }),
-    coDriverId
-      ? prisma.driver.findFirst({ where: { id: coDriverId, orgId: req.user!.orgId } })
-      : Promise.resolve(null),
-    parsed.data.truckId
-      ? prisma.truck.findFirst({ where: { id: parsed.data.truckId, orgId: req.user!.orgId } })
-      : Promise.resolve(null),
-    parsed.data.trailerId
-      ? prisma.trailer.findFirst({ where: { id: parsed.data.trailerId, orgId: req.user!.orgId } })
-      : Promise.resolve(null),
-    prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } }),
-  ]);
-  if (!driverCheck || (coDriverId && !coDriverCheck) || (parsed.data.truckId && !truckCheck) || (parsed.data.trailerId && !trailerCheck)) {
-    res.status(400).json({ error: "Invalid asset assignment" });
-    return;
-  }
-
-  if (settings?.requireRateConBeforeDispatch && load.loadType === LoadType.BROKERED) {
-    const hasRateCon = await prisma.document.findFirst({
-      where: { orgId: req.user!.orgId, loadId: load.id, type: { in: [DocType.RATECON, DocType.RATE_CONFIRMATION] } },
-      select: { id: true },
-    });
-    if (!hasRateCon) {
-      if (req.user!.role !== "ADMIN" || !parsed.data.overrideReason) {
-        res.status(400).json({ error: "Rate confirmation required before dispatch", missingDocs: ["RATECON"] });
-        return;
-      }
-    }
-  }
-
-  const availabilityIssues: string[] = [];
-  if (driverCheck.status !== DriverStatus.AVAILABLE && load.assignedDriverId !== driverCheck.id) {
-    availabilityIssues.push(`Driver status ${driverCheck.status}`);
-  }
-  if (coDriverCheck && coDriverCheck.status !== DriverStatus.AVAILABLE && existingCoId !== coDriverCheck.id) {
-    availabilityIssues.push(`Co-driver status ${coDriverCheck.status}`);
-  }
-  if (truckCheck && truckCheck.status !== TruckStatus.AVAILABLE && load.truckId !== truckCheck.id) {
-    availabilityIssues.push(`Truck status ${truckCheck.status}`);
-  }
-  if (trailerCheck && trailerCheck.status !== TrailerStatus.AVAILABLE && load.trailerId !== trailerCheck.id) {
-    availabilityIssues.push(`Trailer status ${trailerCheck.status}`);
-  }
-  if (availabilityIssues.length > 0) {
-    if (req.user!.role !== "ADMIN" || !parsed.data.overrideReason) {
-      res.status(400).json({ error: availabilityIssues.join("; ") });
-      return;
-    }
-  }
-
-  let statusResult = { overridden: false };
-  if (load.status !== LoadStatus.ASSIGNED) {
-    try {
-      statusResult = assertLoadStatusTransition({
-        current: load.status,
-        next: LoadStatus.ASSIGNED,
-        isAdmin: req.user!.role === "ADMIN",
-        overrideReason: parsed.data.overrideReason,
-      });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-      return;
-    }
-  }
-
-  const now = new Date();
-  const assignedDriverAt =
-    assignmentPlan.assignedDriverId !== load.assignedDriverId ? now : load.assignedDriverAt ?? null;
-  const assignedTruckAt =
-    parsed.data.truckId !== load.truckId ? (parsed.data.truckId ? now : null) : load.assignedTruckAt ?? null;
-  const assignedTrailerAt =
-    parsed.data.trailerId !== load.trailerId ? (parsed.data.trailerId ? now : null) : load.assignedTrailerAt ?? null;
-  const nextStatus = load.status === LoadStatus.ASSIGNED ? load.status : LoadStatus.ASSIGNED;
-  const completedAtUpdate = resolveCompletedAtUpdate({
-    current: load.status,
-    next: nextStatus,
-    existing: load.completedAt ?? null,
-  });
-
-  const updated = await prisma.load.update({
-    where: { id: load.id },
-    data: {
-      assignedDriverId: assignmentPlan.assignedDriverId,
-      truckId: parsed.data.truckId ?? null,
-      trailerId: parsed.data.trailerId ?? null,
-      assignedDriverAt,
-      assignedTruckAt,
-      assignedTrailerAt,
-      status: load.status === LoadStatus.ASSIGNED ? undefined : LoadStatus.ASSIGNED,
-      completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
-    },
-  });
-
-  await prisma.loadAssignmentMember.upsert({
-    where: { loadId_role: { loadId: updated.id, role: LoadAssignmentRole.PRIMARY } },
-    update: { driverId: assignmentPlan.primaryDriverId },
-    create: { loadId: updated.id, driverId: assignmentPlan.primaryDriverId, role: LoadAssignmentRole.PRIMARY },
-  });
-  if (assignmentPlan.coDriverId) {
-    await prisma.loadAssignmentMember.upsert({
-      where: { loadId_role: { loadId: updated.id, role: LoadAssignmentRole.CO_DRIVER } },
-      update: { driverId: assignmentPlan.coDriverId },
-      create: { loadId: updated.id, driverId: assignmentPlan.coDriverId, role: LoadAssignmentRole.CO_DRIVER },
-    });
-  } else {
-    await prisma.loadAssignmentMember.deleteMany({
-      where: { loadId: updated.id, role: LoadAssignmentRole.CO_DRIVER },
+app.post(
+  "/loads/:id/assign",
+  requireAuth,
+  requireOperationalOrg,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (_req, res) => {
+    res.status(400).json({
+      error: "Direct load assignment is disabled. Use trip assignment endpoints (/trips, /trips/:id/assign).",
     });
   }
+);
 
-  const activeLeg = await prisma.loadLeg.findFirst({
-    where: { loadId: updated.id, orgId: req.user!.orgId, status: LegStatus.IN_PROGRESS },
-    orderBy: { sequence: "desc" },
+app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (_req, res) => {
+  res.status(400).json({
+    error: "Direct load unassign is disabled. Update or unassign the trip instead.",
   });
-  if (activeLeg) {
-    await prisma.loadLeg.update({
-      where: { id: activeLeg.id },
-      data: {
-        driverId: assignmentPlan.primaryDriverId,
-        truckId: parsed.data.truckId ?? null,
-        trailerId: parsed.data.trailerId ?? null,
-      },
-    });
-  }
-
-  const resetStatusIfIdle = async (asset: "driver" | "truck" | "trailer", id: string | null) => {
-    if (!id) return;
-    const where: Prisma.LoadWhereInput = {
-      orgId: req.user!.orgId,
-      deletedAt: null,
-      id: { not: load.id },
-      status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
-    };
-    if (asset === "driver") where.assignedDriverId = id;
-    if (asset === "truck") where.truckId = id;
-    if (asset === "trailer") where.trailerId = id;
-    const other = await prisma.load.findFirst({ where, select: { id: true } });
-    if (other) return;
-    if (asset === "driver") {
-      await prisma.driver.update({ where: { id }, data: { status: DriverStatus.AVAILABLE } });
-    } else if (asset === "truck") {
-      await prisma.truck.update({ where: { id }, data: { status: TruckStatus.AVAILABLE } });
-    } else {
-      await prisma.trailer.update({ where: { id }, data: { status: TrailerStatus.AVAILABLE } });
-    }
-  };
-
-  const resetDriverIfIdle = async (driverId: string | null) => {
-    if (!driverId) return;
-    const otherPrimary = await prisma.load.findFirst({
-      where: {
-        orgId: req.user!.orgId,
-        id: { not: load.id },
-        assignedDriverId: driverId,
-        status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
-      },
-      select: { id: true },
-    });
-    const otherMember = await prisma.loadAssignmentMember.findFirst({
-      where: {
-        driverId,
-        loadId: { not: load.id },
-        load: {
-          orgId: req.user!.orgId,
-          status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
-        },
-      },
-      select: { id: true },
-    });
-    if (!otherPrimary && !otherMember) {
-      await prisma.driver.update({ where: { id: driverId }, data: { status: DriverStatus.AVAILABLE } });
-    }
-  };
-
-  if (existingPrimaryId && existingPrimaryId !== primaryDriverId) {
-    await resetDriverIfIdle(existingPrimaryId);
-  }
-  if (existingCoId && existingCoId !== assignmentPlan.coDriverId) {
-    await resetDriverIfIdle(existingCoId);
-  }
-  if (load.truckId && load.truckId !== (parsed.data.truckId ?? null)) {
-    await resetStatusIfIdle("truck", load.truckId);
-  }
-  if (load.trailerId && load.trailerId !== (parsed.data.trailerId ?? null)) {
-    await resetStatusIfIdle("trailer", load.trailerId);
-  }
-
-  await Promise.all([
-    prisma.driver.update({ where: { id: driverCheck.id }, data: { status: DriverStatus.ON_LOAD } }),
-    assignmentPlan.coDriverId
-      ? prisma.driver.update({ where: { id: assignmentPlan.coDriverId }, data: { status: DriverStatus.ON_LOAD } })
-      : Promise.resolve(null),
-    parsed.data.truckId ? prisma.truck.update({ where: { id: parsed.data.truckId }, data: { status: TruckStatus.ASSIGNED } }) : Promise.resolve(null),
-    parsed.data.trailerId
-      ? prisma.trailer.update({ where: { id: parsed.data.trailerId }, data: { status: TrailerStatus.ASSIGNED } })
-      : Promise.resolve(null),
-  ]);
-
-  if (load.status !== updated.status) {
-    await createEvent({
-      orgId: req.user!.orgId,
-      loadId: updated.id,
-      userId: req.user!.id,
-      type: EventType.LOAD_STATUS_UPDATED,
-      message: `Load ${updated.loadNumber} status ${load.status} -> ${updated.status}`,
-      meta: { overrideReason: parsed.data.overrideReason ?? null, overridden: statusResult.overridden },
-    });
-    await logAudit({
-      orgId: req.user!.orgId,
-      userId: req.user!.id,
-      action: "LOAD_STATUS",
-      entity: "Load",
-      entityId: updated.id,
-      summary: `Load ${updated.loadNumber} status ${load.status} -> ${updated.status}`,
-      meta: { overrideReason: parsed.data.overrideReason ?? null, overridden: statusResult.overridden },
-      before: { status: load.status },
-      after: { status: updated.status },
-    });
-  }
-
-  await createEvent({
-    orgId: req.user!.orgId,
-    loadId: updated.id,
-    userId: req.user!.id,
-    type: EventType.LOAD_ASSIGNED,
-    message: `Load ${updated.loadNumber} assigned`,
-  });
-  await logAudit({
-    orgId: req.user!.orgId,
-    userId: req.user!.id,
-    action: "LOAD_ASSIGNED",
-    entity: "Load",
-    entityId: updated.id,
-    summary: `Assigned load ${updated.loadNumber}`,
-    meta: { overrideReason: parsed.data.overrideReason ?? null },
-    before: { assignedDriverId: load.assignedDriverId, truckId: load.truckId, trailerId: load.trailerId },
-    after: {
-      assignedDriverId: updated.assignedDriverId,
-      truckId: updated.truckId,
-      trailerId: updated.trailerId,
-    },
-  });
-  const members = await prisma.loadAssignmentMember.findMany({
-    where: { loadId: updated.id },
-    include: { driver: { select: { id: true, name: true } } },
-  });
-  res.json({ load: updated, assignmentMembers: members });
-});
-
-app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
-  const load = await prisma.load.findFirst({
-    where: { id: req.params.id, orgId: req.user!.orgId },
-  });
-  if (!load) {
-    res.status(404).json({ error: "Load not found" });
-    return;
-  }
-  const existingMembers = await prisma.loadAssignmentMember.findMany({
-    where: { loadId: load.id },
-  });
-  const existingPrimaryId =
-    existingMembers.find((member) => member.role === LoadAssignmentRole.PRIMARY)?.driverId ??
-    load.assignedDriverId ??
-    null;
-  const existingCoId =
-    existingMembers.find((member) => member.role === LoadAssignmentRole.CO_DRIVER)?.driverId ?? null;
-  let statusResult = { overridden: false };
-  if (load.status === LoadStatus.ASSIGNED) {
-    try {
-      statusResult = assertLoadStatusTransition({
-        current: load.status,
-        next: LoadStatus.PLANNED,
-        isAdmin: req.user!.role === "ADMIN",
-        overrideReason: null,
-      });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-      return;
-    }
-  }
-  const nextStatus = load.status === LoadStatus.ASSIGNED ? LoadStatus.PLANNED : load.status;
-  const completedAtUpdate = resolveCompletedAtUpdate({
-    current: load.status,
-    next: nextStatus,
-    existing: load.completedAt ?? null,
-  });
-  const updated = await prisma.load.update({
-    where: { id: load.id },
-    data: {
-      assignedDriverId: null,
-      truckId: null,
-      trailerId: null,
-      assignedDriverAt: null,
-      assignedTruckAt: null,
-      assignedTrailerAt: null,
-      status: load.status === LoadStatus.ASSIGNED ? LoadStatus.PLANNED : load.status,
-      completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
-    },
-  });
-  await prisma.loadAssignmentMember.deleteMany({ where: { loadId: load.id } });
-  const activeLeg = await prisma.loadLeg.findFirst({
-    where: { loadId: load.id, orgId: req.user!.orgId, status: LegStatus.IN_PROGRESS },
-    orderBy: { sequence: "desc" },
-  });
-  if (activeLeg) {
-    await prisma.loadLeg.update({
-      where: { id: activeLeg.id },
-      data: {
-        driverId: null,
-        truckId: null,
-        trailerId: null,
-      },
-    });
-  }
-  const resetStatusIfIdle = async (asset: "driver" | "truck" | "trailer", id: string | null) => {
-    if (!id) return;
-    const where: Prisma.LoadWhereInput = {
-      orgId: req.user!.orgId,
-      id: { not: load.id },
-      status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
-    };
-    if (asset === "driver") where.assignedDriverId = id;
-    if (asset === "truck") where.truckId = id;
-    if (asset === "trailer") where.trailerId = id;
-    const other = await prisma.load.findFirst({ where, select: { id: true } });
-    if (other) return;
-    if (asset === "driver") {
-      await prisma.driver.update({ where: { id }, data: { status: DriverStatus.AVAILABLE } });
-    } else if (asset === "truck") {
-      await prisma.truck.update({ where: { id }, data: { status: TruckStatus.AVAILABLE } });
-    } else {
-      await prisma.trailer.update({ where: { id }, data: { status: TrailerStatus.AVAILABLE } });
-    }
-  };
-
-  const resetDriverIfIdle = async (driverId: string | null) => {
-    if (!driverId) return;
-    const otherPrimary = await prisma.load.findFirst({
-      where: {
-        orgId: req.user!.orgId,
-        id: { not: load.id },
-        assignedDriverId: driverId,
-        status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
-      },
-      select: { id: true },
-    });
-    const otherMember = await prisma.loadAssignmentMember.findFirst({
-      where: {
-        driverId,
-        loadId: { not: load.id },
-        load: {
-          orgId: req.user!.orgId,
-          status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
-        },
-      },
-      select: { id: true },
-    });
-    if (!otherPrimary && !otherMember) {
-      await prisma.driver.update({ where: { id: driverId }, data: { status: DriverStatus.AVAILABLE } });
-    }
-  };
-
-  await resetDriverIfIdle(existingPrimaryId);
-  await resetDriverIfIdle(existingCoId);
-  await resetStatusIfIdle("truck", load.truckId);
-  await resetStatusIfIdle("trailer", load.trailerId);
-
-  if (load.status !== updated.status) {
-    await createEvent({
-      orgId: req.user!.orgId,
-      loadId: updated.id,
-      userId: req.user!.id,
-      type: EventType.LOAD_STATUS_UPDATED,
-      message: `Load ${updated.loadNumber} status ${load.status} -> ${updated.status}`,
-      meta: { overridden: statusResult.overridden },
-    });
-    await logAudit({
-      orgId: req.user!.orgId,
-      userId: req.user!.id,
-      action: "LOAD_STATUS",
-      entity: "Load",
-      entityId: updated.id,
-      summary: `Load ${updated.loadNumber} status ${load.status} -> ${updated.status}`,
-      meta: { overridden: statusResult.overridden },
-      before: { status: load.status },
-      after: { status: updated.status },
-    });
-  }
-
-  await createEvent({
-    orgId: req.user!.orgId,
-    loadId: updated.id,
-    userId: req.user!.id,
-    type: EventType.LOAD_ASSIGNED,
-    message: `Load ${updated.loadNumber} unassigned`,
-  });
-  await logAudit({
-    orgId: req.user!.orgId,
-    userId: req.user!.id,
-    action: "LOAD_UNASSIGNED",
-    entity: "Load",
-    entityId: updated.id,
-    summary: `Unassigned load ${updated.loadNumber}`,
-    before: { assignedDriverId: load.assignedDriverId, truckId: load.truckId, trailerId: load.trailerId },
-    after: { assignedDriverId: null, truckId: null, trailerId: null },
-  });
-  res.json({ load: updated });
 });
 
 app.post("/stops/:id/delay", requireAuth, requireCsrf, requirePermission(Permission.STOP_EDIT), async (req, res) => {
@@ -7083,7 +8470,7 @@ async function handleArriveStop(params: {
       });
     }
   }
-  if ([LoadStatus.ASSIGNED].includes(stop.load.status)) {
+  if (stop.load.status === LoadStatus.ASSIGNED) {
     await transitionLoadStatus({
       load: { id: stop.loadId, loadNumber: stop.load.loadNumber, status: stop.load.status },
       nextStatus: LoadStatus.IN_TRANSIT,
@@ -7260,24 +8647,52 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
     res.status(404).json({ error: "Driver not found" });
     return;
   }
-  const load = await prisma.load.findFirst({
+  const activeTrips = await prisma.trip.findMany({
     where: {
       orgId: req.user!.orgId,
-      OR: [
-        { assignedDriverId: driver.id },
-        { assignmentMembers: { some: { driverId: driver.id } } },
-      ],
-      status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
+      driverId: driver.id,
+      status: { in: DRIVER_ACTIVE_TRIP_STATUSES },
     },
     include: {
-      stops: { orderBy: { sequence: "asc" } },
-      docs: true,
-      driver: true,
-      customer: true,
-      assignmentMembers: { include: { driver: { select: { id: true, name: true } } } },
+      loads: {
+        orderBy: { sequence: "asc" },
+        include: {
+          load: {
+            include: {
+              stops: { orderBy: { sequence: "asc" } },
+              docs: true,
+              driver: true,
+              customer: true,
+              loadNotes: {
+                where: { deletedAt: null },
+                orderBy: { createdAt: "desc" },
+                include: { createdBy: { select: { id: true, name: true, role: true } } },
+              },
+              assignmentMembers: { include: { driver: { select: { id: true, name: true } } } },
+            },
+          },
+        },
+      },
     },
     orderBy: { createdAt: "desc" },
+    take: 2,
   });
+  if (activeTrips.length > 1) {
+    console.error("driver.current.multiple_active_trips", {
+      orgId: req.user!.orgId,
+      driverId: driver.id,
+      tripIds: activeTrips.map((trip) => trip.id),
+    });
+    res.status(409).json({ error: "Multiple active trips found for this driver. Resolve dispatch conflicts." });
+    return;
+  }
+  const activeTrip = activeTrips[0] ?? null;
+  const load =
+    activeTrip?.loads.find(
+      (item) => !TERMINAL_LOAD_STATUSES.includes(item.load.status)
+    )?.load ??
+    activeTrip?.loads[0]?.load ??
+    null;
 
   const dispatcherContacts = await prisma.user.findMany({
     where: {
@@ -7310,7 +8725,19 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
       }
     : null;
 
-  res.json({ load, driver, dispatcher: primaryDispatcher });
+  res.json({
+    load,
+    driver,
+    dispatcher: primaryDispatcher,
+    trip: activeTrip
+      ? {
+          id: activeTrip.id,
+          tripNumber: activeTrip.tripNumber,
+          status: activeTrip.status,
+          movementMode: activeTrip.movementMode,
+        }
+      : null,
+  });
 });
 
 app.get("/driver/settings", requireAuth, requireRole("DRIVER"), async (req, res) => {
@@ -7327,7 +8754,7 @@ app.get("/driver/settings", requireAuth, requireRole("DRIVER"), async (req, res)
   });
 });
 
-app.get("/profile", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
+app.get("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
   const user = await prisma.user.findFirst({
     where: { id: req.user!.id, orgId: req.user!.orgId },
   });
@@ -7348,7 +8775,76 @@ app.get("/profile", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "
   });
 });
 
-app.patch("/profile", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"), requireCsrf, async (req, res) => {
+app.get("/me/appearance", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
+  const user = await prisma.user.findFirst({
+    where: { id: req.user!.id, orgId: req.user!.orgId },
+    select: APPEARANCE_SELECT,
+  });
+  res.json({ appearance: normalizeAppearanceSettings(user) });
+});
+
+app.put(
+  "/me/appearance",
+  requireAuth,
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"),
+  requireCsrf,
+  async (req, res) => {
+    const parsed = appearancePayloadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload", issues: parsed.error.flatten() });
+      return;
+    }
+
+    const existing = await prisma.user.findFirst({
+      where: { id: req.user!.id, orgId: req.user!.orgId },
+      select: {
+        id: true,
+        ...APPEARANCE_SELECT,
+      },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    const before = normalizeAppearanceSettings(existing);
+    const next = {
+      ...before,
+      ...parsed.data,
+    };
+
+    const updated = await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        appearanceTheme: next.theme,
+        appearanceTextScale: next.textScale,
+        appearanceContrast: next.contrast,
+        appearanceFontWeight: next.fontWeight,
+        appearanceNavDensity: next.navDensity,
+        appearanceMotion: next.motion,
+        appearanceFocusRing: next.focusRing,
+        appearanceColorPreset: next.colorPreset,
+      },
+      select: APPEARANCE_SELECT,
+    });
+
+    const after = normalizeAppearanceSettings(updated);
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "APPEARANCE_UPDATED",
+      entity: "User",
+      entityId: req.user!.id,
+      summary: "Updated appearance and accessibility settings",
+      before,
+      after,
+    });
+
+    res.json({ appearance: after });
+  }
+);
+
+app.patch("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), requireCsrf, async (req, res) => {
   const schema = z.object({
     name: z.string().trim().min(1).max(120).optional(),
     phone: z.string().trim().max(32).optional().nullable(),
@@ -7373,7 +8869,7 @@ app.patch("/profile", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING",
 app.post(
   "/profile/photo",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "BILLING", "DRIVER"),
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"),
   requireCsrf,
   upload.single("file"),
   async (req, res) => {
@@ -7668,13 +9164,24 @@ app.post("/driver/note", requireAuth, requireCsrf, requireRole("DRIVER"), async 
     res.status(403).json({ error: "Only the primary driver can add notes" });
     return;
   }
+  const note = await prisma.loadNote.create({
+    data: {
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      text: parsed.data.note.trim(),
+      visibility: LoadNoteVisibility.NORMAL,
+      source: LoadNoteSource.DRIVER,
+      createdById: req.user!.id,
+    },
+    select: { id: true },
+  });
   await createEvent({
     orgId: req.user!.orgId,
     loadId: load.id,
     userId: req.user!.id,
     type: EventType.DRIVER_NOTE,
     message: "Driver note added",
-    meta: { note: parsed.data.note },
+    meta: { note: parsed.data.note, loadNoteId: note.id },
   });
   await logAudit({
     orgId: req.user!.orgId,
@@ -7683,7 +9190,7 @@ app.post("/driver/note", requireAuth, requireCsrf, requireRole("DRIVER"), async 
     entity: "Load",
     entityId: load.id,
     summary: `Driver note on ${load.loadNumber}`,
-    meta: { note: parsed.data.note },
+    meta: { note: parsed.data.note, loadNoteId: note.id },
   });
   res.json({ ok: true });
 });
@@ -7736,8 +9243,8 @@ app.post("/driver/undo", requireAuth, requireCsrf, requireRole("DRIVER"), async 
   }
   const data =
     latest.type === "arrived"
-      ? { arrivedAt: null, status: "PLANNED" }
-      : { departedAt: null, status: "ARRIVED" };
+      ? { arrivedAt: null, status: StopStatus.PLANNED }
+      : { departedAt: null, status: StopStatus.ARRIVED };
   const updated = await prisma.stop.update({ where: { id: latest.stop.id }, data });
   await logStopTimeAudit({
     orgId: req.user!.orgId,
@@ -8478,8 +9985,8 @@ app.post("/docs/:id/verify", requireAuth, requireCsrf, requirePermission(Permiss
   }
 
   const canMoveToReady =
-    ![LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED].includes(currentStatus) &&
-    [LoadStatus.DELIVERED, LoadStatus.POD_RECEIVED, LoadStatus.READY_TO_INVOICE].includes(currentStatus);
+    !TERMINAL_LOAD_STATUSES.includes(currentStatus) &&
+    READY_STAGE_LOAD_STATUSES.includes(currentStatus);
 
   if (doc.type === DocType.POD) {
     if (readyForInvoice && canMoveToReady && currentStatus !== LoadStatus.READY_TO_INVOICE) {
@@ -8864,7 +10371,7 @@ app.post(
         continue;
       }
       const invoice = load.invoices[0] ?? null;
-      if (!invoice || ![InvoiceStatus.SENT, InvoiceStatus.ACCEPTED, InvoiceStatus.DISPUTED].includes(invoice.status)) {
+      if (!invoice || !REMINDER_INVOICE_STATUSES.includes(invoice.status)) {
         results.push({ loadId, ok: false, message: "Invoice is not in reminder stage" });
         continue;
       }
@@ -8975,6 +10482,449 @@ app.post(
       dedupeSuffix: parsed.data.dedupeSuffix ?? null,
     });
     res.json({ event });
+  }
+);
+
+app.get(
+  "/integrations/yardos/context",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      loadIds: z.string().optional(),
+      trailerId: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(500).optional(),
+    });
+    const parsed = schema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid query params" });
+      return;
+    }
+
+    const scope = await getUserTeamScope(req.user!);
+    const [scopedLoadIds, scopedTrailerIds] = await Promise.all([
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, scope),
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.TRAILER, scope),
+    ]);
+
+    const requestedLoadIds = (parsed.data.loadIds ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (requestedLoadIds.length > 0 && scopedLoadIds) {
+      const denied = requestedLoadIds.filter((id) => !scopedLoadIds.includes(id));
+      if (denied.length > 0) {
+        res.status(403).json({ error: "One or more loads are outside team scope", deniedLoadIds: denied });
+        return;
+      }
+    }
+
+    const requestedTrailerId = parsed.data.trailerId?.trim() || "";
+    if (requestedTrailerId && scopedTrailerIds && !scopedTrailerIds.includes(requestedTrailerId)) {
+      res.status(403).json({ error: "Trailer is outside team scope" });
+      return;
+    }
+
+    const limit = parsed.data.limit ?? 120;
+    const loadWhere: Prisma.LoadWhereInput = {
+      orgId: req.user!.orgId,
+      deletedAt: null,
+      ...(requestedLoadIds.length > 0
+        ? { id: { in: requestedLoadIds } }
+        : scopedLoadIds
+        ? { id: { in: scopedLoadIds } }
+        : {}),
+    };
+
+    const loads = await prisma.load.findMany({
+      where: loadWhere,
+      select: {
+        id: true,
+        loadNumber: true,
+        status: true,
+        movementMode: true,
+        palletCount: true,
+        weightLbs: true,
+        trailerId: true,
+        trailer: { select: { unit: true } },
+        stops: {
+          select: {
+            type: true,
+            city: true,
+            state: true,
+            appointmentStart: true,
+            appointmentEnd: true,
+            sequence: true,
+          },
+          orderBy: { sequence: "asc" },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+
+    const trailerWhere: Prisma.TrailerWhereInput = {
+      orgId: req.user!.orgId,
+      ...(requestedTrailerId
+        ? { id: requestedTrailerId }
+        : scopedTrailerIds
+        ? { id: { in: scopedTrailerIds } }
+        : {}),
+    };
+    const trailers = await prisma.trailer.findMany({
+      where: trailerWhere,
+      select: {
+        id: true,
+        unit: true,
+        type: true,
+        status: true,
+      },
+      orderBy: [{ active: "desc" }, { unit: "asc" }],
+      take: requestedTrailerId ? 1 : 120,
+    });
+
+    const response: YardOsContextResponse = {
+      orgId: req.user!.orgId,
+      generatedAt: new Date().toISOString(),
+      source: "truckerio",
+      loads: loads.map(buildYardOsLoadFromDb),
+      trailers,
+      trailerSpecDefaults: YARDOS_DEFAULT_TRAILER_SPEC,
+    };
+    res.json(response);
+  }
+);
+
+app.post(
+  "/integrations/yardos/plan-preview",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = yardOsPlanBaseSchema.extend({
+      planId: z.string().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const body = parsed.data as YardOsPlanPreviewRequest;
+    const summary = summarizeYardOsPlan({
+      trailerSpec: body.trailerSpec,
+      loads: body.loads,
+      placements: body.placements,
+      violations: body.violations ?? [],
+    });
+    const notes: string[] = [];
+    if (summary.overweight) notes.push("Plan exceeds legal trailer weight.");
+    if (summary.axleBalance.status !== "GOOD") notes.push("Axle balance is outside preferred range.");
+    if (summary.violationsBySeverity.high > 0 || summary.violationsBySeverity.critical > 0) {
+      notes.push("High-severity violations detected.");
+    }
+    if (notes.length === 0) notes.push("Plan preview passed baseline compatibility checks.");
+
+    const response: YardOsPlanPreviewResponse = {
+      ok: true,
+      summary,
+      notes,
+    };
+    res.json(response);
+  }
+);
+
+app.post(
+  "/integrations/yardos/plan-apply",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = yardOsPlanBaseSchema.extend({
+      planId: z.string().min(1),
+      note: z.string().max(800).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const body = parsed.data as YardOsPlanApplyRequest;
+    const touchedLoads = [...new Set(body.placements.map((placement) => placement.loadId).filter(Boolean))];
+    if (touchedLoads.length === 0) {
+      res.status(400).json({ error: "Plan has no placements to apply." });
+      return;
+    }
+
+    const scope = await getUserTeamScope(req.user!);
+    const [scopedLoadIds, scopedTrailerIds] = await Promise.all([
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, scope),
+      getScopedEntityIds(req.user!.orgId, TeamEntityType.TRAILER, scope),
+    ]);
+    if (scopedLoadIds) {
+      const denied = touchedLoads.filter((id) => !scopedLoadIds.includes(id));
+      if (denied.length > 0) {
+        res.status(403).json({ error: "One or more loads are outside team scope", deniedLoadIds: denied });
+        return;
+      }
+    }
+
+    const trailerId = body.trailerId?.trim() ? body.trailerId.trim() : null;
+    if (trailerId) {
+      if (scopedTrailerIds && !scopedTrailerIds.includes(trailerId)) {
+        res.status(403).json({ error: "Trailer is outside team scope" });
+        return;
+      }
+      const trailer = await prisma.trailer.findFirst({
+        where: { id: trailerId, orgId: req.user!.orgId },
+        select: { id: true, unit: true },
+      });
+      if (!trailer) {
+        res.status(404).json({ error: "Trailer not found" });
+        return;
+      }
+    }
+
+    const dbLoads = await prisma.load.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        deletedAt: null,
+        id: { in: touchedLoads },
+      },
+      select: { id: true, trailerId: true },
+    });
+    if (dbLoads.length !== touchedLoads.length) {
+      const found = new Set(dbLoads.map((load) => load.id));
+      const missing = touchedLoads.filter((id) => !found.has(id));
+      res.status(404).json({ error: "One or more loads not found", missingLoadIds: missing });
+      return;
+    }
+
+    if (trailerId) {
+      await prisma.load.updateMany({
+        where: {
+          orgId: req.user!.orgId,
+          deletedAt: null,
+          id: { in: touchedLoads },
+        },
+        data: {
+          trailerId,
+          assignedTrailerAt: new Date(),
+        },
+      });
+    }
+
+    const summary = summarizeYardOsPlan({
+      trailerSpec: body.trailerSpec,
+      loads: body.loads,
+      placements: body.placements,
+      violations: body.violations ?? [],
+    });
+
+    await Promise.all(
+      touchedLoads.map(async (loadId) => {
+        await createEvent({
+          orgId: req.user!.orgId,
+          loadId,
+          userId: req.user!.id,
+          type: trailerId ? EventType.LOAD_ASSIGNED : EventType.LOAD_STATUS_UPDATED,
+          message: trailerId
+            ? `YardOS plan ${body.planId} applied with trailer assignment.`
+            : `YardOS plan ${body.planId} applied.`,
+          meta: {
+            integration: "yardos",
+            planId: body.planId,
+            source: body.source ?? "yardos.integration",
+            trailerId,
+          },
+        });
+        await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+          orgId: req.user!.orgId,
+          loadId,
+          source: body.source ?? "yardos.integration",
+          trigger: "yardos_plan_apply",
+          dedupeSuffix: body.planId,
+        });
+      })
+    );
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "YARDOS_PLAN_APPLIED",
+      entity: "YardOSPlan",
+      entityId: body.planId,
+      summary: `Applied YardOS plan ${body.planId} to ${touchedLoads.length} load(s).`,
+      meta: {
+        source: body.source ?? "yardos.integration",
+        trailerId,
+        touchedLoads,
+      },
+      after: {
+        planId: body.planId,
+        trailerId,
+        touchedLoads,
+        note: body.note ?? null,
+        summary,
+      },
+    });
+
+    const response: YardOsPlanApplyResponse = {
+      ok: true,
+      planId: body.planId,
+      touchedLoads,
+      eventsQueued: touchedLoads.length,
+      summary,
+    };
+    res.json(response);
+  }
+);
+
+app.post(
+  "/integrations/yardos/plan-reject",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      planId: z.string().min(1),
+      reason: z.string().min(2),
+      source: z.string().optional(),
+      loadIds: z.array(z.string().min(1)).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const body = parsed.data as YardOsPlanRejectRequest;
+    const touchedLoads = [...new Set((body.loadIds ?? []).map((id) => id.trim()).filter(Boolean))];
+    if (touchedLoads.length > 0) {
+      const scope = await getUserTeamScope(req.user!);
+      const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, scope);
+      if (scopedLoadIds) {
+        const denied = touchedLoads.filter((id) => !scopedLoadIds.includes(id));
+        if (denied.length > 0) {
+          res.status(403).json({ error: "One or more loads are outside team scope", deniedLoadIds: denied });
+          return;
+        }
+      }
+    }
+
+    await Promise.all(
+      touchedLoads.map((loadId) =>
+        createEvent({
+          orgId: req.user!.orgId,
+          loadId,
+          userId: req.user!.id,
+          type: EventType.LOAD_STATUS_UPDATED,
+          message: `YardOS plan ${body.planId} rejected: ${body.reason}`,
+          meta: {
+            integration: "yardos",
+            planId: body.planId,
+            source: body.source ?? "yardos.integration",
+            reason: body.reason,
+          },
+        })
+      )
+    );
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "YARDOS_PLAN_REJECTED",
+      entity: "YardOSPlan",
+      entityId: body.planId,
+      summary: `Rejected YardOS plan ${body.planId}.`,
+      meta: {
+        source: body.source ?? "yardos.integration",
+        reason: body.reason,
+        touchedLoads,
+      },
+      after: {
+        planId: body.planId,
+        reason: body.reason,
+        touchedLoads,
+      },
+    });
+
+    const response: YardOsPlanRejectResponse = {
+      ok: true,
+      planId: body.planId,
+      reason: body.reason,
+      touchedLoads,
+    };
+    res.json(response);
+  }
+);
+
+app.get(
+  "/integrations/yardos/events",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const schema = z.object({
+      cursor: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(300).optional(),
+    });
+    const parsed = schema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid query params" });
+      return;
+    }
+
+    const cursorRaw = parsed.data.cursor?.trim();
+    const cursorDate = cursorRaw ? new Date(cursorRaw) : null;
+    if (cursorRaw && (!cursorDate || Number.isNaN(cursorDate.getTime()))) {
+      res.status(400).json({ error: "Invalid cursor value" });
+      return;
+    }
+    const limit = parsed.data.limit ?? 120;
+
+    const scope = await getUserTeamScope(req.user!);
+    const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, scope);
+
+    const where: Prisma.EventWhereInput = {
+      orgId: req.user!.orgId,
+      ...(cursorDate ? { createdAt: { gt: cursorDate } } : {}),
+      ...(scopedLoadIds
+        ? {
+            OR: [{ loadId: null }, { loadId: { in: scopedLoadIds } }],
+          }
+        : {}),
+    };
+
+    const rows = await prisma.event.findMany({
+      where,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: limit + 1,
+      select: {
+        id: true,
+        createdAt: true,
+        type: true,
+        loadId: true,
+        message: true,
+        meta: true,
+      },
+    });
+
+    const sliced = rows.slice(0, limit);
+    const nextCursor = rows.length > limit ? sliced[sliced.length - 1]?.createdAt.toISOString() ?? null : null;
+
+    const response: YardOsEventsResponse = {
+      orgId: req.user!.orgId,
+      nextCursor,
+      events: sliced.map((event) => ({
+        id: event.id,
+        createdAt: event.createdAt.toISOString(),
+        type: event.type,
+        loadId: event.loadId ?? null,
+        message: event.message,
+        meta: (event.meta ?? null) as Record<string, unknown> | null,
+      })),
+    };
+    res.json(response);
   }
 );
 
@@ -9835,7 +11785,7 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
       });
     }
 
-    if (![LoadStatus.INVOICED, LoadStatus.PAID].includes(load.status)) {
+    if (!([LoadStatus.INVOICED, LoadStatus.PAID] as LoadStatus[]).includes(load.status)) {
       await transitionLoadStatus({
         load: { id: load.id, loadNumber: load.loadNumber, status: load.status },
         nextStatus: LoadStatus.INVOICED,
@@ -10377,20 +12327,61 @@ type PayablePreviewLine = {
   loadId: string | null;
   type: PayableLineItemType;
   amountCents: number;
+  paidMiles: number | null;
+  ratePerMile: number | null;
+  milesSource: PayableMilesSource | null;
+  milesVariancePct: number | null;
+  requiresReview: boolean;
+  reviewReasonCode: string | null;
   memo: string | null;
   source: Prisma.JsonObject;
 };
 
 async function buildPayablePreviewLines(params: { orgId: string; periodStart: Date; periodEnd: Date }) {
-  const [settlements, settings] = await Promise.all([
-    prisma.settlement.findMany({
+  const [loads, settlementItems, settings] = await Promise.all([
+    prisma.load.findMany({
       where: {
         orgId: params.orgId,
-        periodStart: { gte: params.periodStart },
-        periodEnd: { lte: params.periodEnd },
+        assignedDriverId: { not: null },
+        deliveredAt: { gte: params.periodStart, lte: params.periodEnd },
       },
-      include: { items: true },
-      orderBy: [{ driverId: "asc" }, { periodStart: "asc" }],
+      select: {
+        id: true,
+        loadNumber: true,
+        movementMode: true,
+        miles: true,
+        paidMiles: true,
+        paidMilesSource: true,
+        paidMilesApprovedById: true,
+        paidMilesApprovedAt: true,
+        assignedDriverId: true,
+        deliveredAt: true,
+        driver: { select: { payRatePerMile: true } },
+      },
+      orderBy: [{ assignedDriverId: "asc" }, { deliveredAt: "asc" }, { createdAt: "asc" }],
+    }),
+    prisma.settlementItem.findMany({
+      where: {
+        settlement: {
+          orgId: params.orgId,
+          periodStart: { gte: params.periodStart },
+          periodEnd: { lte: params.periodEnd },
+        },
+      },
+      select: {
+        id: true,
+        loadId: true,
+        code: true,
+        description: true,
+        amount: true,
+        settlement: {
+          select: {
+            id: true,
+            driverId: true,
+          },
+        },
+      },
+      orderBy: [{ settlementId: "asc" }, { id: "asc" }],
     }),
     prisma.orgSettings.findFirst({
       where: { orgId: params.orgId },
@@ -10398,83 +12389,74 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
     }),
   ]);
   const lines: PayablePreviewLine[] = [];
-  const driversCoveredBySettlement = new Set<string>();
-  for (const settlement of settlements) {
-    driversCoveredBySettlement.add(settlement.driverId);
-    if (settlement.items.length > 0) {
-      for (const item of settlement.items) {
-        const rawAmount = Number(item.amount);
-        const type = rawAmount >= 0 ? PayableLineItemType.EARNING : PayableLineItemType.DEDUCTION;
-        lines.push({
-          partyType: PayablePartyType.DRIVER,
-          partyId: settlement.driverId,
-          loadId: item.loadId ?? null,
-          type,
-          amountCents: Math.abs(Math.round(rawAmount * 100)),
-          memo: item.description ?? item.code,
-          source: {
-            settlementId: settlement.id,
-            settlementItemId: item.id,
-          },
-        });
-      }
-      continue;
-    }
-    const netAmount = Number(settlement.net ?? settlement.gross ?? 0);
-    if (Math.round(netAmount * 100) === 0) continue;
-    const type = netAmount >= 0 ? PayableLineItemType.EARNING : PayableLineItemType.DEDUCTION;
-    lines.push({
-      partyType: PayablePartyType.DRIVER,
-      partyId: settlement.driverId,
-      loadId: null,
-      type,
-      amountCents: Math.abs(Math.round(netAmount * 100)),
-      memo: `Settlement ${settlement.id}`,
-      source: { settlementId: settlement.id },
-    });
-  }
-
-  // Fallback for orgs that have delivered loads but no settlement rows yet:
-  // build deterministic CPM earnings lines directly from delivered load data.
-  const fallbackLoads = await prisma.load.findMany({
-    where: {
-      orgId: params.orgId,
-      assignedDriverId: { not: null },
-      deliveredAt: { gte: params.periodStart, lte: params.periodEnd },
-    },
-    select: {
-      id: true,
-      loadNumber: true,
-      miles: true,
-      assignedDriverId: true,
-      deliveredAt: true,
-      driver: { select: { payRatePerMile: true } },
-    },
-    orderBy: [{ assignedDriverId: "asc" }, { deliveredAt: "asc" }, { createdAt: "asc" }],
-  });
 
   const defaultRate = toDecimal(settings?.driverRatePerMile ?? 0) ?? new Prisma.Decimal(0);
-  for (const load of fallbackLoads) {
+  for (const load of loads) {
     if (!load.assignedDriverId) continue;
-    if (driversCoveredBySettlement.has(load.assignedDriverId)) continue;
     const ratePerMile = toDecimal(load.driver?.payRatePerMile ?? defaultRate) ?? defaultRate;
-    const miles = toDecimalFixed(load.miles ?? 0, 2) ?? new Prisma.Decimal(0);
-    const amount = mul(ratePerMile, miles);
+    const paidMilesNumber = Number(load.paidMiles ?? load.miles ?? 0);
+    if (!Number.isFinite(paidMilesNumber) || paidMilesNumber <= 0) continue;
+    const paidMiles = toDecimalFixed(paidMilesNumber, 2) ?? new Prisma.Decimal(0);
+    const amount = mul(ratePerMile, paidMiles);
     const amountCents = Math.abs(Math.round(Number(amount) * 100));
     if (amountCents === 0) continue;
+    const variancePct = calculateMilesVariancePct(load.miles ?? null, paidMilesNumber);
+    const requiresReview = variancePct !== null && variancePct > PAYABLE_MILES_VARIANCE_REVIEW_PCT;
+    const milesSource = load.paidMilesSource ?? PayableMilesSource.PLANNED;
     lines.push({
       partyType: PayablePartyType.DRIVER,
       partyId: load.assignedDriverId,
       loadId: load.id,
       type: PayableLineItemType.EARNING,
       amountCents,
-      memo: `Fallback CPM for ${load.loadNumber ?? load.id}`,
+      paidMiles: paidMilesNumber,
+      ratePerMile: Number(ratePerMile),
+      milesSource,
+      milesVariancePct: variancePct,
+      requiresReview,
+      reviewReasonCode: requiresReview ? "MILES_VARIANCE_HIGH" : null,
+      memo: `${load.movementMode} mileage pay for ${load.loadNumber ?? load.id}`,
       source: {
-        fallback: "DELIVERED_LOAD",
+        sourceType: "DELIVERED_LOAD",
         loadId: load.id,
         deliveredAt: load.deliveredAt?.toISOString() ?? null,
+        movementMode: load.movementMode,
+        paidMilesApprovedById: load.paidMilesApprovedById ?? null,
+        paidMilesApprovedAt: load.paidMilesApprovedAt?.toISOString() ?? null,
         ratePerMile: Number(ratePerMile),
-        miles: Number(miles),
+        plannedMiles: load.miles ?? null,
+        paidMiles: paidMilesNumber,
+        variancePct,
+      },
+    });
+  }
+
+  // Keep non-CPM settlement adjustments (deductions/reimbursements/manual entries)
+  // so existing payroll adjustments remain included in preview runs.
+  for (const item of settlementItems) {
+    const code = (item.code ?? "").toUpperCase().trim();
+    if (code === "CPM") continue;
+    const rawAmount = Number(item.amount);
+    const amountCents = Math.abs(Math.round(rawAmount * 100));
+    if (amountCents === 0) continue;
+    lines.push({
+      partyType: PayablePartyType.DRIVER,
+      partyId: item.settlement.driverId,
+      loadId: item.loadId ?? null,
+      type: rawAmount >= 0 ? PayableLineItemType.EARNING : PayableLineItemType.DEDUCTION,
+      amountCents,
+      paidMiles: null,
+      ratePerMile: null,
+      milesSource: null,
+      milesVariancePct: null,
+      requiresReview: false,
+      reviewReasonCode: null,
+      memo: item.description ?? item.code,
+      source: {
+        sourceType: "SETTLEMENT_ITEM",
+        settlementId: item.settlement.id,
+        settlementItemId: item.id,
+        code: item.code,
       },
     });
   }
@@ -10501,6 +12483,21 @@ function detectPayableAnomalies(lines: PayablePreviewLine[]): PayableAnomaly[] {
     const partyKey = `${line.partyType}:${line.partyId}`;
     netByParty.set(partyKey, (netByParty.get(partyKey) ?? 0) + signed);
     absoluteAmounts.push(Math.abs(line.amountCents));
+    if (line.requiresReview) {
+      anomalies.push({
+        code: line.reviewReasonCode ?? "MILES_REVIEW_REQUIRED",
+        severity: "warning",
+        message: `Mileage variance needs review for ${line.partyType} ${line.partyId}`,
+        partyId: line.partyId,
+        meta: {
+          loadId: line.loadId,
+          paidMiles: line.paidMiles,
+          ratePerMile: line.ratePerMile,
+          milesVariancePct: line.milesVariancePct,
+          milesSource: line.milesSource,
+        },
+      });
+    }
     if ((line.type === PayableLineItemType.DEDUCTION || line.type === PayableLineItemType.REIMBURSEMENT) && !line.loadId) {
       anomalies.push({
         code: "MISSING_LINKAGE",
@@ -10725,6 +12722,12 @@ app.post("/payables/runs/:id/preview", requireAuth, requireCsrf, requirePermissi
           loadId: line.loadId,
           type: line.type,
           amountCents: line.amountCents,
+          paidMiles: line.paidMiles,
+          ratePerMile: line.ratePerMile,
+          milesSource: line.milesSource,
+          milesVariancePct: line.milesVariancePct,
+          requiresReview: line.requiresReview,
+          reviewReasonCode: line.reviewReasonCode,
           memo: line.memo,
           source: line.source,
         })),
@@ -11144,7 +13147,7 @@ app.post("/settlements/generate", requireAuth, requireCsrf, requirePermission(Pe
       assignedDriverId: driver.id,
       deliveredAt: { gte: periodStart, lte: periodEnd },
     },
-    select: { id: true, loadNumber: true, miles: true },
+    select: { id: true, loadNumber: true, miles: true, paidMiles: true, paidMilesSource: true },
   });
   if (loads.length === 0) {
     res.status(409).json({
@@ -11159,13 +13162,15 @@ app.post("/settlements/generate", requireAuth, requireCsrf, requirePermission(Pe
   }
   let gross = new Prisma.Decimal(0);
   const items = loads.map((load) => {
-    const miles = toDecimalFixed(load.miles ?? 0, 2) ?? new Prisma.Decimal(0);
+    const paidMiles = load.paidMiles ?? load.miles ?? 0;
+    const miles = toDecimalFixed(paidMiles, 2) ?? new Prisma.Decimal(0);
     const amount = mul(rate, miles);
     gross = add(gross, amount);
+    const sourceLabel = load.paidMilesSource ? ` (${load.paidMilesSource})` : "";
     return {
       loadId: load.id,
       code: "CPM",
-      description: `Miles for ${load.loadNumber ?? load.id}`,
+      description: `Miles for ${load.loadNumber ?? load.id}${sourceLabel}`,
       amount,
     };
   });
@@ -12134,7 +14139,9 @@ app.get("/admin/vault/docs", requireAuth, requireRole("ADMIN"), async (req, res)
     where.expiresAt = { gte: now, lte: expiringThreshold };
   } else if (status === "NEEDS_DETAILS") {
     where.expiresAt = null;
-    where.AND = [...(where.AND ?? []), { docType: { in: VAULT_DOCS_REQUIRING_EXPIRY } }];
+    const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+    andConditions.push({ docType: { in: VAULT_DOCS_REQUIRING_EXPIRY } });
+    where.AND = andConditions;
   } else if (status === "VALID") {
     where.OR = [
       { expiresAt: { gt: expiringThreshold } },
@@ -12866,7 +14873,7 @@ app.post("/api/integrations/samsara/connect", requireAuth, requireCsrf, requireR
 app.post("/api/integrations/samsara/disconnect", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const integration = await prisma.trackingIntegration.upsert({
     where: { orgId_providerType: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA } },
-    update: { status: TrackingIntegrationStatus.DISCONNECTED, configJson: null, errorMessage: null },
+    update: { status: TrackingIntegrationStatus.DISCONNECTED, configJson: Prisma.JsonNull, errorMessage: null },
     create: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, status: TrackingIntegrationStatus.DISCONNECTED },
   });
 
@@ -12896,7 +14903,7 @@ app.get("/api/integrations/samsara/vehicles", requireAuth, requireRole("ADMIN"),
   try {
     const vehicles = await fetchSamsaraVehicles(token, limit);
     res.json({
-      vehicles: vehicles.filter((vehicle) => vehicle.id),
+      vehicles: vehicles.filter((vehicle: any) => vehicle.id),
       count: vehicles.length,
     });
   } catch (error) {
@@ -12916,7 +14923,7 @@ app.post("/api/integrations/samsara/test", requireAuth, requireCsrf, requireRole
   try {
     await validateSamsaraToken(token);
     const vehicles = await fetchSamsaraVehicles(token, 10);
-    const sampleIds = vehicles.map((vehicle) => vehicle.id).filter(Boolean);
+    const sampleIds = vehicles.map((vehicle: any) => vehicle.id).filter(Boolean);
     res.json({
       ok: true,
       vehicleCountSampled: vehicles.length,
@@ -14693,7 +16700,9 @@ app.post(
       }
 
       const assignedDriverId = driverEmail ? driverMap.get(driverEmail) : undefined;
-      const status = row.status?.trim() || (assignedDriverId ? "ASSIGNED" : "PLANNED");
+      const statusInput = row.status?.trim() || (assignedDriverId ? "ASSIGNED" : "PLANNED");
+      const mappedStatus = mapExternalLoadStatus(statusInput).status;
+      const status = LOAD_EXECUTION_STATUSES.has(mappedStatus) ? LoadStatus.PLANNED : mappedStatus;
       const rateValue = toNumber(row.rate ?? "") ?? undefined;
       let shipperReferenceNumber: string | null = null;
       let consigneeReferenceNumber: string | null = null;
@@ -14724,11 +16733,11 @@ app.post(
           weightLbs,
           miles: toNumber(row.miles ?? "") ?? undefined,
           rate: rateValue !== undefined ? new Prisma.Decimal(rateValue) : undefined,
-          assignedDriverId: assignedDriverId ?? null,
-          truckId: truckId ?? null,
-          trailerId: trailerId ?? null,
-          status: status as any,
-          completedAt: isCompletedStatus(status as LoadStatus) ? new Date() : null,
+          assignedDriverId: null,
+          truckId: null,
+          trailerId: null,
+          status,
+          completedAt: isCompletedStatus(status) ? new Date() : null,
         },
       });
       loadMap.set(loadNumber, load);

@@ -1,5 +1,5 @@
 # QA Report
-Generated: 2026-02-14T22:50:59.673Z
+Generated: 2026-02-22T23:55:55.445Z
 
 ## Summary
 - Passed: 15
@@ -12,7 +12,7 @@ Generated: 2026-02-14T22:50:59.673Z
 - PASS qa.setup.migrate — prisma db execute reset + prisma db push
 - PASS qa.setup.seed — Seeded QA orgs/users
 - PASS qa.tests.unit-integration — pnpm -r --if-present test (log: /Users/karanpreetsingh/demo-truckerio1/scripts/qa/qa-tests.log)
-- PASS qa.smoke.cleanup.assignments — Unassigned 0 existing load(s) for QA seed assets
+- PASS qa.smoke.cleanup.assignments — Cleared assignments from 0 trip(s) for QA seed assets
 - PASS qa.smoke.multitenant — Org A cannot see Org B load
 - PASS qa.smoke.rbac — RBAC enforcement ok
 - PASS qa.smoke.load.lifecycle — Load delivered (DELIVERED)
@@ -21,7 +21,7 @@ Generated: 2026-02-14T22:50:59.673Z
 - PASS qa.smoke.invoicing — Invoice packet generated
 - PASS qa.smoke.settlements — Settlement finalized and paid
 - PASS qa.smoke.imports — CSV import preview + commit ok
-- PASS qa.smoke.load.confirmations — Load confirmation created load cmlmwucyr005yx0rgo5uzjvif
+- PASS qa.smoke.load.confirmations — Load confirmation created load cmlyeooa1006j4z5l6fkqsq78
 ## Logs
 
 ### scripts/qa/qa-tests.log
@@ -48,22 +48,22 @@ Scope: 5 of 6 workspace projects
 
 API listening on 0.0.0.0:4010
 Billing readiness updated {
-  loadId: 'cmlmwubda000lx0rg773k3q21',
+  loadId: 'cmlyeoljm000b4z5lw3ieytx2',
   billingStatus: 'BLOCKED',
-  blockingReasons: [ 'Delivery incomplete' ]
+  blockingReasons: [ 'Delivery incomplete', 'Invoice required before ready' ]
 }
 Billing readiness updated {
-  loadId: 'cmlmwubda000lx0rg773k3q21',
+  loadId: 'cmlyeoljm000b4z5lw3ieytx2',
   billingStatus: 'BLOCKED',
-  blockingReasons: [ 'Missing POD', 'Missing BOL' ]
+  blockingReasons: [ 'Missing POD', 'Missing BOL', 'Invoice required before ready' ]
 }
 Billing readiness updated {
-  loadId: 'cmlmwubda000lx0rg773k3q21',
+  loadId: 'cmlyeoljm000b4z5lw3ieytx2',
   billingStatus: 'BLOCKED',
-  blockingReasons: [ 'Missing BOL' ]
+  blockingReasons: [ 'Missing BOL', 'Invoice required before ready' ]
 }
 Billing readiness updated {
-  loadId: 'cmlmwubda000lx0rg773k3q21',
+  loadId: 'cmlyeoljm000b4z5lw3ieytx2',
   billingStatus: 'INVOICED',
   blockingReasons: []
 }

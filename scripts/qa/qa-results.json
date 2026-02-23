@@ -4,106 +4,106 @@
       "name": "qa.setup.docker",
       "status": "pass",
       "details": "docker-compose up -d",
-      "startedAt": "2026-02-14T22:50:46.117Z",
-      "finishedAt": "2026-02-14T22:50:46.263Z"
+      "startedAt": "2026-02-22T23:55:38.352Z",
+      "finishedAt": "2026-02-22T23:55:38.598Z"
     },
     {
       "name": "qa.setup.db-ready",
       "status": "pass",
       "details": "Postgres is ready",
-      "startedAt": "2026-02-14T22:50:46.263Z",
-      "finishedAt": "2026-02-14T22:50:46.360Z"
+      "startedAt": "2026-02-22T23:55:38.598Z",
+      "finishedAt": "2026-02-22T23:55:38.763Z"
     },
     {
       "name": "qa.setup.migrate",
       "status": "pass",
       "details": "prisma db execute reset + prisma db push",
-      "startedAt": "2026-02-14T22:50:46.360Z",
-      "finishedAt": "2026-02-14T22:50:48.317Z"
+      "startedAt": "2026-02-22T23:55:38.764Z",
+      "finishedAt": "2026-02-22T23:55:42.075Z"
     },
     {
       "name": "qa.setup.seed",
       "status": "pass",
       "details": "Seeded QA orgs/users",
-      "startedAt": "2026-02-14T22:50:48.318Z",
-      "finishedAt": "2026-02-14T22:50:48.794Z"
+      "startedAt": "2026-02-22T23:55:42.076Z",
+      "finishedAt": "2026-02-22T23:55:42.624Z"
     },
     {
       "name": "qa.tests.unit-integration",
       "status": "pass",
       "details": "pnpm -r --if-present test (log: /Users/karanpreetsingh/demo-truckerio1/scripts/qa/qa-tests.log)",
-      "startedAt": "2026-02-14T22:50:49.210Z",
-      "finishedAt": "2026-02-14T22:50:50.304Z"
+      "startedAt": "2026-02-22T23:55:43.051Z",
+      "finishedAt": "2026-02-22T23:55:44.021Z"
     },
     {
       "name": "qa.smoke.cleanup.assignments",
       "status": "pass",
-      "details": "Unassigned 0 existing load(s) for QA seed assets",
-      "startedAt": "2026-02-14T22:50:57.107Z",
-      "finishedAt": "2026-02-14T22:50:57.158Z"
+      "details": "Cleared assignments from 0 trip(s) for QA seed assets",
+      "startedAt": "2026-02-22T23:55:51.402Z",
+      "finishedAt": "2026-02-22T23:55:51.430Z"
     },
     {
       "name": "qa.smoke.multitenant",
       "status": "pass",
       "details": "Org A cannot see Org B load",
-      "startedAt": "2026-02-14T22:50:57.159Z",
-      "finishedAt": "2026-02-14T22:50:57.211Z"
+      "startedAt": "2026-02-22T23:55:51.431Z",
+      "finishedAt": "2026-02-22T23:55:51.497Z"
     },
     {
       "name": "qa.smoke.rbac",
       "status": "pass",
       "details": "RBAC enforcement ok",
-      "startedAt": "2026-02-14T22:50:57.211Z",
-      "finishedAt": "2026-02-14T22:50:57.213Z"
+      "startedAt": "2026-02-22T23:55:51.497Z",
+      "finishedAt": "2026-02-22T23:55:51.500Z"
     },
     {
       "name": "qa.smoke.load.lifecycle",
       "status": "pass",
       "details": "Load delivered (DELIVERED)",
-      "startedAt": "2026-02-14T22:50:57.213Z",
-      "finishedAt": "2026-02-14T22:50:57.286Z"
+      "startedAt": "2026-02-22T23:55:51.500Z",
+      "finishedAt": "2026-02-22T23:55:51.620Z"
     },
     {
       "name": "qa.smoke.documents",
       "status": "pass",
       "details": "POD verified, invoice created via generate ",
-      "startedAt": "2026-02-14T22:50:57.286Z",
-      "finishedAt": "2026-02-14T22:50:57.329Z"
+      "startedAt": "2026-02-22T23:55:51.620Z",
+      "finishedAt": "2026-02-22T23:55:51.693Z"
     },
     {
       "name": "qa.smoke.billing.queue",
       "status": "pass",
       "details": "Load visible in billing queue (delivered)",
-      "startedAt": "2026-02-14T22:50:57.329Z",
-      "finishedAt": "2026-02-14T22:50:57.336Z"
+      "startedAt": "2026-02-22T23:55:51.694Z",
+      "finishedAt": "2026-02-22T23:55:51.700Z"
     },
     {
       "name": "qa.smoke.invoicing",
       "status": "pass",
       "details": "Invoice packet generated",
-      "startedAt": "2026-02-14T22:50:57.336Z",
-      "finishedAt": "2026-02-14T22:50:59.173Z"
+      "startedAt": "2026-02-22T23:55:51.700Z",
+      "finishedAt": "2026-02-22T23:55:54.929Z"
     },
     {
       "name": "qa.smoke.settlements",
       "status": "pass",
       "details": "Settlement finalized and paid",
-      "startedAt": "2026-02-14T22:50:59.173Z",
-      "finishedAt": "2026-02-14T22:50:59.197Z"
+      "startedAt": "2026-02-22T23:55:54.930Z",
+      "finishedAt": "2026-02-22T23:55:54.950Z"
     },
     {
       "name": "qa.smoke.imports",
       "status": "pass",
       "details": "CSV import preview + commit ok",
-      "startedAt": "2026-02-14T22:50:59.197Z",
-      "finishedAt": "2026-02-14T22:50:59.214Z"
+      "startedAt": "2026-02-22T23:55:54.950Z",
+      "finishedAt": "2026-02-22T23:55:54.963Z"
     },
     {
       "name": "qa.smoke.load.confirmations",
       "status": "pass",
-      "details": "Load confirmation created load cmlmwucyr005yx0rgo5uzjvif",
-      "startedAt": "2026-02-14T22:50:59.214Z",
-      "finishedAt": "2026-02-14T22:50:59.255Z"
+      "details": "Load confirmation created load cmlyeooa1006j4z5l6fkqsq78",
+      "startedAt": "2026-02-22T23:55:54.963Z",
+      "finishedAt": "2026-02-22T23:55:55.000Z"
     }
   ]
 }

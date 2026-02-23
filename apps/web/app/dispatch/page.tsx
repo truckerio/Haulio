@@ -18,9 +18,10 @@ import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { NoAccess } from "@/components/rbac/no-access";
 import type { AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
 import { DispatchBrowse } from "@/components/dispatch/DispatchBrowse";
+import { TripsWorkspace } from "@/components/dispatch/TripsWorkspace";
 import { WorkbenchRightPane } from "@/components/dispatch/WorkbenchRightPane";
 import { apiFetch } from "@/lib/api";
-import { ManifestPanel } from "./manifest-panel";
+import { buildYardOsPlanningUrl } from "@/lib/yardos";
 import { LegsPanel } from "./legs-panel";
 
 const PAGE_SIZE = 25;
@@ -65,6 +66,11 @@ type DispatchItem = {
   id: string;
   loadNumber: string;
   status: string;
+  trip?: {
+    id: string;
+    tripNumber: string;
+    status: string;
+  } | null;
   customerName?: string | null;
   rate?: string | number | null;
   miles?: number | null;
@@ -116,6 +122,7 @@ const defaultFilters = {
 
 type Filters = typeof defaultFilters;
 type QueueView = "active" | "recent" | "history";
+type DispatchWorkspaceTab = "dispatch" | "trips";
 
 function DispatchPageContent() {
   const router = useRouter();
@@ -134,7 +141,6 @@ function DispatchPageContent() {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [browseLens, setBrowseLens] = useState<"board" | "list">("board");
   const [showFilters, setShowFilters] = useState(false);
-  const [showManifest, setShowManifest] = useState(false);
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -143,8 +149,7 @@ function DispatchPageContent() {
   const [dispatchSettings, setDispatchSettings] = useState<any | null>(null);
   const [availability, setAvailability] = useState<AvailabilityData | null>(null);
   const [showUnavailable, setShowUnavailable] = useState(false);
-  const [assignmentMode, setAssignmentMode] = useState<"solo" | "team">("solo");
-  const [assignForm, setAssignForm] = useState({ driverId: "", coDriverId: "", truckId: "", trailerId: "" });
+  const [assignForm, setAssignForm] = useState({ driverId: "", truckId: "", trailerId: "" });
   const [assignmentSuggestions, setAssignmentSuggestions] = useState<AssignmentSuggestion[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
@@ -165,11 +170,32 @@ function DispatchPageContent() {
   const pendingLoadIdRef = useRef<string | null>(null);
 
   const loadIdParam = searchParams.get("loadId");
+  const workspaceTab = useMemo<DispatchWorkspaceTab>(() => {
+    return searchParams.get("tab") === "trips" ? "trips" : "dispatch";
+  }, [searchParams]);
+  const dispatchWorkspaceActive = workspaceTab === "dispatch";
   const queueView = useMemo<QueueView>(() => {
     const value = searchParams.get("queueView");
     if (value === "recent" || value === "history") return value;
     return "active";
   }, [searchParams]);
+
+  const updateWorkspaceTab = useCallback(
+    (nextTab: DispatchWorkspaceTab) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (nextTab === "dispatch") {
+        params.delete("tab");
+        params.delete("tripId");
+      } else {
+        params.set("tab", "trips");
+        params.delete("loadId");
+        params.delete("queueView");
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+    },
+    [pathname, router, searchParams]
+  );
 
   const updateLoadIdParam = useCallback(
     (loadId: string | null) => {
@@ -203,15 +229,6 @@ function DispatchPageContent() {
 
   const selectedLoadInView = Boolean(selectedLoadId && loads.some((load) => load.id === selectedLoadId));
 
-
-
-  const updateAssignmentMode = useCallback((nextMode: "solo" | "team") => {
-    setAssignmentMode(nextMode);
-    if (nextMode === "solo") {
-      setAssignForm((prev) => ({ ...prev, coDriverId: "" }));
-    }
-  }, []);
-
   const selectLoad = useCallback(
     (loadId: string) => {
       setSelectedLoadId(loadId);
@@ -235,13 +252,19 @@ function DispatchPageContent() {
     window.setTimeout(() => setLegAddedNote(false), 2000);
   }, []);
 
-  const canDispatch = Boolean(
+  const hasDispatchRole = Boolean(
     user && (user.role === "ADMIN" || user.role === "DISPATCHER" || user.role === "HEAD_DISPATCHER")
   );
+  const hasTripsRole = Boolean(
+    user &&
+      (user.role === "ADMIN" ||
+        user.role === "DISPATCHER" ||
+        user.role === "HEAD_DISPATCHER" ||
+        user.role === "BILLING")
+  );
+  const canDispatch = dispatchWorkspaceActive && hasDispatchRole;
   const isQueueReadOnly = queueView !== "active";
-  const canStartTracking = Boolean(
-    user && (user.role === "ADMIN" || user.role === "DISPATCHER" || user.role === "HEAD_DISPATCHER")
-  );
+  const canStartTracking = canDispatch;
   const canSeeAllTeams = Boolean(
     user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER" || user?.canSeeAllTeams
   );
@@ -254,14 +277,9 @@ function DispatchPageContent() {
     (doc: any) => doc.type === "RATECON" || doc.type === "RATE_CONFIRMATION"
   );
   const rateConMissing = Boolean(dispatchStage && rateConRequired && !hasRateCon);
-  const coDriverConflict =
-    assignmentMode === "team" &&
-    Boolean(assignForm.coDriverId) &&
-    assignForm.coDriverId === assignForm.driverId;
   const assignDisabled =
     isQueueReadOnly ||
     !assignForm.driverId ||
-    coDriverConflict ||
     (rateConMissing && !canOverride) ||
     (rateConMissing && canOverride && !overrideReason.trim());
 
@@ -270,13 +288,24 @@ function DispatchPageContent() {
       .then((data) => {
         setUser(data.user);
         const allowed =
-          data.user?.role === "ADMIN" || data.user?.role === "DISPATCHER" || data.user?.role === "HEAD_DISPATCHER";
+          data.user?.role === "ADMIN" ||
+          data.user?.role === "DISPATCHER" ||
+          data.user?.role === "HEAD_DISPATCHER" ||
+          data.user?.role === "BILLING";
         setHasAccess(Boolean(allowed));
       })
       .catch(() => setHasAccess(false));
   }, []);
 
   useEffect(() => {
+    if (hasAccess !== true) return;
+    if (workspaceTab !== "dispatch") return;
+    if (hasDispatchRole || !hasTripsRole) return;
+    updateWorkspaceTab("trips");
+  }, [hasAccess, workspaceTab, hasDispatchRole, hasTripsRole, updateWorkspaceTab]);
+
+  useEffect(() => {
+    if (!dispatchWorkspaceActive) return;
     if (!user || user.role !== "ADMIN") return;
     apiFetch<{ state: { status?: string } }>("/onboarding/state")
       .then((payload) => {
@@ -289,7 +318,7 @@ function DispatchPageContent() {
       .catch(() => {
         // ignore onboarding checks for non-admins or unexpected errors
       });
-  }, [user]);
+  }, [user, dispatchWorkspaceActive]);
 
   useEffect(() => {
     if (!hasAccess) return;
@@ -451,15 +480,12 @@ function DispatchPageContent() {
       setSelectedLoad(data.load ?? null);
       setDispatchSettings(data.settings ?? null);
       setAssignError(null);
-      const selectedCoDriverId =
-        data.load?.assignmentMembers?.find((member: any) => member.role === "CO_DRIVER")?.driverId ?? "";
+      const selectedTrip = data.load?.tripLoads?.[0]?.trip ?? null;
       setAssignForm({
-        driverId: data.load?.assignedDriverId ?? "",
-        coDriverId: selectedCoDriverId,
-        truckId: data.load?.truckId ?? "",
-        trailerId: data.load?.trailerId ?? "",
+        driverId: selectedTrip?.driverId ?? data.load?.assignedDriverId ?? "",
+        truckId: selectedTrip?.truckId ?? data.load?.truckId ?? "",
+        trailerId: selectedTrip?.trailerId ?? data.load?.trailerId ?? "",
       });
-      setAssignmentMode(selectedCoDriverId ? "team" : "solo");
       setDispatchError(null);
       return data.load ?? null;
     } catch (error) {
@@ -534,7 +560,7 @@ function DispatchPageContent() {
     setConfirmReassign(false);
     setAssignError(null);
     setOverrideReason("");
-  }, [assignForm.driverId, assignForm.coDriverId, assignForm.truckId, assignForm.trailerId, selectedLoadId, showUnavailable]);
+  }, [assignForm.driverId, assignForm.truckId, assignForm.trailerId, selectedLoadId, showUnavailable]);
 
   useEffect(() => {
     const shouldAutoExpand = Boolean(selectedLoad?.riskFlags?.atRisk || selectedLoad?.riskFlags?.overdueStopWindow);
@@ -542,6 +568,7 @@ function DispatchPageContent() {
   }, [selectedLoad?.id, selectedLoad?.riskFlags?.atRisk, selectedLoad?.riskFlags?.overdueStopWindow]);
 
   const deriveRiskFlags = (load: any) => {
+    const trip = load?.tripLoads?.[0]?.trip ?? null;
     const stops = load?.stops ?? [];
     const nextStop = stops.find((stop: any) => !stop.arrivedAt || !stop.departedAt) ?? null;
     const now = Date.now();
@@ -562,7 +589,7 @@ function DispatchPageContent() {
     }
     const trackingOff = load?.status === "IN_TRANSIT" && trackingState === "OFF";
     const needsAssignment =
-      !load?.assignedDriverId || !load?.truckId || load?.status === "PLANNED" || load?.status === "DRAFT";
+      !trip || !trip.driverId || !trip.truckId || !trip.trailerId || trip.status === "PLANNED";
     return {
       needsAssignment,
       trackingOffInTransit: trackingOff,
@@ -573,6 +600,7 @@ function DispatchPageContent() {
   };
 
   const patchLoadSummary = (updated: any) => {
+    const updatedTrip = updated?.tripLoads?.[0]?.trip ?? null;
     setLoads((prev) =>
       prev.map((item) => {
         if (item.id !== updated.id) return item;
@@ -580,10 +608,17 @@ function DispatchPageContent() {
         return {
           ...item,
           status: updated.status ?? item.status,
+          trip: updatedTrip
+            ? {
+                id: updatedTrip.id,
+                tripNumber: updatedTrip.tripNumber,
+                status: updatedTrip.status,
+              }
+            : item.trip,
           assignment: {
-            driver: updated.driver ?? item.assignment?.driver,
-            truck: updated.truck ?? item.assignment?.truck,
-            trailer: updated.trailer ?? item.assignment?.trailer,
+            driver: updatedTrip?.driver ?? updated.driver ?? item.assignment?.driver,
+            truck: updatedTrip?.truck ?? updated.truck ?? item.assignment?.truck,
+            trailer: updatedTrip?.trailer ?? updated.trailer ?? item.assignment?.trailer,
           },
           operatingEntity: updated.operatingEntity ?? item.operatingEntity,
           nextStop: updated.stops?.find((stop: any) => !stop.arrivedAt || !stop.departedAt) ?? item.nextStop,
@@ -593,18 +628,12 @@ function DispatchPageContent() {
     );
   };
 
-  const buildConflictMessages = (driverId?: string, coDriverId?: string, truckId?: string, trailerId?: string) => {
+  const buildConflictMessages = (driverId?: string, truckId?: string, trailerId?: string) => {
     const conflicts: string[] = [];
     if (driverId) {
       const driver = unavailableDrivers.find((item) => item.id === driverId);
       if (driver) {
         conflicts.push(`Driver: Assigning this driver will move them from ${driver.reason ?? "another load"}.`);
-      }
-    }
-    if (coDriverId) {
-      const coDriver = unavailableDrivers.find((item) => item.id === coDriverId);
-      if (coDriver) {
-        conflicts.push(`Co-driver: Assigning this driver will move them from ${coDriver.reason ?? "another load"}.`);
       }
     }
     if (truckId) {
@@ -643,28 +672,43 @@ function DispatchPageContent() {
     }
   };
 
-  const performAssign = async (params: { driverId: string; coDriverId?: string; truckId?: string; trailerId?: string }) => {
+  const performAssign = async (params: { driverId: string; truckId?: string; trailerId?: string }) => {
     if (isQueueReadOnly) return;
     if (!selectedLoad) return;
     if (!params.driverId) return;
-    const conflicts = buildConflictMessages(params.driverId, params.coDriverId, params.truckId, params.trailerId);
+    const conflicts = buildConflictMessages(params.driverId, params.truckId, params.trailerId);
     if (conflicts.length > 0 && !confirmReassign) {
       setConfirmReassign(true);
       return;
     }
     setAssignError(null);
     try {
-      await apiFetch(`/loads/${selectedLoad.id}/assign`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          primaryDriverId: params.driverId,
-          coDriverId: assignmentMode === "team" ? params.coDriverId || undefined : undefined,
-          truckId: params.truckId || undefined,
-          trailerId: params.trailerId || undefined,
-          overrideReason: overrideReason || undefined,
-        }),
-      });
+      const existingTrip = selectedLoad?.tripLoads?.[0]?.trip ?? null;
+      if (existingTrip?.id) {
+        await apiFetch(`/trips/${existingTrip.id}/assign`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            driverId: params.driverId,
+            truckId: params.truckId || null,
+            trailerId: params.trailerId || null,
+            status: "ASSIGNED",
+          }),
+        });
+      } else {
+        await apiFetch(`/trips`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            loadNumbers: [selectedLoad.loadNumber],
+            movementMode: selectedLoad.movementMode ?? "FTL",
+            driverId: params.driverId,
+            truckId: params.truckId || null,
+            trailerId: params.trailerId || null,
+            status: "ASSIGNED",
+          }),
+        });
+      }
       const updated = await refreshSelectedLoad(selectedLoad.id);
       if (updated) {
         patchLoadSummary(updated);
@@ -695,7 +739,6 @@ function DispatchPageContent() {
   const assign = async () => {
     await performAssign({
       driverId: assignForm.driverId,
-      coDriverId: assignmentMode === "team" ? assignForm.coDriverId : undefined,
       truckId: assignForm.truckId || undefined,
       trailerId: assignForm.trailerId || undefined,
     });
@@ -707,7 +750,6 @@ function DispatchPageContent() {
     setAssistOverrideReason("");
     await performAssign({
       driverId,
-      coDriverId: assignmentMode === "team" ? assignForm.coDriverId : undefined,
       truckId: (truckId ?? assignForm.truckId) || undefined,
       trailerId: assignForm.trailerId || undefined,
     });
@@ -716,7 +758,25 @@ function DispatchPageContent() {
   const unassign = async () => {
     if (isQueueReadOnly) return;
     if (!selectedLoad) return;
-    await apiFetch(`/loads/${selectedLoad.id}/unassign`, { method: "POST" });
+    const existingTrip = selectedLoad?.tripLoads?.[0]?.trip ?? null;
+    if (!existingTrip?.id) {
+      setAssignError("This load is not attached to a trip.");
+      return;
+    }
+    if (!["PLANNED", "ASSIGNED"].includes(existingTrip.status)) {
+      setAssignError("Cannot unassign once trip dispatch is in progress.");
+      return;
+    }
+    await apiFetch(`/trips/${existingTrip.id}/assign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        driverId: null,
+        truckId: null,
+        trailerId: null,
+        status: "PLANNED",
+      }),
+    });
     const updated = await refreshSelectedLoad(selectedLoad.id);
     if (updated) {
       patchLoadSummary(updated);
@@ -861,9 +921,6 @@ function DispatchPageContent() {
   const workbenchAssignment = {
     form: assignForm,
     setForm: setAssignForm,
-    assignmentMode,
-    setAssignmentMode: updateAssignmentMode,
-    coDriverConflict,
     availableDrivers,
     unavailableDrivers,
     availableTrucks,
@@ -891,11 +948,21 @@ function DispatchPageContent() {
     conflictMessages,
     confirmReassign,
     assignedSummary: {
-      driverName: selectedLoadSummary?.assignment?.driver?.name ?? selectedLoad?.driver?.name ?? null,
-      coDriverName:
-        selectedLoad?.assignmentMembers?.find((member: any) => member.role === "CO_DRIVER")?.driver?.name ?? null,
-      truckUnit: selectedLoadSummary?.assignment?.truck?.unit ?? selectedLoad?.truck?.unit ?? null,
-      trailerUnit: selectedLoadSummary?.assignment?.trailer?.unit ?? selectedLoad?.trailer?.unit ?? null,
+      driverName:
+        selectedLoadSummary?.assignment?.driver?.name ??
+        selectedLoad?.tripLoads?.[0]?.trip?.driver?.name ??
+        selectedLoad?.driver?.name ??
+        null,
+      truckUnit:
+        selectedLoadSummary?.assignment?.truck?.unit ??
+        selectedLoad?.tripLoads?.[0]?.trip?.truck?.unit ??
+        selectedLoad?.truck?.unit ??
+        null,
+      trailerUnit:
+        selectedLoadSummary?.assignment?.trailer?.unit ??
+        selectedLoad?.tripLoads?.[0]?.trip?.trailer?.unit ??
+        selectedLoad?.trailer?.unit ??
+        null,
     },
   };
 
@@ -914,6 +981,50 @@ function DispatchPageContent() {
       onCreated={handleLegCreated}
     />
   ) : null;
+
+  const selectedTrailerId =
+    selectedLoadSummary?.assignment?.trailer?.id ??
+    selectedLoad?.tripLoads?.[0]?.trip?.trailerId ??
+    selectedLoad?.trailerId ??
+    (assignForm.trailerId || null);
+
+  const selectedTrailerUnit =
+    selectedLoadSummary?.assignment?.trailer?.unit ??
+    selectedLoad?.tripLoads?.[0]?.trip?.trailer?.unit ??
+    selectedLoad?.trailer?.unit ??
+    null;
+
+  const yardOsLaunchHref = useMemo(
+    () =>
+      selectedLoad
+        ? buildYardOsPlanningUrl({
+            orgId: user?.orgId ?? null,
+            loadIds: [selectedLoad.id],
+            loadId: selectedLoad.id,
+            loadNumber: selectedLoad.loadNumber ?? selectedLoadSummary?.loadNumber ?? null,
+            trailerId: selectedTrailerId,
+            trailerUnit: selectedTrailerUnit,
+            operatingEntityId: filters.operatingEntityId || selectedLoadSummary?.operatingEntity?.id || null,
+            teamId: canSeeAllTeams ? filters.teamId || null : null,
+          })
+        : null,
+    [
+      selectedLoad,
+      selectedLoadSummary?.loadNumber,
+      selectedLoadSummary?.operatingEntity?.id,
+      selectedTrailerId,
+      selectedTrailerUnit,
+      user?.orgId,
+      filters.operatingEntityId,
+      filters.teamId,
+      canSeeAllTeams,
+    ]
+  );
+
+  const openYardOs = useCallback(() => {
+    if (!yardOsLaunchHref) return;
+    window.open(yardOsLaunchHref, "_blank", "noopener,noreferrer");
+  }, [yardOsLaunchHref]);
 
   const workbenchRightPane = selectedLoad ? (
     <WorkbenchRightPane
@@ -943,6 +1054,7 @@ function DispatchPageContent() {
       legDrawerContent={legDrawerContent ?? undefined}
       legAddedNote={legAddedNote ? "✓ Added" : null}
       canStartTracking={canStartTracking}
+      yardOsLaunch={yardOsLaunchHref ? { href: yardOsLaunchHref, onOpen: openYardOs } : undefined}
       teamAssignment={
         canAssignTeamsOps && teamsEnabled && !isQueueReadOnly
           ? {
@@ -958,24 +1070,67 @@ function DispatchPageContent() {
     />
   ) : undefined;
 
+  const workspaceSwitcher = (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <SectionHeader title="Workspace" subtitle="Switch between dispatch execution and trip management" />
+      <SegmentedControl
+        value={workspaceTab}
+        options={[
+          { label: "Dispatch", value: "dispatch" },
+          { label: "Trips", value: "trips" },
+        ]}
+        onChange={(value) => updateWorkspaceTab(value as DispatchWorkspaceTab)}
+      />
+    </div>
+  );
+
   if (hasAccess === false) {
     return (
-      <AppShell title="Dispatch" subtitle="Assign assets and monitor driver updates">
-        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch." />
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch or trips." />
       </AppShell>
     );
   }
   if (hasAccess === null) {
     return (
-      <AppShell title="Dispatch" subtitle="Assign assets and monitor driver updates">
-        <EmptyState title="Loading dispatch..." description="Pulling active loads and availability." />
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        <EmptyState title="Loading workspace..." description="Pulling dispatch and trip access." />
       </AppShell>
     );
   }
+
+  if (workspaceTab === "trips" && !hasTripsRole) {
+    return (
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        {workspaceSwitcher}
+        <NoAccess title="No access to Trips" description="You do not have permission to view trip management." />
+      </AppShell>
+    );
+  }
+
+  if (workspaceTab === "trips") {
+    return (
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        {workspaceSwitcher}
+        <TripsWorkspace />
+      </AppShell>
+    );
+  }
+
+  if (!hasDispatchRole) {
+    return (
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        {workspaceSwitcher}
+        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
+      </AppShell>
+    );
+  }
+
   if (blocked) {
     const isAdmin = user?.role === "ADMIN";
     return (
-      <AppShell title="Dispatch" subtitle="Assign assets and monitor driver updates">
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        {workspaceSwitcher}
         <BlockedScreen
           isAdmin={isAdmin}
           description={isAdmin ? blocked.message || "Finish setup to perform dispatch assignments." : undefined}
@@ -986,18 +1141,14 @@ function DispatchPageContent() {
   }
 
   return (
-    <AppShell title="Dispatch" subtitle="Assign assets and monitor driver updates">
+    <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+      {workspaceSwitcher}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SectionHeader title="Refine" subtitle="Filter down to what you need" />
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" onClick={() => setShowFilters((prev) => !prev)}>
-            {showFilters ? "Hide filters" : "Show filters"}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => setShowManifest((prev) => !prev)}>
-            {showManifest ? "Hide manifests" : "Manifests"}
-          </Button>
-        </div>
+        <Button variant="secondary" size="sm" onClick={() => setShowFilters((prev) => !prev)}>
+          {showFilters ? "Hide filters" : "Show filters"}
+        </Button>
       </div>
 
       {dispatchError ? (
@@ -1153,10 +1304,8 @@ function DispatchPageContent() {
         </RefinePanel>
       ) : null}
 
-      {showManifest ? <ManifestPanel trailers={trailers} trucks={trucks} drivers={drivers} /> : null}
-
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <SectionHeader title="Browse" subtitle="Board or list view of dispatch-ready loads" />
+        <SectionHeader title="Browse" subtitle="Board or list view of trip-linked loads" />
         <div className="flex flex-wrap items-center gap-2">
           <SegmentedControl
             value={queueView}

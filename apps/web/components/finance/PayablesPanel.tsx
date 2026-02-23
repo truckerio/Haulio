@@ -51,6 +51,12 @@ type PayableLineItem = {
   loadId: string | null;
   type: "EARNING" | "DEDUCTION" | "REIMBURSEMENT";
   amountCents: number;
+  paidMiles?: string | number | null;
+  ratePerMile?: string | number | null;
+  milesSource?: "PLANNED" | "APPROVED_ACTUAL" | "MANUAL_OVERRIDE" | null;
+  milesVariancePct?: string | number | null;
+  requiresReview?: boolean;
+  reviewReasonCode?: string | null;
   memo: string | null;
 };
 
@@ -68,6 +74,13 @@ type Statement = {
 
 function formatCurrency(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
+}
+
+function formatNumber(value: string | number | null | undefined, fractionDigits = 2) {
+  if (value === null || value === undefined || value === "") return null;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return num.toFixed(fractionDigits);
 }
 
 function runStatusTone(status: PayableRun["status"]) {
@@ -355,6 +368,17 @@ export function PayablesPanel() {
                 <div>
                   <div className="font-medium text-ink">{item.memo || item.type}</div>
                   <div className="text-xs text-[color:var(--color-text-muted)]">{item.partyType} · {item.partyId}</div>
+                  {item.paidMiles ? (
+                    <div className="text-xs text-[color:var(--color-text-muted)]">
+                      {formatNumber(item.paidMiles)} mi @ ${formatNumber(item.ratePerMile, 4) ?? "0.0000"}/mi · {item.milesSource ?? "PLANNED"}
+                      {item.milesVariancePct ? ` · variance ${formatNumber(item.milesVariancePct)}%` : ""}
+                    </div>
+                  ) : null}
+                  {item.requiresReview ? (
+                    <div className="text-xs text-[color:var(--color-warning)]">
+                      Review needed: {item.reviewReasonCode ?? "MILES_REVIEW_REQUIRED"}
+                    </div>
+                  ) : null}
                 </div>
                 <div>{formatCurrency(item.amountCents)}</div>
               </div>
@@ -376,7 +400,14 @@ export function PayablesPanel() {
               <div className="mt-2 grid gap-2">
                 {statement.items.map((item) => (
                   <div key={item.id} className="flex items-center justify-between rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-sm">
-                    <span>{item.memo || item.type}</span>
+                    <span>
+                      {item.memo || item.type}
+                      {item.paidMiles ? (
+                        <span className="ml-2 text-xs text-[color:var(--color-text-muted)]">
+                          ({formatNumber(item.paidMiles)} mi)
+                        </span>
+                      ) : null}
+                    </span>
                     <span>{formatCurrency(item.amountCents)}</span>
                   </div>
                 ))}

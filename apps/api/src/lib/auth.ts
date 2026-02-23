@@ -4,6 +4,7 @@ import { prisma, UserStatus } from "@truckerio/db";
 import { parse } from "cookie";
 
 export type AuthRequest = {
+  headers?: Record<string, string | string[] | undefined>;
   auth?: {
     userId: string;
     orgId: string;
@@ -14,7 +15,7 @@ export type AuthRequest = {
     id: string;
     orgId: string;
     role: string;
-    email: string;
+    email: string | null;
     name: string | null;
     permissions: string[];
   };

@@ -6,13 +6,15 @@ import type { Load, Stop, OrgSettings, Customer, InvoiceLineItem, Prisma, Operat
 import { formatUSD } from "@truckerio/db";
 import { ensureUploadDirs, resolveUploadPath } from "./uploads";
 
+type InvoiceRenderItem = Pick<InvoiceLineItem, "code" | "description" | "quantity" | "rate" | "amount">;
+
 export function renderInvoiceHtml(params: {
   invoiceNumber: string;
   load: Load & { customer?: Customer | null };
   stops: Stop[];
   settings: OrgSettings;
   operatingEntity: OperatingEntity | null;
-  items: InvoiceLineItem[];
+  items: InvoiceRenderItem[];
   totalAmount: Prisma.Decimal | null;
 }) {
   const pickup = params.stops.find((stop) => stop.type === "PICKUP");
@@ -131,7 +133,7 @@ export async function generateInvoicePdf(params: {
   stops: Stop[];
   settings: OrgSettings;
   operatingEntity: OperatingEntity | null;
-  items: InvoiceLineItem[];
+  items: InvoiceRenderItem[];
   totalAmount: Prisma.Decimal | null;
 }) {
   await ensureUploadDirs();
@@ -145,7 +147,7 @@ export async function generateInvoicePdf(params: {
   const disableSandbox = process.env.PUPPETEER_NO_SANDBOX === "true" || runningAsRoot;
   const launchArgs = disableSandbox ? ["--no-sandbox", "--disable-setuid-sandbox"] : [];
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: true,
     args: launchArgs,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
   });

@@ -65,6 +65,7 @@ type DriverStop = {
   city: string;
   state: string;
   zip: string;
+  notes?: string | null;
   appointmentStart?: string | null;
   appointmentEnd?: string | null;
   arrivedAt?: string | null;
@@ -72,16 +73,27 @@ type DriverStop = {
   sequence: number;
 };
 
+type DriverLoadNote = {
+  id: string;
+  text: string;
+  source: "OPS" | "DRIVER" | "SYSTEM";
+  visibility: "NORMAL" | "LOCKED";
+  createdAt: string;
+  createdBy?: { id: string; name?: string | null; role?: string | null } | null;
+};
+
 type DriverLoad = {
   id: string;
   loadNumber: string;
   status: LoadStatus;
+  notes?: string | null;
   assignedDriverId?: string | null;
   customer?: { name: string | null } | null;
   customerName?: string | null;
   deliveredAt?: string | null;
   stops: DriverStop[];
   docs: DriverDoc[];
+  loadNotes?: DriverLoadNote[];
   driver?: DriverProfile | null;
   assignmentMembers?: LoadAssignmentMember[];
 };
@@ -748,6 +760,8 @@ export default function DriverPage() {
   };
 
   const requiredDocs = (settings?.requiredDocs ?? ["POD"]) as DocType[];
+  const dispatchLoadNotes = (load?.loadNotes ?? []).filter((note) => note.source !== "DRIVER");
+  const stopNotes = stops.filter((stop) => Boolean(stop.notes && stop.notes.trim().length > 0));
   const estimatedPay = earnings?.estimatedPay ?? "0.00";
   const formatDate = (date: Date) => date.toISOString().slice(0, 10);
   const startOfIsoWeek = (date: Date) => {
@@ -1187,6 +1201,37 @@ export default function DriverPage() {
                 Call dispatcher
               </Button>
             </div>
+          </Card>
+        ) : null}
+
+        {load ? (
+          <Card className="space-y-3">
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Dispatch notes</div>
+            {load.notes ? (
+              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3 text-sm">
+                <div className="text-xs text-[color:var(--color-text-muted)]">Load notes</div>
+                <div className="mt-1 whitespace-pre-wrap">{load.notes}</div>
+              </div>
+            ) : null}
+            {stopNotes.map((stop) => (
+              <div key={stop.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3 text-sm">
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  {stop.type} · {stop.name}
+                </div>
+                <div className="mt-1 whitespace-pre-wrap">{stop.notes}</div>
+              </div>
+            ))}
+            {dispatchLoadNotes.map((note) => (
+              <div key={note.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3 text-sm">
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  {note.source} · {note.createdBy?.name || "Dispatcher"} · {formatDateTime(note.createdAt)}
+                </div>
+                <div className="mt-1 whitespace-pre-wrap">{note.text}</div>
+              </div>
+            ))}
+            {!load.notes && stopNotes.length === 0 && dispatchLoadNotes.length === 0 ? (
+              <div className="text-sm text-[color:var(--color-text-muted)]">No dispatch notes yet.</div>
+            ) : null}
           </Card>
         ) : null}
 

@@ -2,9 +2,14 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "../../",
     "module": "CommonJS",
     "moduleResolution": "Node"
   },
-  "include": ["src"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "../../packages/db/src/**/*.ts",
+    "../../packages/shared/src/**/*.ts"
+  ]
 }

@@ -7,7 +7,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusChip } from "@/components/ui/status-chip";
-import { LogoutButton } from "@/components/auth/logout-button";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -75,7 +74,7 @@ const roleRoutes: Record<string, string[]> = {
   ],
   HEAD_DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/teams", "/finance", "/profile"],
   DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/finance", "/profile"],
-  BILLING: ["/today", "/dashboard", "/loads", "/finance", "/profile"],
+  BILLING: ["/today", "/dashboard", "/loads", "/dispatch", "/finance", "/profile"],
   DRIVER: ["/driver"],
 };
 
@@ -112,11 +111,94 @@ function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean })
   return sections;
 }
 
+function NavIcon({ href, active }: { href: string; active: boolean }) {
+  const strokeClass = active ? "text-[color:var(--color-accent)]" : "text-[color:var(--color-text-muted)]";
+  const iconClass = `h-4 w-4 ${strokeClass}`;
+
+  if (href === "/today") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <rect x="3.5" y="4.5" width="17" height="16" rx="2.5" />
+        <path d="M8 2.75v3.5M16 2.75v3.5M3.5 9.5h17" />
+      </svg>
+    );
+  }
+  if (href === "/dashboard") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M4 5.5h7v6H4zM13 5.5h7v4h-7zM4 13.5h7v5H4zM13 11.5h7v7h-7z" />
+      </svg>
+    );
+  }
+  if (href === "/profile") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="8" r="3.5" />
+        <path d="M5.5 20a6.5 6.5 0 0 1 13 0" />
+      </svg>
+    );
+  }
+  if (href === "/loads") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+        <path d="M7 9h10M7 13h6" />
+      </svg>
+    );
+  }
+  if (href === "/dispatch") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M3.5 12h8.5M12.5 12l-2.5-2.5M12.5 12l-2.5 2.5M20.5 12H12" />
+        <circle cx="20.5" cy="12" r="2.5" />
+      </svg>
+    );
+  }
+  if (href === "/teams") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="8" cy="8.5" r="2.5" />
+        <circle cx="16" cy="9.5" r="2.5" />
+        <path d="M3.5 20a4.5 4.5 0 0 1 9 0M11.5 20a4 4 0 0 1 8 0" />
+      </svg>
+    );
+  }
+  if (href === "/finance") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M4 17.5h16M6.5 17.5v-7m5 7v-11m5 11v-5" />
+      </svg>
+    );
+  }
+  if (href === "/audit") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M6 4.5h12v15H6z" />
+        <path d="M9 8h6M9 12h6M9 16h4" />
+      </svg>
+    );
+  }
+  if (href === "/admin") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 4.5v2.2M12 17.3v2.2M4.5 12h2.2M17.3 12h2.2M6.7 6.7l1.5 1.5M15.8 15.8l1.5 1.5M17.3 6.7l-1.5 1.5M8.2 15.8l-1.5 1.5" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="12" cy="12" r="3.5" />
+    </svg>
+  );
+}
+
 function NavContent({
   pathname,
   org,
   user,
   sections,
+  compact = false,
   canUseGlobalSearch,
   searchTerm,
   searchLoading,
@@ -129,6 +211,7 @@ function NavContent({
   org: { id: string; name: string; companyDisplayName?: string | null } | null;
   user: { name?: string | null; email?: string | null } | null;
   sections: NavSection[];
+  compact?: boolean;
   canUseGlobalSearch: boolean;
   searchTerm: string;
   searchLoading: boolean;
@@ -138,20 +221,34 @@ function NavContent({
   onClearSearch: () => void;
 }) {
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-[var(--radius-control)] bg-[color:var(--color-accent)]/10" />
-          <div>
-            <div className="text-sm font-semibold text-ink">Haulio</div>
-            <div className="text-xs text-[color:var(--color-text-muted)]">Operations console</div>
+    <div className={cn("nav-content space-y-5", compact ? "space-y-4" : "")}>
+      {compact ? (
+        <div className="flex justify-center">
+          <div className="group relative inline-flex">
+            <div
+              aria-hidden="true"
+              className="h-10 w-10 rounded-[var(--radius-control)] bg-[color:var(--color-accent)]/10 ring-1 ring-[color:var(--color-divider)]"
+            />
+            <span className="pointer-events-none absolute left-[calc(100%+0.5rem)] top-1/2 -translate-y-1/2 whitespace-nowrap rounded-md bg-[color:var(--color-ink)] px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-white opacity-0 shadow-[var(--shadow-subtle)] transition group-hover:opacity-100">
+              {org?.companyDisplayName ?? org?.name ?? "Haulio"}
+            </span>
           </div>
         </div>
-        <Badge className="max-w-[11rem] truncate bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
-          {org?.companyDisplayName ?? org?.name ?? "Unknown org"}
-        </Badge>
-      </div>
-      {canUseGlobalSearch ? (
+      ) : (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-[var(--radius-control)] bg-[color:var(--color-accent)]/10" />
+            <div>
+              <div className="text-sm font-semibold text-ink">Haulio</div>
+              <div className="text-xs text-[color:var(--color-text-muted)]">Operations console</div>
+            </div>
+          </div>
+          <Badge className="max-w-[11rem] truncate bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
+            {org?.companyDisplayName ?? org?.name ?? "Unknown org"}
+          </Badge>
+        </div>
+      )}
+      {canUseGlobalSearch && !compact ? (
         <div className="space-y-2">
           <div className="relative">
             <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--color-text-muted)]">
@@ -221,9 +318,11 @@ function NavContent({
       ) : null}
       {sections.map((section, index) => (
         <div key={section.title} className={cn("space-y-2", index > 0 ? "pt-3" : "")}>
-          <div className="px-2 text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-subtle)]">
-            {section.title}
-          </div>
+          {!compact ? (
+            <div className="px-2 text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-subtle)]">
+              {section.title}
+            </div>
+          ) : null}
           <div className="space-y-1">
             {section.items.map((item) => {
               const active = pathname.startsWith(item.href);
@@ -232,8 +331,11 @@ function NavContent({
                   key={item.href}
                   href={item.href}
                   aria-current={active ? "page" : undefined}
+                  aria-label={item.label}
+                  title={item.label}
                   className={cn(
-                    "flex items-center gap-3 rounded-[var(--radius-control)] px-2 py-2 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]",
+                    "nav-item flex items-center gap-3 rounded-[var(--radius-control)] px-2 py-2 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]",
+                    compact ? "justify-center px-1" : "",
                     active
                       ? "bg-[color:var(--color-bg-muted)] text-ink ring-1 ring-[color:var(--color-divider)]"
                       : "text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
@@ -246,24 +348,33 @@ function NavContent({
                     )}
                     aria-hidden="true"
                   />
-                  <span className={cn(active ? "font-medium" : "font-normal")}>{item.label}</span>
+                  <span className="group relative inline-flex items-center" tabIndex={-1}>
+                    <NavIcon href={item.href} active={active} />
+                    <span className="pointer-events-none absolute left-[calc(100%+0.5rem)] top-1/2 -translate-y-1/2 rounded-md bg-[color:var(--color-ink)] px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-white opacity-0 shadow-[var(--shadow-subtle)] transition group-hover:opacity-100 group-focus-within:opacity-100">
+                      {item.label}
+                    </span>
+                  </span>
+                  {!compact ? <span className={cn(active ? "font-medium" : "font-normal")}>{item.label}</span> : null}
                 </Link>
               );
             })}
           </div>
         </div>
       ))}
-      <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)]/40 px-3 py-2.5">
-        <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-subtle)]">Account</div>
-        <div className="mt-2 text-sm font-medium text-ink">{user?.name ?? user?.email ?? "User"}</div>
-        {user?.email ? <div className="text-xs text-[color:var(--color-text-muted)]">{user.email}</div> : null}
-        {org ? (
-          <div className="text-xs text-[color:var(--color-text-muted)]">
-            {org.companyDisplayName ?? org.name}
-          </div>
-        ) : null}
-        <LogoutButton className="mt-3" />
-      </div>
+      {compact ? (
+        <div className="pt-2" />
+      ) : (
+        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)]/40 px-3 py-2.5">
+          <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-subtle)]">Account</div>
+          <div className="mt-2 text-sm font-medium text-ink">{user?.name ?? user?.email ?? "User"}</div>
+          {user?.email ? <div className="text-xs text-[color:var(--color-text-muted)]">{user.email}</div> : null}
+          {org ? (
+            <div className="text-xs text-[color:var(--color-text-muted)]">
+              {org.companyDisplayName ?? org.name}
+            </div>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -488,13 +599,14 @@ function AppShellInner({
       ) : null}
 
       <div className="flex h-[calc(100dvh-4rem)] w-full min-h-0 lg:h-screen">
-        <aside className="hidden h-screen w-72 flex-col border-r border-[color:var(--color-divider)] bg-white lg:flex">
-          <div className="flex-1 overflow-y-auto px-5 py-6">
+        <aside className="hidden h-screen w-20 flex-col border-r border-[color:var(--color-divider)] bg-white lg:flex">
+          <div className="flex-1 overflow-y-auto overflow-x-visible px-3 py-6">
             <NavContent
               pathname={pathname}
               org={org}
               user={user}
               sections={sections}
+              compact
               canUseGlobalSearch={canUseGlobalSearch}
               searchTerm={searchTerm}
               searchLoading={searchLoading}

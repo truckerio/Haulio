@@ -145,7 +145,8 @@ async function cleanupMissingPodTasks() {
     }
     if (load.orgId !== task.orgId) continue;
 
-    const terminalStatus = [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED].includes(load.status);
+    const terminalStatusSet = new Set<LoadStatus>([LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED]);
+    const terminalStatus = terminalStatusSet.has(load.status);
     const hasVerifiedPod =
       Boolean(load.podVerifiedAt) ||
       load.docs.some((doc) => doc.type === "POD" && doc.status === DocStatus.VERIFIED);

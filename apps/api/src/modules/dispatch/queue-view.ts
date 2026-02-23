@@ -1,17 +1,17 @@
-import { LoadStatus } from "@truckerio/db";
+import { LoadStatus, type Prisma } from "@truckerio/db";
 
 export type DispatchQueueView = "active" | "recent" | "history";
 
 export const QUEUE_VIEW_RECENT_DAYS = 90;
 
-export const COMPLETED_LOAD_STATUSES = [
+export const COMPLETED_LOAD_STATUSES: LoadStatus[] = [
   LoadStatus.DELIVERED,
   LoadStatus.POD_RECEIVED,
   LoadStatus.READY_TO_INVOICE,
   LoadStatus.INVOICED,
   LoadStatus.PAID,
   LoadStatus.CANCELLED,
-] as const;
+];
 
 export const isCompletedStatus = (status?: LoadStatus | null) =>
   Boolean(status && COMPLETED_LOAD_STATUSES.includes(status));
@@ -21,7 +21,13 @@ export function normalizeDispatchQueueView(value?: string | null): DispatchQueue
   return "active";
 }
 
-export function buildDispatchQueueFilters(queueView: DispatchQueueView, now = new Date()) {
+type DispatchQueueFilterResult = {
+  where: Prisma.LoadWhereInput;
+  orderBy: Prisma.LoadOrderByWithRelationInput[];
+  useRiskSort: boolean;
+};
+
+export function buildDispatchQueueFilters(queueView: DispatchQueueView, now = new Date()): DispatchQueueFilterResult {
   if (queueView === "active") {
     return {
       where: {
