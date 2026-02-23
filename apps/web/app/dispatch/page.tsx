@@ -122,6 +122,24 @@ const defaultFilters = {
 type Filters = typeof defaultFilters;
 type QueueView = "active" | "recent" | "history";
 
+function countActiveDispatchFilters(filters: Filters) {
+  let count = 0;
+  if (filters.search.trim()) count += 1;
+  if (filters.status.trim()) count += 1;
+  if (filters.driverId.trim()) count += 1;
+  if (filters.truckId.trim()) count += 1;
+  if (filters.trailerId.trim()) count += 1;
+  if (filters.assigned !== "all") count += 1;
+  if (filters.fromDate.trim()) count += 1;
+  if (filters.toDate.trim()) count += 1;
+  if (filters.destSearch.trim()) count += 1;
+  if (filters.minRate.trim()) count += 1;
+  if (filters.maxRate.trim()) count += 1;
+  if (filters.operatingEntityId.trim()) count += 1;
+  if (filters.teamId.trim()) count += 1;
+  return count;
+}
+
 function DispatchPageContent() {
   const router = useRouter();
   const pathname = usePathname();
@@ -247,6 +265,7 @@ function DispatchPageContent() {
     (doc: any) => doc.type === "RATECON" || doc.type === "RATE_CONFIRMATION"
   );
   const rateConMissing = Boolean(dispatchStage && rateConRequired && !hasRateCon);
+  const activeFilterCount = useMemo(() => countActiveDispatchFilters(filters), [filters]);
   const assignDisabled =
     isQueueReadOnly ||
     !assignForm.driverId ||
@@ -1076,9 +1095,29 @@ function DispatchPageContent() {
             <div className="text-xs text-[color:var(--color-text-muted)]">Execution board</div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={() => setShowFilters((prev) => !prev)}>
-              {showFilters ? "Hide filters" : "Filters"}
-            </Button>
+            <button
+              type="button"
+              aria-label={showFilters ? "Hide refine filters" : "Open refine filters"}
+              title={showFilters ? "Hide refine filters (F)" : "Refine filters (F)"}
+              onClick={() => setShowFilters((prev) => !prev)}
+              className="relative inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+              >
+                <path d="M4 6h16M7 12h10M10 18h4" strokeLinecap="round" />
+              </svg>
+              {activeFilterCount > 0 ? (
+                <span className="absolute -right-1 -top-1 inline-flex h-[var(--icon-badge-size)] min-w-[var(--icon-badge-size)] items-center justify-center rounded-full bg-[color:var(--color-accent)] px-1 text-[10px] font-semibold leading-none text-white">
+                  {activeFilterCount}
+                </span>
+              ) : null}
+            </button>
             <SegmentedControl
               value={browseLens}
               options={[

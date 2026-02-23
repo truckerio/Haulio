@@ -221,7 +221,7 @@ export function WorkbenchRightPane({
 
   return (
     <div className="relative">
-      <div className="sticky top-0 z-10 space-y-3 border-b border-[color:var(--color-divider)] bg-white/95 px-4 py-4 backdrop-blur">
+      <div className="sticky top-0 z-10 space-y-3 border-b border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)]/95 px-4 py-4 backdrop-blur">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
@@ -310,7 +310,7 @@ export function WorkbenchRightPane({
           </div>
         ) : null}
 
-        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-3">
+        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Trip assignment</div>
@@ -375,7 +375,7 @@ export function WorkbenchRightPane({
               ) : null}
 
               <div className="space-y-2">
-                <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/80 px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+                <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-soft)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
                   Assignment is trip-first: one primary driver with truck and trailer for all loads in the trip.
                 </div>
               </div>

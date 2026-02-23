@@ -32,7 +32,7 @@ type MfaSetupPayload = {
 };
 
 export default function ProfilePage() {
-  const { user, refresh } = useUser();
+  const { user, org, refresh } = useUser();
   const [profile, setProfile] = useState<Profile | null>(null);
   const { saveState, startSaving, markSaved, resetSaveState } = useSaveFeedback(1800);
   const [error, setError] = useState<string | null>(null);
@@ -199,11 +199,27 @@ export default function ProfilePage() {
           </Card>
 
           <Card className="space-y-3">
-            <div className="text-sm font-semibold">Session</div>
+            <div className="text-sm font-semibold">Account</div>
             <div className="text-sm text-[color:var(--color-text-muted)]">
-              Manage your active session from your profile.
+              Identity and session controls.
             </div>
-            <LogoutButton className="w-fit min-w-36" />
+            <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-soft)] px-3 py-3">
+              <div className="text-sm font-medium text-ink">{profile?.name ?? user?.name ?? user?.email ?? "User"}</div>
+              <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">{profile?.email ?? user?.email ?? "-"}</div>
+              {org ? (
+                <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
+                  {org.companyDisplayName ?? org.name}
+                </div>
+              ) : null}
+              {user?.role ? (
+                <div className="mt-1 text-xs uppercase tracking-[0.16em] text-[color:var(--color-text-subtle)]">
+                  {user.role}
+                </div>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <LogoutButton className="w-fit min-w-36" />
+            </div>
           </Card>
 
           {error ? (

@@ -76,31 +76,31 @@ export function DispatchBrowse({
                 type="button"
                 onClick={() => onSelectLoad(load.id)}
                 data-selected={selectedLoadId === load.id}
-                className={`relative grid grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px] gap-x-3 rounded-md border border-neutral-200/40 bg-white overflow-hidden py-3 pl-6 pr-4 text-left transition-colors duration-150 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] min-[420px]:grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px_64px_64px] ${
-                  selectedLoadId === load.id ? "border-neutral-300 bg-neutral-50" : ""
+                className={`relative grid grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px] gap-x-3 rounded-md border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] overflow-hidden py-3 pl-6 pr-4 text-left transition-colors duration-150 hover:bg-[color:var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] min-[420px]:grid-cols-[96px_minmax(0,1.4fr)_minmax(0,1fr)_72px_64px_64px] ${
+                  selectedLoadId === load.id ? "border-[color:var(--color-divider-strong)] bg-[color:var(--color-surface-hover)]" : ""
                 }`}
               >
                 <div className="min-w-0">
-                  <div className="truncate text-[11px] font-semibold text-neutral-700">{load.trip?.tripNumber ?? "No trip"}</div>
-                  <div className="truncate text-[12px] font-medium text-neutral-900">{load.loadNumber}</div>
+                  <div className="truncate text-[11px] font-semibold text-[color:var(--color-text-muted)]">{load.trip?.tripNumber ?? "No trip"}</div>
+                  <div className="truncate text-[12px] font-medium text-ink">{load.loadNumber}</div>
                 </div>
                 <div className="min-w-0">
-                  <div className="truncate text-[13px] font-medium text-neutral-900">{load.customerName ?? "Customer"}</div>
-                  <div className="mt-1 text-[12px] text-neutral-600 min-[420px]:hidden">
+                  <div className="truncate text-[13px] font-medium text-ink">{load.customerName ?? "Customer"}</div>
+                  <div className="mt-1 text-[12px] text-[color:var(--color-text-muted)] min-[420px]:hidden">
                     {load.miles ?? "-"} mi · {load.rate ?? "-"}
                   </div>
                 </div>
                 <div className="min-w-0">
-                  <div className="truncate text-[12px] text-neutral-600">{load.assignment?.driver?.name ?? "Unassigned"}</div>
+                  <div className="truncate text-[12px] text-[color:var(--color-text-muted)]">{load.assignment?.driver?.name ?? "Unassigned"}</div>
                 </div>
-                <div className="min-w-0 truncate text-[12px] text-neutral-600">
+                <div className="min-w-0 truncate text-[12px] text-[color:var(--color-text-muted)]">
                   {formatStatusLabel(load.status)}
                   {showHistoryTag ? (
-                    <span className="ml-2 text-[10px] font-medium uppercase tracking-wide text-neutral-400">{historyLabel}</span>
+                    <span className="ml-2 text-[10px] font-medium uppercase tracking-wide text-[color:var(--color-text-subtle)]">{historyLabel}</span>
                   ) : null}
                 </div>
-                <div className="hidden min-w-0 text-right text-[12px] text-neutral-600 min-[420px]:block">{load.miles ?? "-"}</div>
-                <div className="hidden min-w-0 text-right text-[12px] text-neutral-600 min-[420px]:block">{load.rate ?? "-"}</div>
+                <div className="hidden min-w-0 text-right text-[12px] text-[color:var(--color-text-muted)] min-[420px]:block">{load.miles ?? "-"}</div>
+                <div className="hidden min-w-0 text-right text-[12px] text-[color:var(--color-text-muted)] min-[420px]:block">{load.rate ?? "-"}</div>
               </button>
             );
           })}

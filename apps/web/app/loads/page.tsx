@@ -877,12 +877,12 @@ function LoadsPageContent() {
                 className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)] ${
                   active
                     ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent)] text-white"
-                    : "border-[color:var(--color-divider)] bg-white text-[color:var(--color-text-muted)]"
+                    : "border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]"
                 }`}
               >
                 {chip.label}
                 {chipCounts[chip.id] !== undefined ? (
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] ${active ? "bg-white/20 text-white" : "bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]"}`}>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] ${active ? "bg-[color:var(--color-accent-soft)] text-white" : "bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]"}`}>
                     {chipCounts[chip.id]}
                   </span>
                 ) : null}
@@ -1771,7 +1771,7 @@ function LoadsPageContent() {
                     router.push(`/loads/${load.id}`);
                   }
                 }}
-                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-4 shadow-[var(--shadow-subtle)] transition hover:translate-y-[-1px] hover:shadow-[var(--shadow-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-4 shadow-[var(--shadow-subtle)] transition hover:translate-y-[-1px] hover:shadow-[var(--shadow-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="text-sm font-semibold text-ink">LOAD {load.loadNumber}</div>
@@ -1826,7 +1826,7 @@ function LoadsPageContent() {
                     <summary className="cursor-pointer list-none rounded-full border border-[color:var(--color-divider)] px-3 py-1 text-xs text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]">
                       •••
                     </summary>
-                    <div className="absolute right-0 mt-2 w-40 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-2 text-xs shadow-[var(--shadow-card)]">
+                    <div className="absolute right-0 mt-2 w-40 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-2 text-xs shadow-[var(--shadow-card)]">
                       <button
                         className="w-full rounded-[var(--radius-control)] px-2 py-2 text-left text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
                         onClick={() => router.push(`/loads/${load.id}`)}

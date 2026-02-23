@@ -87,13 +87,13 @@ const WARNING_META = [
 ] as const;
 
 const TONE_CLASS: Record<(typeof SECTION_META)[number]["tone"], string> = {
-  danger: "border-0 border-l-4 border-l-[color:var(--color-danger)] bg-white",
-  warning: "border-0 border-l-4 border-l-[color:var(--color-warning)] bg-white",
-  info: "border-0 bg-white",
+  danger: "border-0 border-l-4 border-l-[color:var(--color-danger)] bg-[color:var(--color-surface)]",
+  warning: "border-0 border-l-4 border-l-[color:var(--color-warning)] bg-[color:var(--color-surface)]",
+  info: "border-0 bg-[color:var(--color-surface)]",
 };
 
 const GLOSSY_SURFACE =
-  "bg-white shadow-[inset_0_1px_0_rgba(255,255,255,0.9),_0_6px_16px_rgba(12,12,12,0.04)]";
+  "bg-[color:var(--color-surface-elevated)] shadow-[var(--shadow-surface-gloss)]";
 
 const SETUP_STEPS: Array<{ key: string; label: string }> = [
   { key: "basics", label: "Company basics" },

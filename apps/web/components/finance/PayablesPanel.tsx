@@ -271,7 +271,7 @@ export function PayablesPanel() {
               className={`rounded-[var(--radius-card)] border px-4 py-3 ${
                 run.id === selectedRunId
                   ? "border-[color:var(--color-divider-strong)] bg-[color:var(--color-surface-muted)]"
-                  : "border-[color:var(--color-divider)] bg-white"
+                  : "border-[color:var(--color-divider)] bg-[color:var(--color-surface)]"
               }`}
               onClick={() => setSelectedRunId(run.id)}
             >
@@ -392,7 +392,7 @@ export function PayablesPanel() {
         {statements.length === 0 ? <EmptyState title="No statements loaded." /> : null}
         <div className="grid gap-3">
           {statements.map((statement) => (
-            <div key={statement.partyId} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3">
+            <div key={statement.partyId} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-3">
               <div className="text-sm font-semibold text-ink">{statement.partyName}</div>
               <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
                 Earnings {formatCurrency(statement.totals.earningsCents)} · Deductions {formatCurrency(statement.totals.deductionsCents)} · Net {formatCurrency(statement.totals.netCents)}

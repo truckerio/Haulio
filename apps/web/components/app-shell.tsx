@@ -93,8 +93,12 @@ const searchGroups: Array<{ type: SearchResult["type"]; label: string }> = [
   { type: "employee", label: "Employees" },
   { type: "customer", label: "Customers" },
 ];
+const NAV_SEARCH_INPUT_ID = "global-nav-search-input";
 
 const searchRoles = new Set(["ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING"]);
+const SIDEBAR_PINNED_KEY = "haulio:sidebar:pinned";
+const SIDEBAR_PEEK_OPEN_DELAY_MS = 380;
+const SIDEBAR_PEEK_CLOSE_DELAY_MS = 240;
 
 function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean }) {
   if (role === "DRIVER") return driverSections;
@@ -115,7 +119,7 @@ function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean })
 
 function NavIcon({ href, active }: { href: string; active: boolean }) {
   const strokeClass = active ? "text-[color:var(--color-accent)]" : "text-[color:var(--color-text-muted)]";
-  const iconClass = `h-4 w-4 ${strokeClass}`;
+  const iconClass = `h-[var(--icon-size-nav)] w-[var(--icon-size-nav)] ${strokeClass}`;
 
   if (href === "/today") {
     return (
@@ -218,6 +222,7 @@ function NavContent({
   groupedSearchResults,
   onSearchTermChange,
   onClearSearch,
+  onCompactSearchClick,
 }: {
   pathname: string;
   org: { id: string; name: string; companyDisplayName?: string | null } | null;
@@ -231,11 +236,12 @@ function NavContent({
   groupedSearchResults: Array<{ type: SearchResult["type"]; label: string; items: SearchResult[] }>;
   onSearchTermChange: (value: string) => void;
   onClearSearch: () => void;
+  onCompactSearchClick?: () => void;
 }) {
   return (
     <div className={cn("nav-content space-y-5", compact ? "space-y-4" : "")}>
       {compact ? (
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-3">
           <div className="group relative inline-flex">
             <div
               aria-hidden="true"
@@ -245,6 +251,32 @@ function NavContent({
               {org?.companyDisplayName ?? org?.name ?? "Haulio"}
             </span>
           </div>
+          {canUseGlobalSearch ? (
+            <button
+              type="button"
+              aria-label="Open search"
+              title="Search"
+              onClick={onCompactSearchClick}
+              className="group relative inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <span className="pointer-events-none absolute left-[calc(100%+0.5rem)] top-1/2 -translate-y-1/2 whitespace-nowrap rounded-md bg-[color:var(--color-ink)] px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-white opacity-0 shadow-[var(--shadow-subtle)] transition group-hover:opacity-100">
+                Search
+              </span>
+            </button>
+          ) : null}
         </div>
       ) : (
         <div className="flex items-center justify-between">
@@ -267,7 +299,7 @@ function NavContent({
               <svg
                 aria-hidden="true"
                 viewBox="0 0 24 24"
-                className="h-4 w-4"
+                className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
@@ -279,15 +311,16 @@ function NavContent({
               </svg>
             </span>
             <Input
+              id={NAV_SEARCH_INPUT_ID}
               aria-label="Search"
               placeholder="Search"
-              className="bg-white pl-9 text-sm border-[color:var(--color-divider-strong)]"
+              className="bg-[color:var(--color-surface)] pl-9 text-sm border-[color:var(--color-divider-strong)]"
               value={searchTerm}
               onChange={(event) => onSearchTermChange(event.target.value)}
             />
           </div>
           {searchTerm.trim() ? (
-            <div className="max-h-80 overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-2 shadow-[var(--shadow-subtle)]">
+            <div className="max-h-80 overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-2 shadow-[var(--shadow-subtle)]">
               {searchLoading ? (
                 <div className="px-2 py-2 text-xs text-[color:var(--color-text-muted)]">Searching…</div>
               ) : null}
@@ -329,7 +362,13 @@ function NavContent({
         </div>
       ) : null}
       {sections.map((section, index) => (
-        <div key={section.title} className={cn("space-y-2", index > 0 ? "pt-3" : "")}>
+        <div
+          key={section.title}
+          className={cn(
+            "space-y-2",
+            index > 0 ? (compact ? "mt-2 border-t border-[color:var(--color-divider)] pt-3" : "pt-3") : ""
+          )}
+        >
           {!compact ? (
             <div className="px-2 text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-subtle)]">
               {section.title}
@@ -355,12 +394,15 @@ function NavContent({
                 >
                   <span
                     className={cn(
-                      "h-4 w-1.5 rounded-full",
+                      "h-[var(--icon-size-nav)] w-1.5 rounded-full",
                       active ? "bg-[color:var(--color-accent)]" : "bg-transparent"
                     )}
                     aria-hidden="true"
                   />
-                  <span className="group relative inline-flex items-center" tabIndex={-1}>
+                  <span
+                    className="group relative inline-flex h-[var(--icon-button-size-nav)] w-[var(--icon-button-size-nav)] items-center justify-center"
+                    tabIndex={-1}
+                  >
                     <NavIcon href={item.href} active={active} />
                     <span className="pointer-events-none absolute left-[calc(100%+0.5rem)] top-1/2 -translate-y-1/2 rounded-md bg-[color:var(--color-ink)] px-2 py-1 text-[10px] font-medium uppercase tracking-[0.14em] text-white opacity-0 shadow-[var(--shadow-subtle)] transition group-hover:opacity-100 group-focus-within:opacity-100">
                       {item.label}
@@ -373,20 +415,7 @@ function NavContent({
           </div>
         </div>
       ))}
-      {compact ? (
-        <div className="pt-2" />
-      ) : (
-        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)]/40 px-3 py-2.5">
-          <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-subtle)]">Account</div>
-          <div className="mt-2 text-sm font-medium text-ink">{user?.name ?? user?.email ?? "User"}</div>
-          {user?.email ? <div className="text-xs text-[color:var(--color-text-muted)]">{user.email}</div> : null}
-          {org ? (
-            <div className="text-xs text-[color:var(--color-text-muted)]">
-              {org.companyDisplayName ?? org.name}
-            </div>
-          ) : null}
-        </div>
-      )}
+      <div className="pt-2" />
     </div>
   );
 }
@@ -406,7 +435,13 @@ function AppShellInner({
   const [navOpen, setNavOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const hoverOpenTimerRef = useRef<number | null>(null);
+  const hoverCloseTimerRef = useRef<number | null>(null);
+  const sidebarPrefReadyRef = useRef(false);
   const { user, org } = useUser();
+  const [sidebarPinned, setSidebarPinned] = useState(false);
+  const [sidebarPeekOpen, setSidebarPeekOpen] = useState(false);
+  const [desktopHoverEnabled, setDesktopHoverEnabled] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -416,6 +451,7 @@ function AppShellInner({
   const canSeeTeamsOps = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
   const showTeamsOps = Boolean(user && (user.role === "ADMIN" || (user.role === "HEAD_DISPATCHER" && teamsEnabled)));
   const canUseGlobalSearch = Boolean(user && searchRoles.has(user.role));
+  const desktopSidebarExpanded = sidebarPinned || sidebarPeekOpen;
   const sections = useMemo(
     () => getVisibleSections(user?.role, { showTeamsOps }),
     [user?.role, showTeamsOps]
@@ -436,6 +472,31 @@ function AppShellInner({
   useEffect(() => {
     setNavOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(SIDEBAR_PINNED_KEY);
+    setSidebarPinned(stored === "true");
+    sidebarPrefReadyRef.current = true;
+    const media = window.matchMedia("(hover: hover) and (pointer: fine)");
+    const applyHoverMode = () => setDesktopHoverEnabled(media.matches);
+    applyHoverMode();
+    media.addEventListener("change", applyHoverMode);
+    return () => media.removeEventListener("change", applyHoverMode);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!sidebarPrefReadyRef.current) return;
+    window.localStorage.setItem(SIDEBAR_PINNED_KEY, sidebarPinned ? "true" : "false");
+  }, [sidebarPinned]);
+
+  useEffect(() => {
+    return () => {
+      if (hoverOpenTimerRef.current) window.clearTimeout(hoverOpenTimerRef.current);
+      if (hoverCloseTimerRef.current) window.clearTimeout(hoverCloseTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!navOpen) return;
@@ -547,12 +608,80 @@ function AppShellInner({
     return () => clearTimeout(timer);
   }, [searchTerm, canUseGlobalSearch]);
 
+  const clearSidebarHoverTimers = () => {
+    if (hoverOpenTimerRef.current) {
+      window.clearTimeout(hoverOpenTimerRef.current);
+      hoverOpenTimerRef.current = null;
+    }
+    if (hoverCloseTimerRef.current) {
+      window.clearTimeout(hoverCloseTimerRef.current);
+      hoverCloseTimerRef.current = null;
+    }
+  };
+
+  const handleDesktopSidebarToggle = () => {
+    clearSidebarHoverTimers();
+    setSidebarPeekOpen(false);
+    setSidebarPinned((prev) => {
+      const next = !prev;
+      return next;
+    });
+  };
+
+  const handleDesktopSidebarMouseEnter = () => {
+    if (!desktopHoverEnabled || sidebarPinned) return;
+    if (hoverCloseTimerRef.current) {
+      window.clearTimeout(hoverCloseTimerRef.current);
+      hoverCloseTimerRef.current = null;
+    }
+    if (hoverOpenTimerRef.current) return;
+    hoverOpenTimerRef.current = window.setTimeout(() => {
+      setSidebarPeekOpen(true);
+      hoverOpenTimerRef.current = null;
+    }, SIDEBAR_PEEK_OPEN_DELAY_MS);
+  };
+
+  const handleDesktopSidebarMouseLeave = () => {
+    if (!desktopHoverEnabled || sidebarPinned) return;
+    if (hoverOpenTimerRef.current) {
+      window.clearTimeout(hoverOpenTimerRef.current);
+      hoverOpenTimerRef.current = null;
+    }
+    if (hoverCloseTimerRef.current) return;
+    hoverCloseTimerRef.current = window.setTimeout(() => {
+      setSidebarPeekOpen(false);
+      hoverCloseTimerRef.current = null;
+    }, SIDEBAR_PEEK_CLOSE_DELAY_MS);
+  };
+
+  const focusNavSearchInput = () => {
+    if (typeof window === "undefined") return;
+    const focusIfPresent = () => {
+      const input = document.getElementById(NAV_SEARCH_INPUT_ID) as HTMLInputElement | null;
+      if (!input) return false;
+      input.focus();
+      input.select();
+      return true;
+    };
+    if (focusIfPresent()) return;
+    window.setTimeout(() => {
+      focusIfPresent();
+    }, 220);
+  };
+
+  const handleCompactSearchClick = () => {
+    clearSidebarHoverTimers();
+    setSidebarPeekOpen(false);
+    setSidebarPinned(true);
+    focusNavSearchInput();
+  };
+
   return (
     <div className="min-h-dvh w-full overflow-hidden bg-[color:var(--color-bg-muted)]">
       <a href="#main-content" className="skip-link">
         Skip to content
       </a>
-      <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-[color:var(--color-divider)] bg-white/90 px-4 backdrop-blur lg:hidden">
+      <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)]/90 px-4 backdrop-blur lg:hidden">
         <div>
           <div className="text-sm font-semibold text-ink">Haulio</div>
           <div className="text-xs text-[color:var(--color-text-muted)]">{title}</div>
@@ -562,7 +691,7 @@ function AppShellInner({
           aria-label="Open navigation"
           aria-expanded={navOpen}
           onClick={() => setNavOpen(true)}
-          className="rounded-full border border-[color:var(--color-divider)] bg-white px-3 py-2 text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+          className="rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
         >
           Menu
         </button>
@@ -577,7 +706,7 @@ function AppShellInner({
           />
           <aside
             ref={navRef}
-            className="absolute left-0 top-0 h-full w-[min(20rem,92vw)] bg-white px-4 py-6 shadow-[var(--shadow-card)]"
+            className="absolute left-0 top-0 h-full w-[min(20rem,92vw)] bg-[color:var(--color-surface-elevated)] px-4 py-6 shadow-[var(--shadow-card)]"
           >
             <div className="flex items-center justify-between">
               <div className="text-sm font-semibold text-ink">Navigation</div>
@@ -604,6 +733,7 @@ function AppShellInner({
                 groupedSearchResults={groupedSearchResults}
                 onSearchTermChange={setSearchTerm}
                 onClearSearch={() => setSearchTerm("")}
+                onCompactSearchClick={handleCompactSearchClick}
               />
             </div>
           </aside>
@@ -611,14 +741,57 @@ function AppShellInner({
       ) : null}
 
       <div className="flex h-[calc(100dvh-4rem)] w-full min-h-0 lg:h-screen">
-        <aside className="hidden h-screen w-20 flex-col border-r border-[color:var(--color-divider)] bg-white lg:flex">
-          <div className="flex-1 overflow-y-auto overflow-x-visible px-3 py-6">
+        <aside
+          onMouseEnter={handleDesktopSidebarMouseEnter}
+          onMouseLeave={handleDesktopSidebarMouseLeave}
+          className={cn(
+            "hidden h-screen flex-col border-r border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] transition-[width] duration-200 ease-out lg:flex",
+            desktopSidebarExpanded ? "w-[15.5rem]" : "w-20"
+          )}
+        >
+          <div
+            className={cn(
+              "border-b border-[color:var(--color-divider)] py-3",
+              desktopSidebarExpanded ? "px-4" : "px-2"
+            )}
+          >
+            <button
+              type="button"
+              aria-label={sidebarPinned ? "Collapse sidebar" : "Expand sidebar"}
+              title={sidebarPinned ? "Collapse sidebar" : "Expand sidebar"}
+              aria-pressed={sidebarPinned}
+              onClick={handleDesktopSidebarToggle}
+              className={cn(
+                "sidebar-toggle-btn inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]",
+                desktopSidebarExpanded ? "" : "mx-auto"
+              )}
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="sidebar-toggle-icon h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+              >
+                <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
+                <path className="sidebar-toggle-divider" d="M9 4.5v15" strokeLinecap="round" />
+                <path className="sidebar-toggle-dots" d="M6.5 9.5h1.5M6.5 12h1.5M6.5 14.5h1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+          <div
+            className={cn(
+              "flex-1 overflow-y-auto overflow-x-visible py-6",
+              desktopSidebarExpanded ? "px-4" : "px-3"
+            )}
+          >
             <NavContent
               pathname={pathname}
               org={org}
               user={user}
               sections={sections}
-              compact
+              compact={!desktopSidebarExpanded}
               canUseGlobalSearch={canUseGlobalSearch}
               searchTerm={searchTerm}
               searchLoading={searchLoading}
@@ -626,6 +799,7 @@ function AppShellInner({
               groupedSearchResults={groupedSearchResults}
               onSearchTermChange={setSearchTerm}
               onClearSearch={() => setSearchTerm("")}
+              onCompactSearchClick={handleCompactSearchClick}
             />
           </div>
         </aside>
@@ -639,7 +813,7 @@ function AppShellInner({
             onboarding &&
             onboarding.status === "NOT_ACTIVATED" &&
             !pathname.startsWith("/onboarding") ? (
-              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-4 shadow-[var(--shadow-subtle)] sm:px-6">
+              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-4 shadow-[var(--shadow-subtle)] sm:px-6">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-subtle)]">Setup</div>
@@ -657,7 +831,7 @@ function AppShellInner({
               </div>
             ) : null}
             {hideHeader ? null : (
-              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-4 shadow-[var(--shadow-subtle)] sm:px-6">
+              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-4 shadow-[var(--shadow-subtle)] sm:px-6">
                 <h2 className="text-[22px] font-semibold text-ink">{title}</h2>
                 {subtitle ? <p className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</p> : null}
               </div>

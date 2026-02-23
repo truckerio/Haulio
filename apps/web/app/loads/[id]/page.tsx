@@ -1132,7 +1132,7 @@ export default function LoadDetailsPage() {
                 ...
                 <span className="sr-only">More actions</span>
               </summary>
-              <div className="absolute right-0 z-10 mt-2 w-44 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-2 shadow-subtle">
+              <div className="absolute right-0 z-10 mt-2 w-44 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-2 shadow-subtle">
                 <button
                   type="button"
                   className="w-full rounded-[var(--radius-control)] px-3 py-2 text-left text-sm text-ink hover:bg-[color:var(--color-panel)]"
@@ -1194,7 +1194,7 @@ export default function LoadDetailsPage() {
           { label: "Driver", value: load?.driver?.name ?? "Unassigned" },
           { label: "Truck/Trailer", value: `${load?.truck?.unit ?? "-"} · ${load?.trailer?.unit ?? "-"}` },
         ].map((item) => (
-          <div key={item.label} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3">
+          <div key={item.label} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-3">
             <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">{item.label}</div>
             <div className="text-sm font-semibold text-ink">{item.value}</div>
           </div>
@@ -1258,7 +1258,7 @@ export default function LoadDetailsPage() {
                   <summary className="cursor-pointer text-sm font-medium text-ink">Stops</summary>
                   <div className="mt-3 grid gap-3">
                     {load?.stops?.map((stop: any) => (
-                      <div key={stop.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3">
+                      <div key={stop.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-3">
                         <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
                           {stop.type === "PICKUP" ? "Shipper" : stop.type === "DELIVERY" ? "Consignee" : "Yard"}
                         </div>
@@ -1278,7 +1278,7 @@ export default function LoadDetailsPage() {
                     {load?.docs?.map((doc: any) => (
                       <div
                         key={doc.id}
-                        className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-2"
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-2"
                       >
                         <div>
                           <div className="text-sm font-semibold text-ink">{doc.type}</div>
@@ -1297,7 +1297,7 @@ export default function LoadDetailsPage() {
                 <details className="group">
                   <summary className="cursor-pointer text-sm font-medium text-ink">Notes</summary>
                   <div className="mt-3 space-y-3">
-                    <div className="grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3">
+                    <div className="grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
                       <FormField label="Add note" htmlFor="loadNoteText">
                         <textarea
                           id="loadNoteText"
@@ -1337,7 +1337,7 @@ export default function LoadDetailsPage() {
                         return (
                           <div
                             key={note.id}
-                            className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2"
+                            className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2"
                           >
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <div className="text-xs text-[color:var(--color-text-muted)]">
@@ -1377,7 +1377,7 @@ export default function LoadDetailsPage() {
                   <div
                     key={doc.id}
                     id={doc.type === "POD" ? "pod" : undefined}
-                    className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-4 py-3"
+                    className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-3"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
@@ -1558,7 +1558,7 @@ export default function LoadDetailsPage() {
                   {accessorials.map((item: any) => (
                     <div
                       key={item.id}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2 text-sm"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-sm"
                     >
                       <div>
                         <div className="font-semibold text-ink">{ACCESSORIAL_LABELS[item.type] ?? item.type}</div>
@@ -1613,7 +1613,7 @@ export default function LoadDetailsPage() {
                   <div className="text-xs text-[color:var(--color-danger)]">{accessorialError}</div>
                 ) : null}
                 {canManageAccessorials ? (
-                  <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3">
+                  <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
                     <div className="grid gap-3 lg:grid-cols-4">
                       <FormField label="Type" htmlFor="accessorialType">
                         <Select
@@ -1684,7 +1684,7 @@ export default function LoadDetailsPage() {
                     {displayCharges.map((charge) => (
                       <div
                         key={charge.id}
-                        className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2 text-sm"
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-sm"
                       >
                         <div>
                           <div className="font-semibold text-ink">
@@ -1712,7 +1712,7 @@ export default function LoadDetailsPage() {
                     {displayCharges.length === 0 ? <EmptyState title="No charges yet." /> : null}
                   </div>
                   {canEditCharges ? (
-                    <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3">
+                    <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
                       <div className="grid gap-3 lg:grid-cols-3">
                         <FormField label="Charge type" htmlFor="chargeType">
                           <Select
@@ -1833,7 +1833,7 @@ export default function LoadDetailsPage() {
                 {load?.docs?.map((doc: any) => (
                   <div
                     key={doc.id}
-                    className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2 text-sm"
+                    className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-sm"
                   >
                     <div>
                       <div className="font-semibold text-ink">{doc.type}</div>
