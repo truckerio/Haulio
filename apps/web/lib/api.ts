@@ -7,6 +7,7 @@ const DB_SETUP_ERROR_CODES = new Set(["P1001", "P1003", "P2021", "P2022"]);
 export type ApiFetchOptions = RequestInit & {
   skipAuthRedirect?: boolean;
   retryOnCsrf?: boolean;
+  timeoutMs?: number;
 };
 
 export function getApiBase() {
@@ -47,7 +48,7 @@ async function refreshCsrfToken() {
 }
 
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
-  const { skipAuthRedirect, retryOnCsrf = true, ...fetchOptions } = options;
+  const { skipAuthRedirect, retryOnCsrf = true, timeoutMs = 20000, ...fetchOptions } = options;
   const headers = new Headers(fetchOptions.headers || {});
   const method = (fetchOptions.method ?? "GET").toUpperCase();
   if (!["GET", "HEAD"].includes(method) && !headers.has("x-csrf-token")) {
@@ -57,18 +58,37 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     }
   }
   let res: Response;
+  const controller = new AbortController();
+  let timeoutId: number | null = null;
+  let timedOut = false;
+  if (typeof window !== "undefined" && timeoutMs > 0) {
+    timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
+  const externalSignal = fetchOptions.signal;
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener?.("abort", onExternalAbort);
   try {
     res = await fetch(`${getApiBase()}${path}`, {
       ...fetchOptions,
+      signal: controller.signal,
       headers,
       credentials: fetchOptions.credentials ?? "include",
       cache: "no-store",
     });
   } catch (error) {
+    if (timedOut || (error as { name?: string })?.name === "AbortError") {
+      throw new Error("Request timed out. Please try again.");
+    }
     if (DEV_ERRORS) {
       throw new Error("API unreachable. Make sure the API server is running.");
     }
     throw new Error("We couldn't reach the server. Please try again.");
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+    externalSignal?.removeEventListener?.("abort", onExternalAbort);
   }
   if (!res.ok) {
     if (res.status === 401 && typeof window !== "undefined" && !skipAuthRedirect) {
