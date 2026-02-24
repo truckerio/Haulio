@@ -266,21 +266,25 @@ export default function CompanySettingsPage() {
 
   const saveOperatingEntity = async () => {
     const payload = { ...operatingForm };
-    if (editingOperatingId) {
-      await apiFetch(`/api/operating-entities/${editingOperatingId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    } else {
-      await apiFetch("/api/operating-entities", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+    try {
+      if (editingOperatingId) {
+        await apiFetch(`/api/operating-entities/${editingOperatingId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiFetch("/api/operating-entities", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      resetOperatingForm();
+      await loadData();
+    } catch (err) {
+      setError((err as Error).message || "Failed to save operating entity.");
     }
-    resetOperatingForm();
-    loadData();
   };
 
   const editOperatingEntity = (entity: any) => {
@@ -307,8 +311,12 @@ export default function CompanySettingsPage() {
   };
 
   const makeDefaultEntity = async (entityId: string) => {
-    await apiFetch(`/api/operating-entities/${entityId}/make-default`, { method: "POST" });
-    loadData();
+    try {
+      await apiFetch(`/api/operating-entities/${entityId}/make-default`, { method: "POST" });
+      await loadData();
+    } catch (err) {
+      setError((err as Error).message || "Failed to update default operating entity.");
+    }
   };
 
   const saveCustomer = async () => {

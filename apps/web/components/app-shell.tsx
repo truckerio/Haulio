@@ -99,6 +99,9 @@ const searchRoles = new Set(["ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING"
 const SIDEBAR_PINNED_KEY = "haulio:sidebar:pinned";
 const SIDEBAR_PEEK_OPEN_DELAY_MS = 380;
 const SIDEBAR_PEEK_CLOSE_DELAY_MS = 240;
+let sidebarPinnedCache: boolean | null = null;
+let sidebarPeekOpenCache = false;
+let teamsEnabledCache: boolean | null = null;
 
 function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean }) {
   if (role === "DRIVER") return driverSections;
@@ -437,17 +440,26 @@ function AppShellInner({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const hoverOpenTimerRef = useRef<number | null>(null);
   const hoverCloseTimerRef = useRef<number | null>(null);
-  const sidebarPrefReadyRef = useRef(false);
   const { user, org } = useUser();
-  const [sidebarPinned, setSidebarPinned] = useState(false);
-  const [sidebarPeekOpen, setSidebarPeekOpen] = useState(false);
-  const [desktopHoverEnabled, setDesktopHoverEnabled] = useState(false);
+  const [sidebarPinned, setSidebarPinned] = useState(() => {
+    if (sidebarPinnedCache !== null) return sidebarPinnedCache;
+    if (typeof window === "undefined") return false;
+    const next = window.localStorage.getItem(SIDEBAR_PINNED_KEY) === "true";
+    sidebarPinnedCache = next;
+    return next;
+  });
+  const [sidebarPeekOpen, setSidebarPeekOpen] = useState(() => sidebarPeekOpenCache);
+  const [desktopHoverEnabled, setDesktopHoverEnabled] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+  });
+  const [sidebarTransitionReady, setSidebarTransitionReady] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const searchRequestIdRef = useRef(0);
-  const [teamsEnabled, setTeamsEnabled] = useState(false);
+  const [teamsEnabled, setTeamsEnabled] = useState(() => teamsEnabledCache ?? false);
   const canSeeTeamsOps = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
   const showTeamsOps = Boolean(user && (user.role === "ADMIN" || (user.role === "HEAD_DISPATCHER" && teamsEnabled)));
   const canUseGlobalSearch = Boolean(user && searchRoles.has(user.role));
@@ -475,21 +487,26 @@ function AppShellInner({
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const stored = window.localStorage.getItem(SIDEBAR_PINNED_KEY);
-    setSidebarPinned(stored === "true");
-    sidebarPrefReadyRef.current = true;
     const media = window.matchMedia("(hover: hover) and (pointer: fine)");
-    const applyHoverMode = () => setDesktopHoverEnabled(media.matches);
+    const applyHoverMode = () => setDesktopHoverEnabled((prev) => (prev === media.matches ? prev : media.matches));
     applyHoverMode();
+    const raf = window.requestAnimationFrame(() => setSidebarTransitionReady(true));
     media.addEventListener("change", applyHoverMode);
-    return () => media.removeEventListener("change", applyHoverMode);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      media.removeEventListener("change", applyHoverMode);
+    };
   }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (!sidebarPrefReadyRef.current) return;
+    sidebarPinnedCache = sidebarPinned;
     window.localStorage.setItem(SIDEBAR_PINNED_KEY, sidebarPinned ? "true" : "false");
   }, [sidebarPinned]);
+
+  useEffect(() => {
+    sidebarPeekOpenCache = sidebarPeekOpen;
+  }, [sidebarPeekOpen]);
 
   useEffect(() => {
     return () => {
@@ -550,10 +567,12 @@ function AppShellInner({
 
   useEffect(() => {
     if (!user) {
+      teamsEnabledCache = false;
       setTeamsEnabled(false);
       return;
     }
     if (!canSeeTeamsOps) {
+      teamsEnabledCache = false;
       setTeamsEnabled(false);
       return;
     }
@@ -561,10 +580,13 @@ function AppShellInner({
     apiFetch<{ teams: Array<{ id: string; name?: string | null }> }>("/teams")
       .then((data) => {
         if (!active) return;
-        setTeamsEnabled((data.teams ?? []).some((team) => team.name && team.name !== "Default"));
+        const next = (data.teams ?? []).some((team) => team.name && team.name !== "Default");
+        teamsEnabledCache = next;
+        setTeamsEnabled(next);
       })
       .catch(() => {
         if (!active) return;
+        teamsEnabledCache = false;
         setTeamsEnabled(false);
       });
     return () => {
@@ -745,7 +767,8 @@ function AppShellInner({
           onMouseEnter={handleDesktopSidebarMouseEnter}
           onMouseLeave={handleDesktopSidebarMouseLeave}
           className={cn(
-            "hidden h-screen flex-col border-r border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] transition-[width] duration-200 ease-out lg:flex",
+            "hidden h-screen flex-col border-r border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] lg:flex",
+            sidebarTransitionReady ? "transition-[width] duration-200 ease-out" : "transition-none",
             desktopSidebarExpanded ? "w-[15.5rem]" : "w-20"
           )}
         >

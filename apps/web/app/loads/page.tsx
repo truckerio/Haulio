@@ -492,7 +492,8 @@ function LoadsPageContent() {
         loadType: form.loadType === "BROKERED" ? "BROKERED" : "COMPANY",
         movementMode: form.movementMode || "FTL",
         tripNumber: "",
-        operatingEntityId: form.operatingEntityId,
+        operatingEntityId:
+          operatingEntities.find((entity) => entity.isDefault)?.id ?? form.operatingEntityId,
         customerId: "",
         customerName: "",
         customerRef: "",

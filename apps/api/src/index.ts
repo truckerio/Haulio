@@ -14742,6 +14742,7 @@ app.patch("/api/operating-entities/:id", requireAuth, requireCsrf, requireRole("
     remitToCity: z.string().optional(),
     remitToState: z.string().optional(),
     remitToZip: z.string().optional(),
+    isDefault: z.boolean().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -14756,27 +14757,42 @@ app.patch("/api/operating-entities/:id", requireAuth, requireCsrf, requireRole("
     return;
   }
 
-  const updated = await prisma.operatingEntity.update({
-    where: { id: entity.id },
-    data: {
-      name: parsed.data.name ? parsed.data.name.trim() : undefined,
-      type: parsed.data.type as OperatingEntityType | undefined,
-      addressLine1: parsed.data.addressLine1 !== undefined ? normalizeOptionalText(parsed.data.addressLine1) : undefined,
-      addressLine2: parsed.data.addressLine2 !== undefined ? normalizeOptionalText(parsed.data.addressLine2) : undefined,
-      city: parsed.data.city !== undefined ? normalizeOptionalText(parsed.data.city) : undefined,
-      state: parsed.data.state !== undefined ? normalizeOptionalText(parsed.data.state) : undefined,
-      zip: parsed.data.zip !== undefined ? normalizeOptionalText(parsed.data.zip) : undefined,
-      phone: parsed.data.phone !== undefined ? normalizeOptionalText(parsed.data.phone) : undefined,
-      email: parsed.data.email !== undefined ? normalizeOptionalText(parsed.data.email) : undefined,
-      mcNumber: parsed.data.mcNumber !== undefined ? normalizeOptionalText(parsed.data.mcNumber) : undefined,
-      dotNumber: parsed.data.dotNumber !== undefined ? normalizeOptionalText(parsed.data.dotNumber) : undefined,
-      remitToName: parsed.data.remitToName !== undefined ? normalizeOptionalText(parsed.data.remitToName) : undefined,
-      remitToAddressLine1:
-        parsed.data.remitToAddressLine1 !== undefined ? normalizeOptionalText(parsed.data.remitToAddressLine1) : undefined,
-      remitToCity: parsed.data.remitToCity !== undefined ? normalizeOptionalText(parsed.data.remitToCity) : undefined,
-      remitToState: parsed.data.remitToState !== undefined ? normalizeOptionalText(parsed.data.remitToState) : undefined,
-      remitToZip: parsed.data.remitToZip !== undefined ? normalizeOptionalText(parsed.data.remitToZip) : undefined,
-    },
+  if (parsed.data.isDefault === false && entity.isDefault) {
+    res.status(400).json({ error: "Cannot unset the default entity directly. Set another entity as default instead." });
+    return;
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    if (parsed.data.isDefault === true) {
+      await tx.operatingEntity.updateMany({
+        where: { orgId: req.user!.orgId, id: { not: entity.id } },
+        data: { isDefault: false },
+      });
+    }
+
+    return tx.operatingEntity.update({
+      where: { id: entity.id },
+      data: {
+        name: parsed.data.name ? parsed.data.name.trim() : undefined,
+        type: parsed.data.type as OperatingEntityType | undefined,
+        addressLine1: parsed.data.addressLine1 !== undefined ? normalizeOptionalText(parsed.data.addressLine1) : undefined,
+        addressLine2: parsed.data.addressLine2 !== undefined ? normalizeOptionalText(parsed.data.addressLine2) : undefined,
+        city: parsed.data.city !== undefined ? normalizeOptionalText(parsed.data.city) : undefined,
+        state: parsed.data.state !== undefined ? normalizeOptionalText(parsed.data.state) : undefined,
+        zip: parsed.data.zip !== undefined ? normalizeOptionalText(parsed.data.zip) : undefined,
+        phone: parsed.data.phone !== undefined ? normalizeOptionalText(parsed.data.phone) : undefined,
+        email: parsed.data.email !== undefined ? normalizeOptionalText(parsed.data.email) : undefined,
+        mcNumber: parsed.data.mcNumber !== undefined ? normalizeOptionalText(parsed.data.mcNumber) : undefined,
+        dotNumber: parsed.data.dotNumber !== undefined ? normalizeOptionalText(parsed.data.dotNumber) : undefined,
+        remitToName: parsed.data.remitToName !== undefined ? normalizeOptionalText(parsed.data.remitToName) : undefined,
+        remitToAddressLine1:
+          parsed.data.remitToAddressLine1 !== undefined ? normalizeOptionalText(parsed.data.remitToAddressLine1) : undefined,
+        remitToCity: parsed.data.remitToCity !== undefined ? normalizeOptionalText(parsed.data.remitToCity) : undefined,
+        remitToState: parsed.data.remitToState !== undefined ? normalizeOptionalText(parsed.data.remitToState) : undefined,
+        remitToZip: parsed.data.remitToZip !== undefined ? normalizeOptionalText(parsed.data.remitToZip) : undefined,
+        isDefault: parsed.data.isDefault === true ? true : undefined,
+      },
+    });
   });
 
   await logAudit({

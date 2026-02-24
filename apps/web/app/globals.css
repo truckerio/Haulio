@@ -235,7 +235,7 @@ html[data-motion="reduced"] *::after {
 }
 
 .nav-content .nav-item {
-  transition: all 140ms ease;
+  transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
 .sidebar-toggle-btn {

@@ -25,6 +25,7 @@ export default function ForgotPasswordPage() {
         "/auth/forgot",
         {
           method: "POST",
+          skipAuthRedirect: true,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email }),
         }

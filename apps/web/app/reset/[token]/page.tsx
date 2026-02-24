@@ -38,6 +38,7 @@ export default function ResetPasswordPage() {
         "/auth/reset",
         {
           method: "POST",
+          skipAuthRedirect: true,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token, password }),
         }
