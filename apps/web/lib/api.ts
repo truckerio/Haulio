@@ -73,7 +73,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   if (!res.ok) {
     if (res.status === 401 && typeof window !== "undefined" && !skipAuthRedirect) {
       window.location.href = "/login";
-      return new Promise<T>(() => {});
+      throw new Error("Unauthorized");
     }
     if (res.status === 403 && retryOnCsrf && !["GET", "HEAD"].includes(method)) {
       const error = await res.json().catch(() => ({}));
