@@ -48,6 +48,10 @@ function getTransporter(config: SmtpConfig) {
     port: config.port,
     secure: config.secure,
     auth: config.user && config.pass ? { user: config.user, pass: config.pass } : undefined,
+    // Keep auth flows responsive even when SMTP provider is unreachable/slow.
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || "5000"),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || "5000"),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || "8000"),
   });
   return transporter;
 }

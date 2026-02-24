@@ -2360,12 +2360,18 @@ app.post("/auth/forgot", async (req, res) => {
   const resetUrl = `${webOrigin}/reset/${token}`;
   let emailSent = false;
   if (isEmailConfigured()) {
+    const sendTimeoutMs = Number(process.env.SMTP_SEND_TIMEOUT_MS || "6000");
     try {
-      await sendPasswordResetEmail({
-        to: user.email,
-        resetUrl,
-        expiresInMinutes: RESET_TOKEN_TTL_MINUTES,
-      });
+      await Promise.race([
+        sendPasswordResetEmail({
+          to: user.email,
+          resetUrl,
+          expiresInMinutes: RESET_TOKEN_TTL_MINUTES,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`SMTP send timed out after ${sendTimeoutMs}ms`)), sendTimeoutMs)
+        ),
+      ]);
       emailSent = true;
     } catch (error) {
       console.error("Failed to send password reset email", error);
