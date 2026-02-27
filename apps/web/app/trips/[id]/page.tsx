@@ -13,6 +13,7 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { apiFetch } from "@/lib/api";
 import { applyFailClosedCapability, getRoleCapabilities, isForbiddenError } from "@/lib/capabilities";
 import { formatDateTime } from "@/lib/date-time";
+import { buildGroupedTripLoads, isLtlLikeMovementMode } from "../trip-load-grouping";
 
 const NOTE_TYPES = ["OPERATIONAL", "BILLING", "COMPLIANCE", "INTERNAL", "CUSTOMER_VISIBLE"] as const;
 const NOTE_PRIORITIES = ["NORMAL", "IMPORTANT", "ALERT"] as const;
@@ -269,38 +270,16 @@ export default function TripDetailPage() {
     );
   }, [trip]);
 
-  const isLtlLike = trip?.movementMode === "LTL" || trip?.movementMode === "POOL_DISTRIBUTION";
+  const isLtlLike = isLtlLikeMovementMode(trip?.movementMode);
 
   const groupedTripLoads = useMemo(() => {
-    if (!trip) return [] as Array<{
-      key: string;
-      label: string;
-      loads: TripPayload["loads"];
-      pallets: number;
-      weightLbs: number;
-    }>;
-    const groups = new Map<string, { label: string; loads: TripPayload["loads"]; pallets: number; weightLbs: number }>();
-    for (const row of trip.loads) {
-      const details = loadDetails[row.load.id];
-      const nextStop =
-        details?.stops?.find((stop) => !stop.departedAt) ??
-        details?.stops?.slice().sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0))[0] ??
-        null;
-      const label = isLtlLike
-        ? nextStop
-          ? `${nextStop.name ?? "Next stop"} · ${nextStop.city ?? "-"}${nextStop.state ? `, ${nextStop.state}` : ""}`
-          : "Unscheduled next stop"
-        : "Loads";
-      const bucket = groups.get(label) ?? { label, loads: [], pallets: 0, weightLbs: 0 };
-      bucket.loads.push(row);
-      bucket.pallets += details?.palletCount ?? 0;
-      bucket.weightLbs += details?.weightLbs ?? 0;
-      groups.set(label, bucket);
-    }
-    return Array.from(groups.entries())
-      .map(([key, value]) => ({ key, ...value }))
-      .sort((left, right) => left.label.localeCompare(right.label));
-  }, [trip, loadDetails, isLtlLike]);
+    if (!trip) return [];
+    return buildGroupedTripLoads({
+      movementMode: trip.movementMode,
+      loads: trip.loads,
+      loadDetails,
+    });
+  }, [trip, loadDetails]);
 
   const saveNote = async () => {
     if (!trip) return;
