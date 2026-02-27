@@ -17,6 +17,16 @@ import { formatDateTime } from "@/lib/date-time";
 const NOTE_TYPES = ["OPERATIONAL", "BILLING", "COMPLIANCE", "INTERNAL", "CUSTOMER_VISIBLE"] as const;
 const NOTE_PRIORITIES = ["NORMAL", "IMPORTANT", "ALERT"] as const;
 
+function formatCents(value?: number | null) {
+  if (value === null || value === undefined) return "-";
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
+}
+
+function formatMiles(value?: number | null) {
+  if (value === null || value === undefined) return "-";
+  return `${value.toFixed(1)} mi`;
+}
+
 type TripPayload = {
   id: string;
   tripNumber: string;
@@ -45,6 +55,12 @@ type LoadDetails = {
   id: string;
   loadNumber: string;
   status: string;
+  movementMode?: string | null;
+  miles?: number | null;
+  paidMiles?: number | null;
+  paidMilesSource?: string | null;
+  palletCount?: number | null;
+  weightLbs?: number | null;
   stops?: Array<{
     id: string;
     sequence: number;
@@ -58,6 +74,7 @@ type LoadDetails = {
     departedAt?: string | null;
   }>;
   docs?: Array<{ id: string; type: string; status: string; uploadedAt?: string | null }>;
+  accessorials?: Array<{ id: string; amount?: string | number | null }>;
 };
 
 type TimelineEntry = {
@@ -70,13 +87,28 @@ type TimelineEntry = {
   payload?: Record<string, unknown>;
 };
 
+type SettlementPreview = {
+  tripId: string;
+  plannedMiles: number;
+  paidMiles: number | null;
+  milesVariance: number | null;
+  milesSource: string | null;
+  totalPallets: number;
+  totalWeightLbs: number;
+  accessorialTotalCents: number;
+  deductionsTotalCents: number;
+  netPayPreviewCents: number | null;
+};
+
 export default function TripDetailPage() {
   const params = useParams();
   const tripId = params?.id as string | undefined;
   const [trip, setTrip] = useState<TripPayload | null>(null);
   const [loadDetails, setLoadDetails] = useState<Record<string, LoadDetails>>({});
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [settlementPreview, setSettlementPreview] = useState<SettlementPreview | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [expandedLoadId, setExpandedLoadId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [composerRestricted, setComposerRestricted] = useState(false);
@@ -97,9 +129,11 @@ export default function TripDetailPage() {
         apiFetch<{ timeline: TimelineEntry[] }>(`/timeline?entityType=TRIP&entityId=${encodeURIComponent(tripId)}`),
       ]);
 
-      setUserRole(mePayload.user?.role ?? null);
+      const role = mePayload.user?.role ?? null;
+      setUserRole(role);
       setTrip(tripPayload.trip);
       setTimeline(timelinePayload.timeline ?? []);
+      setExpandedLoadId((prev) => prev ?? tripPayload.trip.loads?.[0]?.load.id ?? null);
 
       const detailEntries = await Promise.all(
         (tripPayload.trip.loads ?? []).map(async (row) => {
@@ -117,6 +151,16 @@ export default function TripDetailPage() {
           return acc;
         }, {})
       );
+      if (getRoleCapabilities(role).canViewSettlementPreview) {
+        try {
+          const payload = await apiFetch<{ preview: SettlementPreview }>(`/trips/${tripId}/settlement-preview`);
+          setSettlementPreview(payload.preview ?? null);
+        } catch {
+          setSettlementPreview(null);
+        }
+      } else {
+        setSettlementPreview(null);
+      }
       setError(null);
     } catch (err) {
       setError((err as Error).message || "Unable to load trip.");
@@ -129,8 +173,20 @@ export default function TripDetailPage() {
     loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    if (!trip) {
+      setExpandedLoadId(null);
+      return;
+    }
+    if (expandedLoadId && trip.loads.some((row) => row.load.id === expandedLoadId)) {
+      return;
+    }
+    setExpandedLoadId(trip.loads[0]?.load.id ?? null);
+  }, [trip, expandedLoadId]);
+
   const capabilities = useMemo(() => getRoleCapabilities(userRole), [userRole]);
   const canCreateNotes = applyFailClosedCapability(capabilities.canCreateLoadNotes, composerRestricted);
+  const canViewSettlementPreview = capabilities.canViewSettlementPreview;
 
   const stopRows = useMemo(() => {
     if (!trip) return [];
@@ -212,6 +268,39 @@ export default function TripDetailPage() {
       { delivered: 0, ready: 0, invoiced: 0, paid: 0 }
     );
   }, [trip]);
+
+  const isLtlLike = trip?.movementMode === "LTL" || trip?.movementMode === "POOL_DISTRIBUTION";
+
+  const groupedTripLoads = useMemo(() => {
+    if (!trip) return [] as Array<{
+      key: string;
+      label: string;
+      loads: TripPayload["loads"];
+      pallets: number;
+      weightLbs: number;
+    }>;
+    const groups = new Map<string, { label: string; loads: TripPayload["loads"]; pallets: number; weightLbs: number }>();
+    for (const row of trip.loads) {
+      const details = loadDetails[row.load.id];
+      const nextStop =
+        details?.stops?.find((stop) => !stop.departedAt) ??
+        details?.stops?.slice().sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0))[0] ??
+        null;
+      const label = isLtlLike
+        ? nextStop
+          ? `${nextStop.name ?? "Next stop"} · ${nextStop.city ?? "-"}${nextStop.state ? `, ${nextStop.state}` : ""}`
+          : "Unscheduled next stop"
+        : "Loads";
+      const bucket = groups.get(label) ?? { label, loads: [], pallets: 0, weightLbs: 0 };
+      bucket.loads.push(row);
+      bucket.pallets += details?.palletCount ?? 0;
+      bucket.weightLbs += details?.weightLbs ?? 0;
+      groups.set(label, bucket);
+    }
+    return Array.from(groups.entries())
+      .map(([key, value]) => ({ key, ...value }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [trip, loadDetails, isLtlLike]);
 
   const saveNote = async () => {
     if (!trip) return;
@@ -431,6 +520,42 @@ export default function TripDetailPage() {
             </div>
           </Card>
 
+          {canViewSettlementPreview ? (
+            <>
+              <Card className="space-y-2">
+                <div className="text-sm font-semibold text-ink">Trip miles</div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Planned: {formatMiles(settlementPreview?.plannedMiles)}
+                </div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Paid: {formatMiles(settlementPreview?.paidMiles)}
+                </div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Variance: {formatMiles(settlementPreview?.milesVariance)}
+                </div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Source: {settlementPreview?.milesSource ?? "-"}
+                </div>
+              </Card>
+
+              <Card className="space-y-2">
+                <div className="text-sm font-semibold text-ink">Settlement preview</div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Accessorials: {formatCents(settlementPreview?.accessorialTotalCents)}
+                </div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Deductions: {formatCents(settlementPreview?.deductionsTotalCents)}
+                </div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Net pay preview: {formatCents(settlementPreview?.netPayPreviewCents)}
+                </div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Pallets: {settlementPreview?.totalPallets ?? 0} · Weight: {settlementPreview?.totalWeightLbs ?? 0} lbs
+                </div>
+              </Card>
+            </>
+          ) : null}
+
           <Card className="space-y-2">
             <div className="text-sm font-semibold text-ink">Blockers</div>
             {blockers.length === 0 ? (
@@ -447,22 +572,56 @@ export default function TripDetailPage() {
       </div>
 
       <Card className="space-y-3">
-        <div className="text-sm font-semibold text-ink">Loads in trip</div>
-        <div className="space-y-2">
-          {trip.loads.map((row) => {
-            const details = loadDetails[row.load.id];
-            return (
-              <details key={row.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] p-3">
-                <summary className="cursor-pointer text-sm font-semibold text-ink">
-                  {row.sequence}. {row.load.loadNumber} · {row.load.status} · {row.load.customerName ?? "Customer"}
-                </summary>
-                <div className="mt-3 grid gap-2 text-xs text-[color:var(--color-text-muted)] md:grid-cols-2">
-                  <div>Stops: {details?.stops?.length ?? 0}</div>
-                  <div>Docs: {details?.docs?.length ?? 0}</div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-semibold text-ink">Loads in trip</div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setExpandedLoadId(null)}>
+              Collapse all
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setExpandedLoadId(trip.loads[0]?.load.id ?? null)}>
+              Expand first
+            </Button>
+          </div>
+        </div>
+        <div className="space-y-3">
+          {groupedTripLoads.map((group) => (
+            <div key={group.key} className="space-y-2">
+              {isLtlLike ? (
+                <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">
+                  {group.label} · {group.loads.length} loads · {group.pallets} pallets · {group.weightLbs} lbs
                 </div>
-              </details>
-            );
-          })}
+              ) : null}
+              {group.loads.map((row) => {
+                const details = loadDetails[row.load.id];
+                const isExpanded = expandedLoadId === row.load.id;
+                return (
+                  <div key={row.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] p-3">
+                    <button
+                      type="button"
+                      className="w-full text-left"
+                      onClick={() => setExpandedLoadId((prev) => (prev === row.load.id ? null : row.load.id))}
+                    >
+                      <div className="text-sm font-semibold text-ink">
+                        {row.sequence}. {row.load.loadNumber} · {row.load.status} · {row.load.customerName ?? "Customer"}
+                      </div>
+                      <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
+                        Pallets: {details?.palletCount ?? 0} · Weight: {details?.weightLbs ?? 0} lbs · Miles:{" "}
+                        {formatMiles(details?.miles ?? null)}
+                      </div>
+                    </button>
+                    {isExpanded ? (
+                      <div className="mt-3 grid gap-2 text-xs text-[color:var(--color-text-muted)] md:grid-cols-2">
+                        <div>Stops: {details?.stops?.length ?? 0}</div>
+                        <div>Docs: {details?.docs?.length ?? 0}</div>
+                        <div>Paid miles: {formatMiles(details?.paidMiles ?? null)}</div>
+                        <div>Miles source: {details?.paidMilesSource ?? "-"}</div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
       </Card>
     </AppShell>
