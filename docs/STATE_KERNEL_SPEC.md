@@ -115,3 +115,5 @@ This is the basis for divergence logging in rollout phases.
 - `STATE_KERNEL_SHADOW`: enables shadow evaluation alongside legacy mutation flow.
 - `STATE_KERNEL_ENFORCE`: reserved for enforcement phase; not used to change behavior in Phase A.
 - `STATE_KERNEL_DIVERGENCE_LOG`: emits audit entries when legacy and kernel post-states diverge.
+
+Operational rollout and gating steps are documented in `docs/STATE_KERNEL_ROLLOUT.md`.
