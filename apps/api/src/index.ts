@@ -49,7 +49,9 @@ import {
   BillingStatus,
   BillingSubmissionChannel,
   BillingSubmissionStatus,
+  FinanceDeliveredDocRequirement,
   FinancePaymentMethod,
+  FinanceRateConRequirement,
   PayableLineItemType,
   PayableMilesSource,
   PayableHoldOwner,
@@ -74,7 +76,14 @@ import {
   TeamEntityType,
   LoadNoteSource,
   LoadNoteVisibility,
+  NoteEntityType,
+  NotePriority,
+  NoteType,
   MovementMode,
+  DispatchViewScope,
+  DispatchExceptionOwner,
+  DispatchExceptionSeverity,
+  DispatchExceptionStatus,
   add,
   formatUSD,
   mul,
@@ -99,13 +108,17 @@ import type {
 import { createSession, setSessionCookie, clearSessionCookie, requireAuth, destroySession } from "./lib/auth";
 import { createCsrfToken, setCsrfCookie, requireCsrf } from "./lib/csrf";
 import { requireRole } from "./lib/rbac";
+import {
+  DISPATCH_EXECUTION_OR_BILLING_ROLES,
+  DISPATCH_EXECUTION_ROLES,
+  DISPATCH_TRACKING_ROLES,
+} from "./lib/dispatch-role-parity";
 import { isEmailConfigured, sendOperationalEmail, sendPasswordResetEmail } from "./lib/email";
 import {
   upload,
   saveDocumentFile,
   saveDriverProfilePhoto,
   saveUserProfilePhoto,
-  saveLoadConfirmationFile,
   saveVaultDocumentFile,
   ensureUploadDirs,
   getUploadDir,
@@ -162,6 +175,29 @@ import {
   isCompletedStatus,
   normalizeDispatchQueueView,
 } from "./modules/dispatch/queue-view";
+import {
+  canRoleViewNoteType,
+  ensureRoleCanCreateNoteType,
+  isNoteExpired,
+  NOTE_DELETE_DISABLED_MESSAGE,
+  normalizeNoteTypeForRole,
+  resolveNoteIndicator,
+  sortTimelineEntries,
+} from "./lib/notes-v1";
+import { buildUnifiedTimeline } from "./lib/timeline";
+import {
+  buildLoadExecutionMirrorState,
+  getBlockedLoadExecutionMutationFields,
+  isLoadExecutionMirrorEqual,
+  LEGACY_EXECUTION_REJECTION_MESSAGE,
+} from "./modules/dispatch/execution-authority";
+import { evaluateLoadReadinessProjection, READINESS_POLICY_DEFAULTS } from "./lib/load-readiness";
+import {
+  ISSUE_TYPES,
+  groupIssuesByFocusSection,
+  mapReadinessProjectionToIssues,
+  type IssueType,
+} from "./lib/load-issues";
 import { assignTeamEntities } from "./modules/teams/assign";
 import { canAssignTeams } from "./modules/teams/access";
 import {
@@ -175,7 +211,17 @@ import {
   verifyTotp,
 } from "./lib/mfa";
 import { getTodayScope } from "./modules/today/scope";
+import { buildTodayIssueSummary, type TodayIssueSummary } from "./modules/today/issue-summary";
 import { isWarningType, WARNING_TYPE_MAP } from "./modules/today/warnings";
+import {
+  buildActivitySummary,
+  roleDefaultActivityDomain,
+  type ActivityDomainFilter,
+  type ActivityRange,
+} from "./modules/activity/summary";
+import { createLoadConfirmationDocumentFromBuffer } from "./modules/load-confirmations/ingest";
+import { ingestInboundRateconEmail } from "./modules/inbound-email/service";
+import { isInboundWebhookAuthorized, parseSendgridInboundEmail } from "./modules/inbound-email/sendgrid";
 import {
   applyLearned,
   buildLearningKeyForAddress,
@@ -502,8 +548,726 @@ const summarizeYardOsPlan = (params: {
   };
 };
 
-function canDeleteLockedLoadNote(role: Role | string) {
-  return role === Role.ADMIN || role === Role.HEAD_DISPATCHER;
+type NoteIndicator = "NONE" | "NORMAL" | "ALERT";
+
+type ResolvedNoteEntity = {
+  entityType: NoteEntityType;
+  entityId: string;
+  loadId?: string | null;
+  stopId?: string | null;
+};
+
+async function buildNoteIndicatorMap(params: {
+  orgId: string;
+  role: Role;
+  entityType: NoteEntityType;
+  entityIds: string[];
+  now?: Date;
+}) {
+  const map = new Map<string, NoteIndicator>();
+  if (params.entityIds.length === 0) return map;
+  const now = params.now ?? new Date();
+  const visibleTypes = (Object.values(NoteType) as NoteType[]).filter((noteType) =>
+    canRoleViewNoteType({ role: params.role, noteType })
+  );
+  if (visibleTypes.length === 0) {
+    return map;
+  }
+  const activeWhere: Prisma.NoteWhereInput = {
+    orgId: params.orgId,
+    entityType: params.entityType,
+    entityId: { in: params.entityIds },
+    deletedAt: null,
+    noteType: { in: visibleTypes },
+    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+  };
+  const baseRows = await prisma.note.groupBy({
+    by: ["entityId"],
+    where: activeWhere,
+    _count: { id: true },
+  });
+  const hasAnyByEntity = new Map<string, boolean>();
+  for (const row of baseRows) {
+    if ((row._count.id ?? 0) > 0) hasAnyByEntity.set(row.entityId, true);
+  }
+  const alertRows = await prisma.note.groupBy({
+    by: ["entityId"],
+    where: {
+      ...activeWhere,
+      priority: NotePriority.ALERT,
+    },
+    _count: { id: true },
+  });
+  const hasAlertByEntity = new Map<string, boolean>();
+  for (const row of alertRows) {
+    if ((row._count.id ?? 0) > 0) hasAlertByEntity.set(row.entityId, true);
+  }
+  for (const entityId of params.entityIds) {
+    const indicator = resolveNoteIndicator({
+      hasAny: hasAnyByEntity.get(entityId) ?? false,
+      hasAlert: hasAlertByEntity.get(entityId) ?? false,
+    });
+    if (indicator !== "NONE") {
+      map.set(entityId, indicator);
+    }
+  }
+  return map;
+}
+
+async function resolveNoteEntity(params: {
+  orgId: string;
+  user: any;
+  entityType: NoteEntityType;
+  entityId: string;
+  stopId?: string | null;
+}) {
+  switch (params.entityType) {
+    case NoteEntityType.LOAD: {
+      const load = await prisma.load.findFirst({
+        where: { id: params.entityId, orgId: params.orgId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!load) throw new Error("Load not found");
+      if (!(await userCanAccessLoad({ user: params.user, loadId: load.id }))) {
+        throw new Error("Load not found");
+      }
+      const noteStopId = params.stopId?.trim() || null;
+      if (noteStopId) {
+        const stop = await prisma.stop.findFirst({
+          where: { id: noteStopId, loadId: load.id, orgId: params.orgId },
+          select: { id: true },
+        });
+        if (!stop) throw new Error("Stop not found");
+      }
+      return { entityType: params.entityType, entityId: load.id, loadId: load.id, stopId: noteStopId } as ResolvedNoteEntity;
+    }
+    case NoteEntityType.TRIP: {
+      const trip = await prisma.trip.findFirst({
+        where: { id: params.entityId, orgId: params.orgId },
+        select: { id: true },
+      });
+      if (!trip) throw new Error("Trip not found");
+      return { entityType: params.entityType, entityId: trip.id } as ResolvedNoteEntity;
+    }
+    case NoteEntityType.STOP: {
+      const stop = await prisma.stop.findFirst({
+        where: { id: params.entityId, orgId: params.orgId },
+        select: { id: true, loadId: true },
+      });
+      if (!stop) throw new Error("Stop not found");
+      if (!(await userCanAccessLoad({ user: params.user, loadId: stop.loadId }))) {
+        throw new Error("Stop not found");
+      }
+      return {
+        entityType: params.entityType,
+        entityId: stop.id,
+        loadId: stop.loadId,
+        stopId: stop.id,
+      } as ResolvedNoteEntity;
+    }
+    default:
+      throw new Error("Unsupported note entity type");
+  }
+}
+
+async function createImmutableNote(params: {
+  orgId: string;
+  user: any;
+  entityType: NoteEntityType;
+  entityId: string;
+  body: string;
+  source: LoadNoteSource;
+  noteType: NoteType;
+  priority: NotePriority;
+  replyToNoteId?: string | null;
+  stopId?: string | null;
+  pinned?: boolean;
+  expiresAt?: Date | null;
+}) {
+  ensureRoleCanCreateNoteType({
+    role: params.user.role as Role,
+    noteType: params.noteType,
+    source: params.source,
+  });
+  const resolved = await resolveNoteEntity({
+    orgId: params.orgId,
+    user: params.user,
+    entityType: params.entityType,
+    entityId: params.entityId,
+    stopId: params.stopId ?? null,
+  });
+  const replyToNoteId = params.replyToNoteId?.trim() || null;
+  if (replyToNoteId) {
+    const replyTarget = await prisma.note.findFirst({
+      where: {
+        id: replyToNoteId,
+        orgId: params.orgId,
+        entityType: resolved.entityType,
+        entityId: resolved.entityId,
+      },
+      select: { id: true },
+    });
+    if (!replyTarget) {
+      throw new Error("Clarification target note not found");
+    }
+  }
+  if (params.expiresAt && isNoteExpired({ expiresAt: params.expiresAt })) {
+    throw new Error("expiresAt must be in the future");
+  }
+  const note = await prisma.note.create({
+    data: {
+      orgId: params.orgId,
+      entityType: resolved.entityType,
+      entityId: resolved.entityId,
+      loadId: resolved.loadId ?? null,
+      stopId: resolved.stopId ?? null,
+      replyToNoteId,
+      body: params.body.trim(),
+      noteType: params.noteType,
+      priority: params.priority,
+      visibility: LoadNoteVisibility.NORMAL,
+      source: params.source,
+      createdById: params.user.id,
+      pinned: params.pinned ?? false,
+      expiresAt: params.expiresAt ?? null,
+      editedAt: null,
+    },
+    include: {
+      createdBy: { select: { id: true, name: true, role: true } },
+    },
+  });
+  return { note, resolved };
+}
+
+type TimelineItem = {
+  id: string;
+  kind: "NOTE" | "SYSTEM_EVENT" | "DOCUMENT_EVENT" | "EXCEPTION";
+  timestamp: Date;
+  actor: { id: string | null; name: string | null; role: string | null } | null;
+  payload: Record<string, unknown>;
+  // Legacy fields kept for existing clients until timeline migration is complete.
+  type: string;
+  message: string;
+  time: Date;
+};
+
+async function buildEntityTimeline(params: {
+  orgId: string;
+  entityType: NoteEntityType;
+  entityId: string;
+  userRole: Role;
+}) {
+  const now = new Date();
+  const visibleNoteTypes = (Object.values(NoteType) as NoteType[]).filter((noteType) =>
+    canRoleViewNoteType({ role: params.userRole, noteType })
+  );
+  const notesPromise = prisma.note.findMany({
+    where: {
+      orgId: params.orgId,
+      entityType: params.entityType,
+      entityId: params.entityId,
+      deletedAt: null,
+      ...(visibleNoteTypes.length > 0 ? { noteType: { in: visibleNoteTypes } } : { id: "__no_notes__" }),
+      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    include: {
+      createdBy: { select: { id: true, name: true, role: true } },
+    },
+  });
+
+  const systemItemsPromise: Promise<TimelineItem[]> = (async () => {
+    if (params.entityType === NoteEntityType.LOAD) {
+      const [events, tasks, docs, invoices, settlementItems, exceptions] = await Promise.all([
+        prisma.event.findMany({
+          where: { loadId: params.entityId, orgId: params.orgId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          include: { user: { select: { id: true, name: true, role: true } } },
+        }),
+        prisma.task.findMany({
+          where: { loadId: params.entityId, orgId: params.orgId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          include: { createdBy: { select: { id: true, name: true, role: true } } },
+        }),
+        prisma.document.findMany({
+          where: { loadId: params.entityId, orgId: params.orgId },
+          orderBy: [{ uploadedAt: "desc" }, { id: "desc" }],
+          include: { uploadedBy: { select: { id: true, name: true, role: true } } },
+        }),
+        prisma.invoice.findMany({
+          where: { loadId: params.entityId, orgId: params.orgId },
+          orderBy: [{ generatedAt: "desc" }, { id: "desc" }],
+        }),
+        prisma.settlementItem.findMany({
+          where: { loadId: params.entityId, settlement: { orgId: params.orgId } },
+          include: { settlement: true },
+        }),
+        prisma.dispatchException.findMany({
+          where: { orgId: params.orgId, loadId: params.entityId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        }),
+      ]);
+
+      const systemItems: TimelineItem[] = [];
+      for (const event of events) {
+        systemItems.push({
+          id: `event:${event.id}`,
+          kind: "SYSTEM_EVENT",
+          timestamp: event.createdAt,
+          actor: event.user
+            ? { id: event.user.id, name: event.user.name, role: event.user.role }
+            : event.userId
+              ? { id: event.userId, name: null, role: null }
+              : null,
+          payload: {
+            eventId: event.id,
+            eventType: event.type,
+            message: event.message,
+            meta: event.meta ?? null,
+          },
+          type: `EVENT_${event.type}`,
+          message: event.message,
+          time: event.createdAt,
+        });
+      }
+      for (const doc of docs) {
+        systemItems.push({
+          id: `doc:${doc.id}`,
+          kind: "DOCUMENT_EVENT",
+          timestamp: doc.uploadedAt,
+          actor: doc.uploadedBy
+            ? { id: doc.uploadedBy.id, name: doc.uploadedBy.name, role: doc.uploadedBy.role }
+            : doc.uploadedById
+              ? { id: doc.uploadedById, name: null, role: null }
+              : null,
+          payload: {
+            documentId: doc.id,
+            docType: doc.type,
+            status: doc.status,
+            stopId: doc.stopId ?? null,
+          },
+          type: `DOC_${doc.status}`,
+          message: `${doc.type} ${doc.status.toLowerCase()}`,
+          time: doc.uploadedAt,
+        });
+        if (doc.verifiedAt) {
+          systemItems.push({
+            id: `doc-verified:${doc.id}`,
+            kind: "DOCUMENT_EVENT",
+            timestamp: doc.verifiedAt,
+            actor: doc.uploadedBy
+              ? { id: doc.uploadedBy.id, name: doc.uploadedBy.name, role: doc.uploadedBy.role }
+              : doc.uploadedById
+                ? { id: doc.uploadedById, name: null, role: null }
+                : null,
+            payload: {
+              documentId: doc.id,
+              docType: doc.type,
+              status: doc.status,
+              event: "VERIFIED",
+              stopId: doc.stopId ?? null,
+            },
+            type: "DOC_VERIFIED",
+            message: `${doc.type} verified`,
+            time: doc.verifiedAt,
+          });
+        }
+        if (doc.rejectedAt) {
+          systemItems.push({
+            id: `doc-rejected:${doc.id}`,
+            kind: "DOCUMENT_EVENT",
+            timestamp: doc.rejectedAt,
+            actor: doc.uploadedBy
+              ? { id: doc.uploadedBy.id, name: doc.uploadedBy.name, role: doc.uploadedBy.role }
+              : doc.uploadedById
+                ? { id: doc.uploadedById, name: null, role: null }
+                : null,
+            payload: {
+              documentId: doc.id,
+              docType: doc.type,
+              status: doc.status,
+              event: "REJECTED",
+              stopId: doc.stopId ?? null,
+            },
+            type: "DOC_REJECTED",
+            message: `${doc.type} rejected`,
+            time: doc.rejectedAt,
+          });
+        }
+      }
+      for (const task of tasks) {
+        systemItems.push({
+          id: `task:${task.id}`,
+          kind: "SYSTEM_EVENT",
+          timestamp: task.createdAt,
+          actor: task.createdBy
+            ? { id: task.createdBy.id, name: task.createdBy.name, role: task.createdBy.role }
+            : task.createdById
+              ? { id: task.createdById, name: null, role: null }
+              : null,
+          payload: {
+            taskId: task.id,
+            taskType: task.type,
+            status: task.status,
+            title: task.title,
+          },
+          type: `TASK_${task.status}`,
+          message: task.title,
+          time: task.createdAt,
+        });
+        if (task.completedAt) {
+          systemItems.push({
+            id: `task-done:${task.id}`,
+            kind: "SYSTEM_EVENT",
+            timestamp: task.completedAt,
+            actor: task.createdBy
+              ? { id: task.createdBy.id, name: task.createdBy.name, role: task.createdBy.role }
+              : task.createdById
+                ? { id: task.createdById, name: null, role: null }
+                : null,
+            payload: {
+              taskId: task.id,
+              taskType: task.type,
+              status: task.status,
+              title: task.title,
+              event: "COMPLETED",
+            },
+            type: "TASK_DONE",
+            message: `Completed: ${task.title}`,
+            time: task.completedAt,
+          });
+        }
+      }
+      for (const invoice of invoices) {
+        systemItems.push({
+          id: `invoice:${invoice.id}`,
+          kind: "SYSTEM_EVENT",
+          timestamp: invoice.generatedAt,
+          actor: null,
+          payload: {
+            invoiceId: invoice.id,
+            invoiceNumber: invoice.invoiceNumber,
+            status: invoice.status,
+            event: "GENERATED",
+          },
+          type: "INVOICE_GENERATED",
+          message: `Invoice ${invoice.invoiceNumber} generated`,
+          time: invoice.generatedAt,
+        });
+        if (invoice.sentAt) {
+          systemItems.push({
+            id: `invoice-sent:${invoice.id}`,
+            kind: "SYSTEM_EVENT",
+            timestamp: invoice.sentAt,
+            actor: null,
+            payload: {
+              invoiceId: invoice.id,
+              invoiceNumber: invoice.invoiceNumber,
+              status: invoice.status,
+              event: "SENT",
+            },
+            type: "INVOICE_SENT",
+            message: `Invoice ${invoice.invoiceNumber} sent`,
+            time: invoice.sentAt,
+          });
+        }
+        if (invoice.paidAt) {
+          systemItems.push({
+            id: `invoice-paid:${invoice.id}`,
+            kind: "SYSTEM_EVENT",
+            timestamp: invoice.paidAt,
+            actor: null,
+            payload: {
+              invoiceId: invoice.id,
+              invoiceNumber: invoice.invoiceNumber,
+              status: invoice.status,
+              event: "PAID",
+            },
+            type: `INVOICE_${invoice.status}`,
+            message: `Invoice ${invoice.invoiceNumber} ${invoice.status.toLowerCase()}`,
+            time: invoice.paidAt,
+          });
+        }
+        if (invoice.disputeReason) {
+          const disputeAt = invoice.sentAt ?? invoice.generatedAt;
+          systemItems.push({
+            id: `invoice-disputed:${invoice.id}`,
+            kind: "SYSTEM_EVENT",
+            timestamp: disputeAt,
+            actor: null,
+            payload: {
+              invoiceId: invoice.id,
+              invoiceNumber: invoice.invoiceNumber,
+              status: invoice.status,
+              event: "DISPUTED",
+              disputeReason: invoice.disputeReason,
+            },
+            type: "INVOICE_DISPUTED",
+            message: `Invoice ${invoice.invoiceNumber} disputed`,
+            time: disputeAt,
+          });
+        }
+      }
+      for (const item of settlementItems) {
+        const settlement = item.settlement;
+        const settlementTime = settlement.paidAt ?? settlement.finalizedAt ?? settlement.createdAt;
+        systemItems.push({
+          id: `settlement:${item.id}`,
+          kind: "SYSTEM_EVENT",
+          timestamp: settlementTime,
+          actor: null,
+          payload: {
+            settlementId: settlement.id,
+            settlementStatus: settlement.status,
+            loadId: item.loadId ?? null,
+            driverId: settlement.driverId ?? null,
+          },
+          type: `SETTLEMENT_${settlement.status}`,
+          message: `Settlement ${settlement.status.toLowerCase()}`,
+          time: settlementTime,
+        });
+      }
+      for (const exception of exceptions) {
+        systemItems.push({
+          id: `exception:${exception.id}:opened`,
+          kind: "EXCEPTION",
+          timestamp: exception.createdAt,
+          actor: exception.createdById ? { id: exception.createdById, name: null, role: null } : null,
+          payload: {
+            exceptionId: exception.id,
+            status: exception.status,
+            severity: exception.severity,
+            owner: exception.owner,
+            title: exception.title,
+            detail: exception.detail ?? null,
+            event: "OPENED",
+          },
+          type: "EXCEPTION_OPENED",
+          message: exception.title,
+          time: exception.createdAt,
+        });
+        if (exception.acknowledgedAt) {
+          systemItems.push({
+            id: `exception:${exception.id}:acknowledged`,
+            kind: "EXCEPTION",
+            timestamp: exception.acknowledgedAt,
+            actor: exception.acknowledgedById ? { id: exception.acknowledgedById, name: null, role: null } : null,
+            payload: {
+              exceptionId: exception.id,
+              status: exception.status,
+              severity: exception.severity,
+              owner: exception.owner,
+              title: exception.title,
+              detail: exception.detail ?? null,
+              event: "ACKNOWLEDGED",
+            },
+            type: "EXCEPTION_ACKNOWLEDGED",
+            message: `Acknowledged: ${exception.title}`,
+            time: exception.acknowledgedAt,
+          });
+        }
+        if (exception.resolvedAt) {
+          systemItems.push({
+            id: `exception:${exception.id}:resolved`,
+            kind: "EXCEPTION",
+            timestamp: exception.resolvedAt,
+            actor: exception.resolvedById ? { id: exception.resolvedById, name: null, role: null } : null,
+            payload: {
+              exceptionId: exception.id,
+              status: exception.status,
+              severity: exception.severity,
+              owner: exception.owner,
+              title: exception.title,
+              detail: exception.detail ?? null,
+              event: "RESOLVED",
+            },
+            type: "EXCEPTION_RESOLVED",
+            message: `Resolved: ${exception.title}`,
+            time: exception.resolvedAt,
+          });
+        }
+      }
+      return systemItems;
+    }
+    if (params.entityType === NoteEntityType.TRIP) {
+      const tripLoads = await prisma.tripLoad.findMany({
+        where: { orgId: params.orgId, tripId: params.entityId },
+        select: { loadId: true },
+      });
+      const loadIds = tripLoads.map((entry) => entry.loadId);
+      if (!loadIds.length) return [];
+      const [events, docs, exceptions] = await Promise.all([
+        prisma.event.findMany({
+          where: { orgId: params.orgId, loadId: { in: loadIds } },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          include: { user: { select: { id: true, name: true, role: true } } },
+        }),
+        prisma.document.findMany({
+          where: { orgId: params.orgId, loadId: { in: loadIds } },
+          orderBy: [{ uploadedAt: "desc" }, { id: "desc" }],
+          include: { uploadedBy: { select: { id: true, name: true, role: true } } },
+        }),
+        prisma.dispatchException.findMany({
+          where: { orgId: params.orgId, OR: [{ tripId: params.entityId }, { loadId: { in: loadIds } }] },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        }),
+      ]);
+      const tripItems: TimelineItem[] = events.map((event) => ({
+        id: `event:${event.id}`,
+        kind: "SYSTEM_EVENT",
+        timestamp: event.createdAt,
+        actor: event.user
+          ? { id: event.user.id, name: event.user.name, role: event.user.role }
+          : event.userId
+            ? { id: event.userId, name: null, role: null }
+            : null,
+        payload: { eventId: event.id, eventType: event.type, message: event.message, meta: event.meta ?? null },
+        type: `EVENT_${event.type}`,
+        message: event.message,
+        time: event.createdAt,
+      }));
+      for (const doc of docs) {
+        tripItems.push({
+          id: `doc:${doc.id}`,
+          kind: "DOCUMENT_EVENT",
+          timestamp: doc.uploadedAt,
+          actor: doc.uploadedBy
+            ? { id: doc.uploadedBy.id, name: doc.uploadedBy.name, role: doc.uploadedBy.role }
+            : doc.uploadedById
+              ? { id: doc.uploadedById, name: null, role: null }
+              : null,
+          payload: {
+            documentId: doc.id,
+            loadId: doc.loadId,
+            stopId: doc.stopId ?? null,
+            docType: doc.type,
+            status: doc.status,
+          },
+          type: `DOC_${doc.status}`,
+          message: `${doc.type} ${doc.status.toLowerCase()}`,
+          time: doc.uploadedAt,
+        });
+      }
+      for (const exception of exceptions) {
+        tripItems.push({
+          id: `exception:${exception.id}:opened`,
+          kind: "EXCEPTION",
+          timestamp: exception.createdAt,
+          actor: exception.createdById ? { id: exception.createdById, name: null, role: null } : null,
+          payload: {
+            exceptionId: exception.id,
+            loadId: exception.loadId,
+            tripId: exception.tripId ?? null,
+            status: exception.status,
+            severity: exception.severity,
+            owner: exception.owner,
+            title: exception.title,
+            detail: exception.detail ?? null,
+            event: "OPENED",
+          },
+          type: "EXCEPTION_OPENED",
+          message: exception.title,
+          time: exception.createdAt,
+        });
+      }
+      return tripItems;
+    }
+    if (params.entityType === NoteEntityType.STOP) {
+      const [stopEvents, docs] = await Promise.all([
+        prisma.event.findMany({
+          where: { stopId: params.entityId, orgId: params.orgId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          include: { user: { select: { id: true, name: true, role: true } } },
+        }),
+        prisma.document.findMany({
+          where: { orgId: params.orgId, stopId: params.entityId },
+          orderBy: [{ uploadedAt: "desc" }, { id: "desc" }],
+          include: { uploadedBy: { select: { id: true, name: true, role: true } } },
+        }),
+      ]);
+      const stopItems: TimelineItem[] = stopEvents.map((event) => ({
+        id: `event:${event.id}`,
+        kind: "SYSTEM_EVENT",
+        timestamp: event.createdAt,
+        actor: event.user
+          ? { id: event.user.id, name: event.user.name, role: event.user.role }
+          : event.userId
+            ? { id: event.userId, name: null, role: null }
+            : null,
+        payload: {
+          eventId: event.id,
+          eventType: event.type,
+          message: event.message,
+          meta: event.meta ?? null,
+        },
+        type: `EVENT_${event.type}`,
+        message: event.message,
+        time: event.createdAt,
+      }));
+      for (const doc of docs) {
+        stopItems.push({
+          id: `doc:${doc.id}`,
+          kind: "DOCUMENT_EVENT",
+          timestamp: doc.uploadedAt,
+          actor: doc.uploadedBy
+            ? { id: doc.uploadedBy.id, name: doc.uploadedBy.name, role: doc.uploadedBy.role }
+            : doc.uploadedById
+              ? { id: doc.uploadedById, name: null, role: null }
+              : null,
+          payload: {
+            documentId: doc.id,
+            loadId: doc.loadId,
+            stopId: doc.stopId ?? null,
+            docType: doc.type,
+            status: doc.status,
+          },
+          type: `DOC_${doc.status}`,
+          message: `${doc.type} ${doc.status.toLowerCase()}`,
+          time: doc.uploadedAt,
+        });
+      }
+      return stopItems;
+    }
+    return [];
+  })();
+
+  const [notes, systemItems] = await Promise.all([notesPromise, systemItemsPromise]);
+  const noteItems: TimelineItem[] = notes.map((note) => ({
+    id: `note:${note.id}`,
+    kind: "NOTE",
+    timestamp: note.createdAt,
+    actor: note.createdBy
+      ? { id: note.createdBy.id, name: note.createdBy.name, role: note.createdBy.role }
+      : note.createdById
+        ? { id: note.createdById, name: null, role: null }
+        : null,
+    payload: {
+      noteId: note.id,
+      entityType: note.entityType,
+      entityId: note.entityId,
+      loadId: note.loadId ?? null,
+      stopId: note.stopId ?? null,
+      body: note.body,
+      text: note.body,
+      noteType: note.noteType,
+      priority: note.priority,
+      source: note.source,
+      pinned: note.pinned,
+      expiresAt: note.expiresAt ?? null,
+      editedAt: note.editedAt ?? null,
+      replyToNoteId: note.replyToNoteId ?? null,
+    },
+    type: "NOTE",
+    message: note.body,
+    time: note.createdAt,
+  }));
+
+  return buildUnifiedTimeline({
+    notes: noteItems,
+    systemEvents: systemItems.filter((item) => item.kind === "SYSTEM_EVENT"),
+    exceptions: systemItems.filter((item) => item.kind === "EXCEPTION"),
+    documentEvents: systemItems.filter((item) => item.kind === "DOCUMENT_EVENT"),
+  });
 }
 
 async function userCanAccessLoad(params: { user: any; loadId: string }) {
@@ -944,20 +1708,6 @@ async function syncTripCargoPlan(tripId: string, orgId: string) {
   });
 }
 
-function normalizeTripStatusForLoad(current: LoadStatus, tripStatus: TripStatus) {
-  if (tripStatus === TripStatus.ASSIGNED) {
-    if (current === LoadStatus.DRAFT || current === LoadStatus.PLANNED) return LoadStatus.ASSIGNED;
-    return current;
-  }
-  if (tripStatus === TripStatus.IN_TRANSIT) {
-    if (current === LoadStatus.DRAFT || current === LoadStatus.PLANNED || current === LoadStatus.ASSIGNED) {
-      return LoadStatus.IN_TRANSIT;
-    }
-    return current;
-  }
-  return current;
-}
-
 async function applyTripAssignmentToLoads(params: {
   orgId: string;
   loadIds: string[];
@@ -965,28 +1715,103 @@ async function applyTripAssignmentToLoads(params: {
   truckId?: string | null;
   trailerId?: string | null;
   tripStatus?: TripStatus | null;
+  tx?: Prisma.TransactionClient;
 }) {
   if (!params.loadIds.length) return;
-  const loads = await prisma.load.findMany({
+  const db = params.tx ?? prisma;
+  const loads = await db.load.findMany({
     where: { orgId: params.orgId, id: { in: params.loadIds } },
-    select: { id: true, status: true },
+    select: {
+      id: true,
+      status: true,
+      assignedDriverId: true,
+      truckId: true,
+      trailerId: true,
+      assignedDriverAt: true,
+      assignedTruckAt: true,
+      assignedTrailerAt: true,
+    },
+    orderBy: { id: "asc" },
   });
   const now = new Date();
   for (const load of loads) {
-    const nextStatus = params.tripStatus ? normalizeTripStatusForLoad(load.status, params.tripStatus) : load.status;
-    await prisma.load.update({
+    const next = buildLoadExecutionMirrorState({
+      load: {
+        status: load.status,
+        assignedDriverId: load.assignedDriverId,
+        truckId: load.truckId,
+        trailerId: load.trailerId,
+        assignedDriverAt: load.assignedDriverAt,
+        assignedTruckAt: load.assignedTruckAt,
+        assignedTrailerAt: load.assignedTrailerAt,
+      },
+      driverId: params.driverId,
+      truckId: params.truckId,
+      trailerId: params.trailerId,
+      tripStatus: params.tripStatus,
+      now,
+    });
+    if (
+      isLoadExecutionMirrorEqual(
+        {
+          status: load.status,
+          assignedDriverId: load.assignedDriverId,
+          truckId: load.truckId,
+          trailerId: load.trailerId,
+          assignedDriverAt: load.assignedDriverAt,
+          assignedTruckAt: load.assignedTruckAt,
+          assignedTrailerAt: load.assignedTrailerAt,
+        },
+        next
+      )
+    ) {
+      continue;
+    }
+    await db.load.update({
       where: { id: load.id },
       data: {
-        assignedDriverId: params.driverId ?? null,
-        truckId: params.truckId ?? null,
-        trailerId: params.trailerId ?? null,
-        assignedDriverAt: params.driverId ? now : null,
-        assignedTruckAt: params.truckId ? now : null,
-        assignedTrailerAt: params.trailerId ? now : null,
-        status: nextStatus,
+        assignedDriverId: next.assignedDriverId,
+        truckId: next.truckId,
+        trailerId: next.trailerId,
+        assignedDriverAt: next.assignedDriverAt,
+        assignedTruckAt: next.assignedTruckAt,
+        assignedTrailerAt: next.assignedTrailerAt,
+        status: next.status,
       },
     });
   }
+}
+
+async function syncTripExecutionToLoadMirrors(params: {
+  orgId: string;
+  tripId: string;
+  tx?: Prisma.TransactionClient;
+}) {
+  const db = params.tx ?? prisma;
+  const trip = await db.trip.findFirst({
+    where: { id: params.tripId, orgId: params.orgId },
+    select: {
+      id: true,
+      status: true,
+      driverId: true,
+      truckId: true,
+      trailerId: true,
+      loads: { select: { loadId: true }, orderBy: { sequence: "asc" } },
+    },
+  });
+  if (!trip) {
+    throw new Error("Trip not found");
+  }
+  await applyTripAssignmentToLoads({
+    orgId: params.orgId,
+    loadIds: trip.loads.map((item) => item.loadId),
+    driverId: trip.driverId,
+    truckId: trip.truckId,
+    trailerId: trip.trailerId,
+    tripStatus: trip.status,
+    tx: db,
+  });
+  return trip;
 }
 
 function normalizeStopLocation(stop?: { city?: string | null; state?: string | null; zip?: string | null }) {
@@ -1120,6 +1945,46 @@ const READY_STAGE_LOAD_STATUSES: LoadStatus[] = [LoadStatus.DELIVERED, LoadStatu
 const REMINDER_INVOICE_STATUSES: InvoiceStatus[] = [InvoiceStatus.SENT, InvoiceStatus.ACCEPTED, InvoiceStatus.DISPUTED];
 const TRIP_EDITABLE_STATUSES: TripStatus[] = [TripStatus.PLANNED, TripStatus.ASSIGNED];
 const TRIP_DISPATCHED_STATUSES: TripStatus[] = [TripStatus.ASSIGNED, TripStatus.IN_TRANSIT];
+
+async function logLegacyExecutionMutationRejected(params: {
+  orgId: string;
+  userId: string;
+  role: Role;
+  route: string;
+  method: string;
+  loadId?: string | null;
+  blockedFields: string[];
+  reason: string;
+}) {
+  console.warn("legacy.execution_mutation_rejected", {
+    orgId: params.orgId,
+    userId: params.userId,
+    role: params.role,
+    route: params.route,
+    method: params.method,
+    loadId: params.loadId ?? null,
+    blockedFields: params.blockedFields,
+    reason: params.reason,
+  });
+  try {
+    await logAudit({
+      orgId: params.orgId,
+      userId: params.userId,
+      action: "LEGACY_EXECUTION_MUTATION_REJECTED",
+      entity: "Load",
+      entityId: params.loadId ?? null,
+      summary: `Blocked legacy execution mutation on ${params.route}`,
+      meta: {
+        route: params.route,
+        method: params.method,
+        blockedFields: params.blockedFields,
+        reason: params.reason,
+      },
+    });
+  } catch (error) {
+    console.error("legacy.execution_mutation_rejected.audit_failed", error);
+  }
+}
 
 const DRIVER_ACTIVE_TRIP_STATUSES: TripStatus[] = [
   TripStatus.PLANNED,
@@ -1448,7 +2313,7 @@ async function upsertOnboardingState(params: {
         },
       }),
       prisma.operatingEntity.count({ where: { orgId: params.orgId } }),
-      prisma.user.count({ where: { orgId: params.orgId, role: { in: [Role.ADMIN, Role.DISPATCHER, Role.BILLING] } } }),
+      prisma.user.count({ where: { orgId: params.orgId, role: { not: Role.DRIVER } } }),
       prisma.driver.count({ where: { orgId: params.orgId } }),
       prisma.truck.count({ where: { orgId: params.orgId } }),
       prisma.trailer.count({ where: { orgId: params.orgId } }),
@@ -2005,6 +2870,185 @@ const parseNumberParam = (value: string) => {
   return Number.isNaN(num) ? undefined : num;
 };
 
+const DISPATCH_VIEW_FILTER_DEFAULTS = {
+  search: "",
+  status: "",
+  driverId: "",
+  truckId: "",
+  trailerId: "",
+  assigned: "all",
+  fromDate: "",
+  toDate: "",
+  destSearch: "",
+  minRate: "",
+  maxRate: "",
+  operatingEntityId: "",
+  teamId: "",
+} as const;
+
+const DISPATCH_VIEW_GRID_DEFAULTS: {
+  filters: Prisma.InputJsonObject;
+  sortRules: Array<{ column: string; direction: "asc" | "desc" }>;
+} = {
+  filters: {},
+  sortRules: [
+    {
+      column: "pickupAppt",
+      direction: "asc",
+    },
+  ],
+};
+
+const DISPATCH_VIEW_ALLOWED_COLUMNS = [
+  "select",
+  "loadNumber",
+  "status",
+  "customer",
+  "pickupCity",
+  "pickupAppt",
+  "deliveryCity",
+  "deliveryAppt",
+  "assignment",
+  "driver",
+  "tractor",
+  "trailer",
+  "miles",
+  "paidMiles",
+  "rate",
+  "docs",
+  "exceptions",
+  "risk",
+  "nextAction",
+  "tripNumber",
+  "updatedAt",
+] as const;
+
+const dispatchViewFiltersSchema = z.object({
+  search: z.string().default(""),
+  status: z.string().default(""),
+  driverId: z.string().default(""),
+  truckId: z.string().default(""),
+  trailerId: z.string().default(""),
+  assigned: z.enum(["all", "assigned", "unassigned"]).default("all"),
+  fromDate: z.string().default(""),
+  toDate: z.string().default(""),
+  destSearch: z.string().default(""),
+  minRate: z.string().default(""),
+  maxRate: z.string().default(""),
+  operatingEntityId: z.string().default(""),
+  teamId: z.string().default(""),
+});
+
+const dispatchViewGridSchema = z.object({
+  filters: z.record(z.unknown()).default({}),
+  sortRules: z
+    .array(
+      z.object({
+        column: z.string().min(1),
+        direction: z.enum(["asc", "desc"]),
+      })
+    )
+    .max(8)
+    .default(() => [...DISPATCH_VIEW_GRID_DEFAULTS.sortRules]),
+});
+
+const dispatchViewConfigSchema = z.object({
+  filters: dispatchViewFiltersSchema.default(DISPATCH_VIEW_FILTER_DEFAULTS),
+  density: z.enum(["compact", "comfortable"]).default("compact"),
+  columns: z.record(z.boolean()).default({}),
+  grid: dispatchViewGridSchema.default(DISPATCH_VIEW_GRID_DEFAULTS),
+  panels: z
+    .object({
+      inspector: z.boolean().default(true),
+      driverLanes: z.boolean().default(false),
+      exceptions: z.boolean().default(true),
+      exceptionsDock: z.enum(["left", "right"]).default("left"),
+      tripInspector: z.boolean().default(false),
+    })
+    .default({
+      inspector: true,
+      driverLanes: false,
+      exceptions: true,
+      exceptionsDock: "left",
+      tripInspector: false,
+    }),
+});
+
+function normalizeDispatchViewConfig(config: unknown) {
+  const parsed = dispatchViewConfigSchema.safeParse(config);
+  const base = parsed.success
+    ? parsed.data
+    : {
+        filters: DISPATCH_VIEW_FILTER_DEFAULTS,
+        density: "compact" as const,
+        columns: {} as Record<string, boolean>,
+        grid: DISPATCH_VIEW_GRID_DEFAULTS,
+        panels: {
+          inspector: true,
+          driverLanes: false,
+          exceptions: true,
+          exceptionsDock: "left" as const,
+          tripInspector: false,
+        },
+      };
+  const toJsonObject = (value: unknown): Prisma.InputJsonObject => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonObject;
+  };
+  const allowedColumns = new Set<string>(DISPATCH_VIEW_ALLOWED_COLUMNS);
+  const columns: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(base.columns ?? {})) {
+    if (!allowedColumns.has(key)) continue;
+    columns[key] = Boolean(value);
+  }
+  return {
+    filters: {
+      ...DISPATCH_VIEW_FILTER_DEFAULTS,
+      ...(base.filters ?? {}),
+    },
+    density: base.density === "comfortable" ? "comfortable" : "compact",
+    columns,
+    grid: {
+      filters: toJsonObject(base.grid?.filters),
+      sortRules: Array.isArray(base.grid?.sortRules)
+        ? base.grid.sortRules.filter(
+            (rule): rule is { column: string; direction: "asc" | "desc" } =>
+              Boolean(rule && typeof rule.column === "string" && (rule.direction === "asc" || rule.direction === "desc"))
+          )
+        : [],
+    },
+    panels: {
+      inspector: Boolean(base.panels?.inspector ?? true),
+      driverLanes: Boolean(base.panels?.driverLanes ?? false),
+      exceptions: Boolean(base.panels?.exceptions ?? true),
+      exceptionsDock: base.panels?.exceptionsDock === "right" ? "right" : "left",
+      tripInspector: Boolean(base.panels?.tripInspector ?? false),
+    },
+  };
+}
+
+function mapDispatchViewRow(view: {
+  id: string;
+  name: string;
+  scope: DispatchViewScope;
+  userId: string | null;
+  role: Role | null;
+  isRoleDefault: boolean;
+  configJson: Prisma.JsonValue;
+  updatedAt: Date;
+}) {
+  return {
+    id: view.id,
+    name: view.name,
+    scope: view.scope,
+    userId: view.userId,
+    role: view.role,
+    isRoleDefault: view.isRoleDefault,
+    config: normalizeDispatchViewConfig(view.configJson),
+    updatedAt: view.updatedAt,
+  };
+}
+
 function isValidTimeZone(timeZone: string) {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date());
@@ -2053,8 +3097,14 @@ const formatRoleLabel = (role: Role) => {
       return "Head Dispatcher";
     case Role.DISPATCHER:
       return "Dispatcher";
+    case Role.OPS_MANAGER:
+      return "Ops Manager";
     case Role.BILLING:
       return "Billing";
+    case Role.SAFETY:
+      return "Safety";
+    case Role.SUPPORT:
+      return "Support";
     case Role.DRIVER:
       return "Driver";
     default:
@@ -2599,7 +3649,7 @@ app.post("/auth/mfa/disable", requireAuth, requireCsrf, mfaLimiter, async (req, 
   res.json({ ok: true });
 });
 
-app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
+app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
   try {
     const [org, userRecord] = await Promise.all([
       prisma.organization.findFirst({
@@ -2636,13 +3686,13 @@ app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPAT
   }
 });
 
-app.get("/auth/csrf", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), (req, res) => {
+app.get("/auth/csrf", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), (req, res) => {
   const csrfToken = createCsrfToken();
   setCsrfCookie(res, csrfToken);
   res.json({ csrfToken });
 });
 
-app.post("/auth/logout", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), requireCsrf, async (req, res) => {
+app.post("/auth/logout", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), requireCsrf, async (req, res) => {
   const token = req.cookies?.session;
   if (token) {
     await destroySession(token);
@@ -2774,7 +3824,7 @@ function mapTaskInboxItem(task: TaskInboxRecord, now: Date) {
   };
 }
 
-app.get("/tasks/inbox", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
+app.get("/tasks/inbox", requireAuth, requireRole("ADMIN", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"), async (req, res) => {
   const tabParam = typeof req.query.tab === "string" ? req.query.tab : "mine";
   const tab = tabParam === "role" ? "role" : "mine";
   const page = clamp(parseIntParam(req.query.page, 1), 1, 500);
@@ -2869,7 +3919,7 @@ app.get("/tasks/assignees", requireAuth, requirePermission(Permission.TASK_ASSIG
 app.post("/tasks/:id/assign", requireAuth, requireCsrf, requirePermission(Permission.TASK_ASSIGN), async (req, res) => {
   const schema = z.object({
     assignedToId: z.string().nullable().optional(),
-    assignedRole: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]).nullable().optional(),
+    assignedRole: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]).nullable().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -2911,7 +3961,7 @@ app.post("/tasks/:id/assign", requireAuth, requireCsrf, requirePermission(Permis
   res.json({ task: updated });
 });
 
-app.post("/tasks/:id/complete", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), requireCsrf, async (req, res) => {
+app.post("/tasks/:id/complete", requireAuth, requireRole("ADMIN", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"), requireCsrf, async (req, res) => {
   const existing = await prisma.task.findFirst({
     where: { id: req.params.id, orgId: req.user!.orgId },
   });
@@ -2937,6 +3987,189 @@ app.post("/tasks/:id/complete", requireAuth, requireRole("ADMIN", "DISPATCHER", 
   res.json({ task });
 });
 
+async function buildRoleIssueSummary(params: {
+  orgId: string;
+  role: Role;
+  now: Date;
+  loadScopeFilter: Prisma.LoadWhereInput;
+}): Promise<TodayIssueSummary | undefined> {
+  const { orgId, role, now, loadScopeFilter } = params;
+  const roleSupportsIssues =
+    role === "ADMIN" ||
+    role === "DISPATCHER" ||
+    role === "HEAD_DISPATCHER" ||
+    role === "OPS_MANAGER" ||
+    role === "BILLING" ||
+    role === "SAFETY" ||
+    role === "SUPPORT";
+  if (!roleSupportsIssues) return undefined;
+
+  const [activeLoads, financePolicy] = await Promise.all([
+    prisma.load.findMany({
+      where: {
+        orgId,
+        deletedAt: null,
+        ...loadScopeFilter,
+        status: { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] },
+      },
+      select: {
+        id: true,
+        status: true,
+        deliveredAt: true,
+        customerId: true,
+        customerName: true,
+        assignedDriverId: true,
+        truckId: true,
+        trailerId: true,
+        driver: { select: { id: true, licenseExpiresAt: true, medCardExpiresAt: true } },
+        customer: { select: { billingEmail: true, remitToAddress: true, termsDays: true } },
+        stops: {
+          orderBy: { sequence: "asc" },
+          select: {
+            type: true,
+            appointmentStart: true,
+            appointmentEnd: true,
+            arrivedAt: true,
+            departedAt: true,
+            sequence: true,
+          },
+        },
+        docs: {
+          where: { type: { in: [DocType.POD, DocType.BOL, DocType.RATECON, DocType.RATE_CONFIRMATION] } },
+          select: { type: true, status: true },
+        },
+        accessorials: {
+          select: { status: true, requiresProof: true, proofDocumentId: true },
+        },
+        invoices: {
+          select: { status: true },
+        },
+        dispatchExceptions: {
+          where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+          select: { type: true, title: true, owner: true, severity: true, status: true },
+        },
+        tripLoads: {
+          take: 1,
+          select: {
+            trip: {
+              select: {
+                driverId: true,
+                truckId: true,
+                trailerId: true,
+                driver: { select: { id: true, licenseExpiresAt: true, medCardExpiresAt: true } },
+              },
+            },
+          },
+        },
+      },
+    }),
+    prisma.orgSettings.findFirst({
+      where: { orgId },
+      select: { requireRateCon: true, requireBOL: true, requireSignedPOD: true },
+    }),
+  ]);
+
+  const driverIds = Array.from(
+    new Set(
+      activeLoads
+        .map((load) => load.tripLoads[0]?.trip?.driverId ?? load.assignedDriverId ?? null)
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+  const truckIds = Array.from(
+    new Set(
+      activeLoads
+        .map((load) => load.tripLoads[0]?.trip?.truckId ?? load.truckId ?? null)
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+  const [driverVaultDocs, truckVaultDocs] = await Promise.all([
+    driverIds.length
+      ? prisma.vaultDocument.findMany({
+          where: { orgId, scopeType: VaultScopeType.DRIVER, scopeId: { in: driverIds }, expiresAt: { not: null } },
+          select: { scopeId: true, expiresAt: true },
+        })
+      : Promise.resolve([]),
+    truckIds.length
+      ? prisma.vaultDocument.findMany({
+          where: { orgId, scopeType: VaultScopeType.TRUCK, scopeId: { in: truckIds }, expiresAt: { not: null } },
+          select: { scopeId: true, expiresAt: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const driverVaultById = new Map<string, Date[]>();
+  for (const row of driverVaultDocs) {
+    if (!row.scopeId || !row.expiresAt) continue;
+    const bucket = driverVaultById.get(row.scopeId) ?? [];
+    bucket.push(row.expiresAt);
+    driverVaultById.set(row.scopeId, bucket);
+  }
+  const truckVaultById = new Map<string, Date[]>();
+  for (const row of truckVaultDocs) {
+    if (!row.scopeId || !row.expiresAt) continue;
+    const bucket = truckVaultById.get(row.scopeId) ?? [];
+    bucket.push(row.expiresAt);
+    truckVaultById.set(row.scopeId, bucket);
+  }
+
+  const issueCounts = ISSUE_TYPES.reduce(
+    (acc, key) => {
+      acc[key] = 0;
+      return acc;
+    },
+    {} as Record<IssueType, number>
+  );
+  for (const load of activeLoads) {
+    const trip = load.tripLoads[0]?.trip ?? null;
+    const assignedDriver = trip?.driver ?? load.driver;
+    const assignedDriverId = assignedDriver?.id ?? trip?.driverId ?? load.assignedDriverId ?? null;
+    const assignedTruckId = trip?.truckId ?? load.truckId ?? null;
+    const assignedTrailerId = trip?.trailerId ?? load.trailerId ?? null;
+    const readiness = evaluateLoadReadinessProjection({
+      dispatch: {
+        assignedDriverId,
+        truckId: assignedTruckId,
+        trailerId: assignedTrailerId,
+        stops: load.stops,
+        exceptions: load.dispatchExceptions,
+        now,
+      },
+      billing: {
+        loadStatus: load.status,
+        deliveredAt: load.deliveredAt,
+        customerId: load.customerId,
+        customerName: load.customerName,
+        customer: load.customer,
+        stops: load.stops,
+        docs: load.docs,
+        accessorials: load.accessorials,
+        invoices: load.invoices,
+        requireRateCon: financePolicy?.requireRateCon ?? FinanceRateConRequirement.BROKERED_ONLY,
+        requireBOL: financePolicy?.requireBOL ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+        requireSignedPOD: financePolicy?.requireSignedPOD ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+      },
+      compliance: {
+        now,
+        driverDocExpirations: [
+          assignedDriver?.licenseExpiresAt ?? null,
+          assignedDriver?.medCardExpiresAt ?? null,
+          ...(assignedDriverId ? (driverVaultById.get(assignedDriverId) ?? []) : []),
+        ],
+        equipmentDocExpirations: [...(assignedTruckId ? (truckVaultById.get(assignedTruckId) ?? []) : [])],
+        expiringSoonDays: READINESS_POLICY_DEFAULTS.complianceExpiringSoonDays,
+      },
+    });
+    const mappedIssues = mapReadinessProjectionToIssues(readiness);
+    for (const issueType of ISSUE_TYPES) {
+      issueCounts[issueType] += mappedIssues.issueCounts[issueType];
+    }
+  }
+  return buildTodayIssueSummary({
+    role,
+    counts: issueCounts,
+  });
+}
+
 app.get("/today", requireAuth, async (req, res) => {
   type TodayItem = {
     severity: "block" | "warning" | "info";
@@ -2958,6 +4191,9 @@ app.get("/today", requireAuth, async (req, res) => {
     dispatch_unassigned_loads: 0,
     dispatch_stuck_in_transit: 0,
   };
+  let issueSummary:
+    | TodayIssueSummary
+    | undefined;
   let teamBreakdown:
     | Array<{ teamId: string; teamName: string; warnings: Record<string, number> }>
     | undefined;
@@ -2989,7 +4225,7 @@ app.get("/today", requireAuth, async (req, res) => {
   const addWarning = (item: Omit<TodayItem, "severity">) => warnings.push({ severity: "warning", ...item });
   const addInfo = (item: Omit<TodayItem, "severity">) => info.push({ severity: "info", ...item });
 
-  if (role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER") {
+  if (role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER" || role === "OPS_MANAGER") {
     const [settings, unassignedCount, unassignedSample, rateConCount, rateConSample, activeAssignments, transitLoads] =
       await Promise.all([
         prisma.orgSettings.findFirst({ where: { orgId }, select: { requireRateConBeforeDispatch: true } }),
@@ -3343,6 +4579,13 @@ app.get("/today", requireAuth, async (req, res) => {
     }
   }
 
+  issueSummary = await buildRoleIssueSummary({
+    orgId,
+    role,
+    now,
+    loadScopeFilter,
+  });
+
   res.json({
     blocks,
     warnings,
@@ -3351,6 +4594,132 @@ app.get("/today", requireAuth, async (req, res) => {
     scope: scopeInfo.scope,
     warningSummary,
     teamBreakdown,
+    issueSummary,
+  });
+});
+
+app.get("/activity/summary", requireAuth, async (req, res) => {
+  const orgId = req.user!.orgId;
+  const role = req.user!.role as Role;
+  const now = new Date();
+
+  const rangeParam = typeof req.query.range === "string" ? req.query.range.toLowerCase() : "all";
+  const domainParam = typeof req.query.domain === "string" ? req.query.domain.toLowerCase() : undefined;
+  const range: ActivityRange = rangeParam === "today" || rangeParam === "week" || rangeParam === "all" ? rangeParam : "all";
+  const defaultDomain = roleDefaultActivityDomain(role);
+  const domain: ActivityDomainFilter =
+    domainParam === "dispatch" || domainParam === "billing" || domainParam === "safety" || domainParam === "all"
+      ? domainParam
+      : defaultDomain;
+
+  const teamsEnabled = Boolean(
+    await prisma.team.findFirst({ where: { orgId, name: { not: DEFAULT_TEAM_NAME } }, select: { id: true } })
+  );
+  const teamScope = teamsEnabled ? await getUserTeamScope(req.user) : null;
+  const canSeeAllTeams = Boolean(teamScope?.canSeeAllTeams);
+  const scopeInfo = getTodayScope({ teamsEnabled, role, canSeeAllTeams });
+  const { teamScoped } = scopeInfo;
+  const scopedLoadIds = teamScoped ? await getScopedEntityIds(orgId, TeamEntityType.LOAD, teamScope!) : null;
+  const loadScopeFilter: Prisma.LoadWhereInput = teamScoped ? { id: { in: scopedLoadIds ?? [] } } : {};
+  const visibleNoteTypes = (Object.values(NoteType) as NoteType[]).filter((noteType) =>
+    canRoleViewNoteType({ role, noteType })
+  );
+
+  const [issueSummary, openExceptionsCount, noteGroups, resolvedExceptions, recentEvents] = await Promise.all([
+    buildRoleIssueSummary({ orgId, role, now, loadScopeFilter }),
+    prisma.dispatchException.count({
+      where: {
+        orgId,
+        status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] },
+        ...(teamScoped ? { loadId: { in: scopedLoadIds ?? [] } } : {}),
+      },
+    }),
+    prisma.note.groupBy({
+      by: ["priority", "noteType"],
+      where: {
+        orgId,
+        deletedAt: null,
+        ...(visibleNoteTypes.length > 0 ? { noteType: { in: visibleNoteTypes } } : { id: "__no_notes__" }),
+        AND: [
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+          ...(teamScoped
+            ? [{ OR: [{ loadId: { in: scopedLoadIds ?? [] } }, { entityType: NoteEntityType.LOAD, entityId: { in: scopedLoadIds ?? [] } }] }]
+            : []),
+        ],
+      },
+      _count: { _all: true },
+      _max: { createdAt: true },
+    }),
+    prisma.dispatchException.findMany({
+      where: {
+        orgId,
+        status: DispatchExceptionStatus.RESOLVED,
+        ...(teamScoped ? { loadId: { in: scopedLoadIds ?? [] } } : {}),
+      },
+      orderBy: { resolvedAt: "desc" },
+      take: 10,
+      select: {
+        id: true,
+        title: true,
+        resolvedAt: true,
+      },
+    }),
+    prisma.event.findMany({
+      where: {
+        orgId,
+        ...(teamScoped ? { loadId: { in: scopedLoadIds ?? [] } } : {}),
+        type: { in: [EventType.LOAD_STATUS_UPDATED, EventType.LOAD_ASSIGNED, EventType.DOC_UPLOADED] },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      select: {
+        id: true,
+        type: true,
+        message: true,
+        createdAt: true,
+      },
+    }),
+  ]);
+
+  const history = [
+    ...resolvedExceptions
+      .filter((entry) => Boolean(entry.resolvedAt))
+      .map((entry) => ({
+        id: `exception:${entry.id}`,
+        title: `Resolved exception · ${entry.title}`,
+        domain: "DISPATCH" as const,
+        timestamp: entry.resolvedAt as Date,
+        href: "/dispatch",
+      })),
+    ...recentEvents.map((event) => ({
+      id: `event:${event.id}`,
+      title: event.message || String(event.type).replace(/_/g, " ").toLowerCase(),
+      domain: event.type === EventType.DOC_UPLOADED ? ("BILLING" as const) : ("DISPATCH" as const),
+      timestamp: event.createdAt,
+      href: event.type === EventType.DOC_UPLOADED ? "/finance" : "/dispatch",
+    })),
+  ].sort((left, right) => right.timestamp.getTime() - left.timestamp.getTime());
+
+  const summary = buildActivitySummary({
+    generatedAt: now,
+    role,
+    issueSummary,
+    openExceptionsCount,
+    noteGroups: noteGroups.map((group) => ({
+      priority: group.priority,
+      noteType: group.noteType,
+      count: group._count._all,
+      timestamp: group._max.createdAt ?? now,
+    })),
+    history,
+    range,
+    domain,
+  });
+
+  res.json({
+    ...summary,
+    scope: scopeInfo.scope,
+    defaultDomain,
   });
 });
 
@@ -3770,7 +5139,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
       const limit = Math.min(100, Math.max(10, pageSizeRaw));
       const skip = (page - 1) * limit;
 
-      const [total, rows] = await Promise.all([
+      const [total, rows, financePolicy] = await Promise.all([
         prisma.load.count({ where }),
         prisma.load.findMany({
           where,
@@ -3778,13 +5147,20 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
             id: true,
             loadNumber: true,
             status: true,
+            movementMode: true,
+            customerId: true,
             customerName: true,
+            deliveredAt: true,
             rate: true,
             miles: true,
+            paidMiles: true,
             assignedDriverId: true,
-            driver: { select: { id: true, name: true } },
+            truckId: true,
+            trailerId: true,
+            driver: { select: { id: true, name: true, licenseExpiresAt: true, medCardExpiresAt: true } },
             truck: { select: { id: true, unit: true } },
             trailer: { select: { id: true, unit: true } },
+            customer: { select: { id: true, billingEmail: true, remitToAddress: true, termsDays: true } },
             operatingEntity: { select: { id: true, name: true } },
             stops: {
               orderBy: { sequence: "asc" },
@@ -3813,12 +5189,26 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
                     driverId: true,
                     truckId: true,
                     trailerId: true,
-                    driver: { select: { id: true, name: true } },
+                    driver: { select: { id: true, name: true, licenseExpiresAt: true, medCardExpiresAt: true } },
                     truck: { select: { id: true, unit: true } },
                     trailer: { select: { id: true, unit: true } },
                   },
                 },
               },
+            },
+            docs: {
+              where: { type: { in: [DocType.POD, DocType.BOL, DocType.RATECON, DocType.RATE_CONFIRMATION] } },
+              select: { type: true, status: true },
+            },
+            accessorials: {
+              select: {
+                status: true,
+                requiresProof: true,
+                proofDocumentId: true,
+              },
+            },
+            invoices: {
+              select: { status: true },
             },
             trackingSessions: {
               where: { status: "ON" },
@@ -3831,17 +5221,99 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
               take: 1,
               select: { capturedAt: true },
             },
+            dispatchExceptions: {
+              where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+              orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+              take: 5,
+              select: {
+                id: true,
+                type: true,
+                severity: true,
+                owner: true,
+                status: true,
+                title: true,
+              },
+            },
             createdAt: true,
           },
           orderBy: queueFilters.orderBy,
           skip,
           take: limit,
         }),
+        prisma.orgSettings.findFirst({
+          where: { orgId: req.user!.orgId },
+          select: {
+            requireRateCon: true,
+            requireBOL: true,
+            requireSignedPOD: true,
+          },
+        }),
       ]);
 
       const now = Date.now();
+      const noteIndicatorMap = await buildNoteIndicatorMap({
+        orgId: req.user!.orgId,
+        role: req.user!.role as Role,
+        entityType: NoteEntityType.LOAD,
+        entityIds: rows.map((row) => row.id),
+      });
+      const assignedDriverIds = Array.from(
+        new Set(
+          rows
+            .map((load) => load.tripLoads[0]?.trip?.driverId ?? load.assignedDriverId ?? null)
+            .filter((value): value is string => Boolean(value))
+        )
+      );
+      const assignedTruckIds = Array.from(
+        new Set(
+          rows
+            .map((load) => load.tripLoads[0]?.trip?.truckId ?? load.truckId ?? null)
+            .filter((value): value is string => Boolean(value))
+        )
+      );
+      const [driverVaultDocs, truckVaultDocs] = await Promise.all([
+        assignedDriverIds.length
+          ? prisma.vaultDocument.findMany({
+              where: {
+                orgId: req.user!.orgId,
+                scopeType: VaultScopeType.DRIVER,
+                scopeId: { in: assignedDriverIds },
+                expiresAt: { not: null },
+              },
+              select: { scopeId: true, expiresAt: true },
+            })
+          : Promise.resolve([]),
+        assignedTruckIds.length
+          ? prisma.vaultDocument.findMany({
+              where: {
+                orgId: req.user!.orgId,
+                scopeType: VaultScopeType.TRUCK,
+                scopeId: { in: assignedTruckIds },
+                expiresAt: { not: null },
+              },
+              select: { scopeId: true, expiresAt: true },
+            })
+          : Promise.resolve([]),
+      ]);
+      const driverVaultExpirationsById = new Map<string, Date[]>();
+      for (const row of driverVaultDocs) {
+        if (!row.scopeId || !row.expiresAt) continue;
+        const bucket = driverVaultExpirationsById.get(row.scopeId) ?? [];
+        bucket.push(row.expiresAt);
+        driverVaultExpirationsById.set(row.scopeId, bucket);
+      }
+      const truckVaultExpirationsById = new Map<string, Date[]>();
+      for (const row of truckVaultDocs) {
+        if (!row.scopeId || !row.expiresAt) continue;
+        const bucket = truckVaultExpirationsById.get(row.scopeId) ?? [];
+        bucket.push(row.expiresAt);
+        truckVaultExpirationsById.set(row.scopeId, bucket);
+      }
       const items = rows.map((load) => {
         const primaryTrip = load.tripLoads[0]?.trip ?? null;
+        const assignedDriver = primaryTrip?.driver ?? load.driver;
+        const assignedTruck = primaryTrip?.truck ?? load.truck;
+        const assignedTrailer = primaryTrip?.trailer ?? load.trailer;
         const shipper = load.stops.find((stop) => stop.type === StopType.PICKUP);
         const consignee = load.stops.slice().reverse().find((stop) => stop.type === StopType.DELIVERY);
         const nextStop = load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ?? null;
@@ -3873,17 +5345,77 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
           count: load.legs.length,
           activeStatus: load.legs.find((leg) => leg.status === "IN_PROGRESS")?.status ?? null,
         };
+        const unresolvedExceptions = load.dispatchExceptions.map((exception) => ({
+          id: exception.id,
+          type: exception.type,
+          severity: exception.severity,
+          owner: exception.owner,
+          status: exception.status,
+          title: exception.title,
+        }));
+        const hasBlockingException = unresolvedExceptions.some(
+          (exception) => exception.severity === DispatchExceptionSeverity.BLOCKER
+        );
+        const driverDocExpirations = [
+          assignedDriver?.licenseExpiresAt ?? null,
+          assignedDriver?.medCardExpiresAt ?? null,
+          ...(assignedDriver?.id ? (driverVaultExpirationsById.get(assignedDriver.id) ?? []) : []),
+        ];
+        const equipmentDocExpirations = [...(assignedTruck?.id ? (truckVaultExpirationsById.get(assignedTruck.id) ?? []) : [])];
+        const readiness = evaluateLoadReadinessProjection({
+          dispatch: {
+            assignedDriverId: assignedDriver?.id ?? null,
+            truckId: assignedTruck?.id ?? null,
+            trailerId: assignedTrailer?.id ?? null,
+            stops: load.stops,
+            exceptions: unresolvedExceptions,
+            now: new Date(now),
+            atRiskWindowMinutes: READINESS_POLICY_DEFAULTS.dispatchAtRiskMinutes,
+            atRiskBlocks: READINESS_POLICY_DEFAULTS.dispatchAtRiskBlocks,
+            overdueBlocks: READINESS_POLICY_DEFAULTS.dispatchOverdueBlocks,
+          },
+          billing: {
+            loadStatus: load.status,
+            deliveredAt: load.deliveredAt,
+            customerId: load.customerId ?? null,
+            customerName: load.customerName ?? null,
+            customer: load.customer
+              ? {
+                  billingEmail: load.customer.billingEmail,
+                  remitToAddress: load.customer.remitToAddress,
+                  termsDays: load.customer.termsDays,
+                }
+              : null,
+            stops: load.stops,
+            docs: load.docs,
+            accessorials: load.accessorials,
+            invoices: load.invoices,
+            requireRateCon: financePolicy?.requireRateCon ?? FinanceRateConRequirement.BROKERED_ONLY,
+            requireBOL: financePolicy?.requireBOL ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+            requireSignedPOD: financePolicy?.requireSignedPOD ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+          },
+          compliance: {
+            now: new Date(now),
+            driverDocExpirations,
+            equipmentDocExpirations,
+            expiringSoonDays: READINESS_POLICY_DEFAULTS.complianceExpiringSoonDays,
+          },
+        });
+        const issuesProjection = mapReadinessProjectionToIssues(readiness);
         return {
           id: load.id,
           loadNumber: load.loadNumber,
           status: load.status,
+          movementMode: load.movementMode ?? null,
           customerName: load.customerName ?? null,
           rate: load.rate,
           miles: load.miles,
+          paidMiles: load.paidMiles ?? null,
+          updatedAt: load.createdAt?.toISOString?.() ?? null,
           assignment: {
-            driver: primaryTrip?.driver ?? load.driver,
-            truck: primaryTrip?.truck ?? load.truck,
-            trailer: primaryTrip?.trailer ?? load.trailer,
+            driver: assignedDriver,
+            truck: assignedTruck,
+            trailer: assignedTrailer,
           },
           trip: primaryTrip
             ? {
@@ -3917,12 +5449,27 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
             state: trackingState,
             lastPingAt: lastPing?.capturedAt ?? null,
           },
+          docs: {
+            hasPod: load.docs.some((doc) => doc.type === DocType.POD && doc.status !== DocStatus.REJECTED),
+            hasBol: load.docs.some((doc) => doc.type === DocType.BOL && doc.status !== DocStatus.REJECTED),
+            hasRateCon: load.docs.some(
+              (doc) =>
+                (doc.type === DocType.RATECON || doc.type === DocType.RATE_CONFIRMATION) &&
+                doc.status !== DocStatus.REJECTED
+            ),
+          },
+          exceptions: unresolvedExceptions,
           legSummary,
+          issuesTop: issuesProjection.issuesTop,
+          issuesText: issuesProjection.issuesText,
+          issues: issuesProjection.issues,
+          issueCounts: issuesProjection.issueCounts,
+          notesIndicator: noteIndicatorMap.get(load.id) ?? "NONE",
           riskFlags: {
             needsAssignment: needsAssign,
             trackingOffInTransit: trackingOff,
             overdueStopWindow: overdueStop,
-            atRisk: atRiskFlag,
+            atRisk: atRiskFlag || hasBlockingException,
             nextStopTime,
           },
         };
@@ -4002,6 +5549,12 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
         take: limit,
       }),
     ]);
+    const noteIndicatorMap = await buildNoteIndicatorMap({
+      orgId: req.user!.orgId,
+      role: req.user!.role as Role,
+      entityType: NoteEntityType.LOAD,
+      entityIds: rows.map((row) => row.id),
+    });
 
     const loads = rows.map((load) => {
       const shipper = load.stops.find((stop) => stop.type === "PICKUP");
@@ -4083,6 +5636,7 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
         trackingState,
         trackingLastPingAt: lastPing?.capturedAt ?? null,
         trackingLastPingSpeedMph: lastPing?.speedMph ?? null,
+        notesIndicator: noteIndicatorMap.get(load.id) ?? "NONE",
       };
     });
 
@@ -4495,6 +6049,10 @@ app.get("/loads/export", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLIN
 });
 
 app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
+  const now = new Date();
+  const visibleNoteTypes = (Object.values(NoteType) as NoteType[]).filter((noteType) =>
+    canRoleViewNoteType({ role: req.user!.role as Role, noteType })
+  );
   const [loadResult, settings] = await Promise.all([
     prisma.load.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId },
@@ -4516,11 +6074,14 @@ app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISP
         },
         invoices: true,
         loadNotes: {
-          where: { deletedAt: null },
-          orderBy: { createdAt: "desc" },
+          where: {
+            deletedAt: null,
+            ...(visibleNoteTypes.length > 0 ? { noteType: { in: visibleNoteTypes } } : { id: "__no_notes__" }),
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           include: {
             createdBy: { select: { id: true, name: true, role: true } },
-            deletedBy: { select: { id: true, name: true, role: true } },
           },
         },
       },
@@ -4567,50 +6128,188 @@ app.post(
   "/loads/:id/notes",
   requireAuth,
   requireCsrf,
-  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const schema = z.object({
-      text: z.string().trim().min(1).max(1000),
-      visibility: z.nativeEnum(LoadNoteVisibility).optional(),
+      body: z.string().trim().min(1).max(1000).optional(),
+      text: z.string().trim().min(1).max(1000).optional(), // Backward compatibility.
+      visibility: z.nativeEnum(LoadNoteVisibility).optional(), // Deprecated: ignored for immutable notes.
+      noteType: z.nativeEnum(NoteType).optional(),
+      priority: z.nativeEnum(NotePriority).optional(),
+      replyToNoteId: z.string().optional().nullable(),
+      stopId: z.string().optional().nullable(),
+      pinned: z.boolean().optional(),
+      expiresAt: z.coerce.date().optional().nullable(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid payload" });
       return;
     }
-    const load = await prisma.load.findFirst({
-      where: { id: req.params.id, orgId: req.user!.orgId },
-      select: { id: true, loadNumber: true },
-    });
-    if (!load) {
-      res.status(404).json({ error: "Load not found" });
+    const body = (parsed.data.body ?? parsed.data.text ?? "").trim();
+    if (!body) {
+      res.status(400).json({ error: "Note body required" });
       return;
     }
-    if (!(await userCanAccessLoad({ user: req.user!, loadId: load.id }))) {
-      res.status(404).json({ error: "Load not found" });
-      return;
-    }
-    const note = await prisma.loadNote.create({
-      data: {
-        orgId: req.user!.orgId,
-        loadId: load.id,
-        text: parsed.data.text.trim(),
-        visibility: parsed.data.visibility ?? LoadNoteVisibility.NORMAL,
+    let noteType: NoteType;
+    try {
+      noteType = normalizeNoteTypeForRole({
+        role: req.user!.role as Role,
+        noteType: parsed.data.noteType ?? NoteType.INTERNAL,
         source: LoadNoteSource.OPS,
-        createdById: req.user!.id,
-      },
-      include: { createdBy: { select: { id: true, name: true, role: true } } },
-    });
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+    if (parsed.data.visibility) {
+      console.warn("notes.visibility_deprecated_ignored", {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        loadId: req.params.id,
+        visibility: parsed.data.visibility,
+      });
+    }
+    let note: any;
+    let resolved: ResolvedNoteEntity;
+    try {
+      const result = await createImmutableNote({
+        orgId: req.user!.orgId,
+        user: req.user!,
+        entityType: NoteEntityType.LOAD,
+        entityId: req.params.id,
+        stopId: parsed.data.stopId ?? null,
+        replyToNoteId: parsed.data.replyToNoteId ?? null,
+        body,
+        noteType,
+        priority: parsed.data.priority ?? NotePriority.NORMAL,
+        source: LoadNoteSource.OPS,
+        pinned: parsed.data.pinned ?? false,
+        expiresAt: parsed.data.expiresAt ?? null,
+      });
+      note = result.note;
+      resolved = result.resolved;
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message.endsWith("not found")) {
+        res.status(404).json({ error: message });
+        return;
+      }
+      res.status(400).json({ error: message });
+      return;
+    }
     await logAudit({
       orgId: req.user!.orgId,
       userId: req.user!.id,
       action: "LOAD_NOTE_CREATED",
       entity: "Load",
-      entityId: load.id,
-      summary: `Load note added on ${load.loadNumber}`,
-      meta: { loadNoteId: note.id, visibility: note.visibility },
+      entityId: resolved.entityId,
+      summary: "Immutable note added on load",
+      meta: {
+        loadNoteId: note.id,
+        noteType: note.noteType,
+        priority: note.priority,
+        replyToNoteId: note.replyToNoteId,
+      },
     });
     res.json({ note });
+  }
+);
+
+app.post(
+  "/notes",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    const schema = z.object({
+      entityType: z.nativeEnum(NoteEntityType),
+      entityId: z.string().trim().min(1),
+      body: z.string().trim().min(1).max(1000).optional(),
+      text: z.string().trim().min(1).max(1000).optional(), // Backward compatibility.
+      source: z.nativeEnum(LoadNoteSource).optional(),
+      visibility: z.nativeEnum(LoadNoteVisibility).optional(), // Deprecated: ignored for immutable notes.
+      noteType: z.nativeEnum(NoteType).optional(),
+      priority: z.nativeEnum(NotePriority).optional(),
+      replyToNoteId: z.string().optional().nullable(),
+      stopId: z.string().optional().nullable(),
+      pinned: z.boolean().optional(),
+      expiresAt: z.coerce.date().optional().nullable(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const body = (parsed.data.body ?? parsed.data.text ?? "").trim();
+    if (!body) {
+      res.status(400).json({ error: "Note body required" });
+      return;
+    }
+    const source = parsed.data.source ?? LoadNoteSource.OPS;
+    if (source === LoadNoteSource.DRIVER) {
+      res.status(400).json({ error: "Driver notes must be created via /driver/note" });
+      return;
+    }
+    if (parsed.data.visibility) {
+      console.warn("notes.visibility_deprecated_ignored", {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        entityType: parsed.data.entityType,
+        entityId: parsed.data.entityId,
+        visibility: parsed.data.visibility,
+      });
+    }
+    let noteType: NoteType;
+    try {
+      noteType = normalizeNoteTypeForRole({
+        role: req.user!.role as Role,
+        noteType: parsed.data.noteType ?? NoteType.INTERNAL,
+        source,
+      });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+    try {
+      const { note, resolved } = await createImmutableNote({
+        orgId: req.user!.orgId,
+        user: req.user!,
+        entityType: parsed.data.entityType,
+        entityId: parsed.data.entityId,
+        stopId: parsed.data.stopId ?? null,
+        replyToNoteId: parsed.data.replyToNoteId ?? null,
+        body,
+        noteType,
+        priority: parsed.data.priority ?? NotePriority.NORMAL,
+        source,
+        pinned: parsed.data.pinned ?? false,
+        expiresAt: parsed.data.expiresAt ?? null,
+      });
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "NOTE_CREATED",
+        entity: parsed.data.entityType,
+        entityId: resolved.entityId,
+        summary: "Immutable note created",
+        meta: {
+          loadNoteId: note.id,
+          entityType: parsed.data.entityType,
+          noteType: note.noteType,
+          priority: note.priority,
+          replyToNoteId: note.replyToNoteId,
+        },
+      });
+      res.json({ note });
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message.endsWith("not found")) {
+        res.status(404).json({ error: message });
+        return;
+      }
+      res.status(400).json({ error: message });
+    }
   }
 );
 
@@ -4620,80 +6319,7 @@ app.delete(
   requireCsrf,
   requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
   async (req, res) => {
-    const schema = z.object({
-      reason: z.string().trim().max(500).optional(),
-    });
-    const parsed = schema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid payload" });
-      return;
-    }
-    const load = await prisma.load.findFirst({
-      where: { id: req.params.id, orgId: req.user!.orgId },
-      select: { id: true, loadNumber: true },
-    });
-    if (!load) {
-      res.status(404).json({ error: "Load not found" });
-      return;
-    }
-    if (!(await userCanAccessLoad({ user: req.user!, loadId: load.id }))) {
-      res.status(404).json({ error: "Load not found" });
-      return;
-    }
-    const note = await prisma.loadNote.findFirst({
-      where: {
-        id: req.params.noteId,
-        orgId: req.user!.orgId,
-        loadId: load.id,
-      },
-      select: {
-        id: true,
-        text: true,
-        visibility: true,
-        createdById: true,
-        deletedAt: true,
-      },
-    });
-    if (!note) {
-      res.status(404).json({ error: "Note not found" });
-      return;
-    }
-    if (note.deletedAt) {
-      res.json({ ok: true });
-      return;
-    }
-    const canDeleteLocked = canDeleteLockedLoadNote(req.user!.role);
-    if (note.visibility === LoadNoteVisibility.LOCKED && !canDeleteLocked) {
-      res.status(403).json({ error: "Only admin or head dispatcher can delete locked notes" });
-      return;
-    }
-    if (note.visibility === LoadNoteVisibility.NORMAL && note.createdById !== req.user!.id && !canDeleteLocked) {
-      res.status(403).json({ error: "You can only delete notes you created" });
-      return;
-    }
-    const reason = parsed.data.reason?.trim() || null;
-    if (note.visibility === LoadNoteVisibility.LOCKED && !reason) {
-      res.status(400).json({ error: "Reason is required to delete locked notes" });
-      return;
-    }
-    await prisma.loadNote.update({
-      where: { id: note.id },
-      data: {
-        deletedAt: new Date(),
-        deletedById: req.user!.id,
-        deleteReason: reason,
-      },
-    });
-    await logAudit({
-      orgId: req.user!.orgId,
-      userId: req.user!.id,
-      action: "LOAD_NOTE_DELETED",
-      entity: "Load",
-      entityId: load.id,
-      summary: `Load note deleted on ${load.loadNumber}`,
-      meta: { loadNoteId: note.id, visibility: note.visibility, reason },
-    });
-    res.json({ ok: true });
+    res.status(405).json({ error: NOTE_DELETE_DISABLED_MESSAGE });
   }
 );
 
@@ -4720,14 +6346,6 @@ app.post("/loads/:id/delete", requireAuth, requireCsrf, requireRole("ADMIN"), as
 
   const reason = parsed.data.reason.trim();
   let updatedLoad = load;
-  const assignmentReset = {
-    assignedDriverId: null,
-    truckId: null,
-    trailerId: null,
-    assignedDriverAt: null,
-    assignedTruckAt: null,
-    assignedTrailerAt: null,
-  };
   if (load.status !== LoadStatus.CANCELLED) {
     try {
       updatedLoad = (await transitionLoadStatus({
@@ -4737,18 +6355,12 @@ app.post("/loads/:id/delete", requireAuth, requireCsrf, requireRole("ADMIN"), as
         orgId: req.user!.orgId,
         role: req.user!.role as Role,
         overrideReason: reason,
-        data: assignmentReset,
         message: `Load ${load.loadNumber} cancelled (deleted)`,
       })) as typeof load;
     } catch (error) {
       res.status(400).json({ error: (error as Error).message });
       return;
     }
-  } else {
-    updatedLoad = await prisma.load.update({
-      where: { id: load.id },
-      data: assignmentReset,
-    });
   }
 
   const deletedAt = new Date();
@@ -4827,7 +6439,7 @@ app.post("/loads/:id/delete", requireAuth, requireCsrf, requireRole("ADMIN"), as
   res.json({ loadId: load.id, deletedAt });
 });
 
-app.get("/loads/:id/charges", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
+app.get("/loads/:id/charges", requireAuth, requireRole(...DISPATCH_EXECUTION_OR_BILLING_ROLES), async (req, res) => {
   const load = await prisma.load.findFirst({
     where: { id: req.params.id, orgId: req.user!.orgId },
     select: { id: true },
@@ -4847,7 +6459,7 @@ app.post(
   "/loads/:id/charges",
   requireAuth,
   requireCsrf,
-  requireRole("ADMIN", "DISPATCHER"),
+  requireRole(...DISPATCH_EXECUTION_ROLES),
   requirePermission(Permission.LOAD_EDIT),
   async (req, res) => {
     const schema = z.object({
@@ -4910,7 +6522,7 @@ app.patch(
   "/loads/:id/charges/:chargeId",
   requireAuth,
   requireCsrf,
-  requireRole("ADMIN", "DISPATCHER"),
+  requireRole(...DISPATCH_EXECUTION_ROLES),
   requirePermission(Permission.LOAD_EDIT),
   async (req, res) => {
     const schema = z.object({
@@ -4980,7 +6592,7 @@ app.delete(
   "/loads/:id/charges/:chargeId",
   requireAuth,
   requireCsrf,
-  requireRole("ADMIN", "DISPATCHER"),
+  requireRole(...DISPATCH_EXECUTION_ROLES),
   requirePermission(Permission.LOAD_EDIT),
   async (req, res) => {
     const [load, charge] = await Promise.all([
@@ -5303,8 +6915,41 @@ app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.
           take: 1,
         },
         docs: {
-          where: { type: { in: [DocType.POD, DocType.RATECON, DocType.RATE_CONFIRMATION] } },
-          select: { id: true, type: true, status: true },
+          orderBy: [{ uploadedAt: "desc" }, { id: "desc" }],
+          select: {
+            id: true,
+            type: true,
+            status: true,
+            filename: true,
+            originalName: true,
+            uploadedAt: true,
+            stopId: true,
+            uploadedById: true,
+            uploadedBy: { select: { id: true, name: true, email: true } },
+          },
+        },
+        accessorials: {
+          select: {
+            status: true,
+            requiresProof: true,
+            proofDocumentId: true,
+          },
+        },
+        invoices: {
+          select: { status: true },
+        },
+        dispatchExceptions: {
+          where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+          orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+          take: 5,
+          select: {
+            id: true,
+            type: true,
+            severity: true,
+            owner: true,
+            status: true,
+            title: true,
+          },
         },
         trackingSessions: {
           where: { status: "ON" },
@@ -5321,7 +6966,7 @@ app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.
     }),
     prisma.orgSettings.findFirst({
       where: { orgId: req.user!.orgId },
-      select: { requiredDocs: true, requireRateConBeforeDispatch: true },
+      select: { requiredDocs: true, requireRateConBeforeDispatch: true, requireRateCon: true, requireBOL: true, requireSignedPOD: true },
     }),
   ]);
   if (!load) {
@@ -5346,140 +6991,165 @@ app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.
       return;
     }
   }
-  res.json({ load, settings });
-});
-
-app.get("/loads/:id/timeline", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING"), async (req, res) => {
-  const load = await prisma.load.findFirst({
-    where: { id: req.params.id, orgId: req.user!.orgId },
-    include: { customer: true },
-  });
-  if (!load) {
-    res.status(404).json({ error: "Load not found" });
-    return;
-  }
-  const [events, tasks, docs, invoices, settlementItems] = await Promise.all([
-    prisma.event.findMany({
-      where: { loadId: load.id, orgId: req.user!.orgId },
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.task.findMany({
-      where: { loadId: load.id, orgId: req.user!.orgId },
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.document.findMany({
-      where: { loadId: load.id, orgId: req.user!.orgId },
-      orderBy: { uploadedAt: "desc" },
-    }),
-    prisma.invoice.findMany({
-      where: { loadId: load.id, orgId: req.user!.orgId },
-      orderBy: { generatedAt: "desc" },
-    }),
-    prisma.settlementItem.findMany({
-      where: { loadId: load.id, settlement: { orgId: req.user!.orgId } },
-      include: { settlement: true },
-    }),
+  const primaryTrip = load.tripLoads[0]?.trip ?? null;
+  const assignedDriverId = primaryTrip?.driverId ?? load.assignedDriverId ?? null;
+  const assignedTruckId = primaryTrip?.truckId ?? load.truckId ?? null;
+  const assignedTrailerId = primaryTrip?.trailerId ?? load.trailerId ?? null;
+  const [assignedDriver, driverVaultDocs, truckVaultDocs] = await Promise.all([
+    assignedDriverId
+      ? prisma.driver.findFirst({
+          where: { id: assignedDriverId, orgId: req.user!.orgId },
+          select: { id: true, name: true, licenseExpiresAt: true, medCardExpiresAt: true },
+        })
+      : Promise.resolve(null),
+    assignedDriverId
+      ? prisma.vaultDocument.findMany({
+          where: {
+            orgId: req.user!.orgId,
+            scopeType: VaultScopeType.DRIVER,
+            scopeId: assignedDriverId,
+            expiresAt: { not: null },
+          },
+          select: { expiresAt: true },
+        })
+      : Promise.resolve([]),
+    assignedTruckId
+      ? prisma.vaultDocument.findMany({
+          where: {
+            orgId: req.user!.orgId,
+            scopeType: VaultScopeType.TRUCK,
+            scopeId: assignedTruckId,
+            expiresAt: { not: null },
+          },
+          select: { expiresAt: true },
+        })
+      : Promise.resolve([]),
   ]);
 
-  const items: Array<{ id: string; type: string; message: string; time: Date; refId?: string }> = [];
-  for (const event of events) {
-    items.push({ id: event.id, type: `EVENT_${event.type}`, message: event.message, time: event.createdAt, refId: event.id });
-  }
-  for (const doc of docs) {
-    items.push({
-      id: doc.id,
-      type: `DOC_${doc.status}`,
-      message: `${doc.type} ${doc.status.toLowerCase()}`,
-      time: doc.uploadedAt,
-      refId: doc.id,
-    });
-    if (doc.verifiedAt) {
-      items.push({
-        id: `${doc.id}-verified`,
-        type: "DOC_VERIFIED",
-        message: `${doc.type} verified`,
-        time: doc.verifiedAt,
-        refId: doc.id,
-      });
-    }
-    if (doc.rejectedAt) {
-      items.push({
-        id: `${doc.id}-rejected`,
-        type: "DOC_REJECTED",
-        message: `${doc.type} rejected`,
-        time: doc.rejectedAt,
-        refId: doc.id,
-      });
-    }
-  }
-  for (const task of tasks) {
-    items.push({
-      id: task.id,
-      type: `TASK_${task.status}`,
-      message: task.title,
-      time: task.createdAt,
-      refId: task.id,
-    });
-    if (task.completedAt) {
-      items.push({
-        id: `${task.id}-done`,
-        type: "TASK_DONE",
-        message: `Completed: ${task.title}`,
-        time: task.completedAt,
-        refId: task.id,
-      });
-    }
-  }
-  for (const invoice of invoices) {
-    items.push({
-      id: invoice.id,
-      type: "INVOICE_GENERATED",
-      message: `Invoice ${invoice.invoiceNumber} generated`,
-      time: invoice.generatedAt,
-      refId: invoice.id,
-    });
-    if (invoice.sentAt) {
-      items.push({
-        id: `${invoice.id}-sent`,
-        type: "INVOICE_SENT",
-        message: `Invoice ${invoice.invoiceNumber} sent`,
-        time: invoice.sentAt,
-        refId: invoice.id,
-      });
-    }
-    if (invoice.paidAt) {
-      items.push({
-        id: `${invoice.id}-paid`,
-        type: `INVOICE_${invoice.status}`,
-        message: `Invoice ${invoice.invoiceNumber} ${invoice.status.toLowerCase()}`,
-        time: invoice.paidAt,
-        refId: invoice.id,
-      });
-    }
-    if (invoice.disputeReason) {
-      items.push({
-        id: `${invoice.id}-disputed`,
-        type: "INVOICE_DISPUTED",
-        message: `Invoice ${invoice.invoiceNumber} disputed`,
-        time: invoice.sentAt ?? invoice.generatedAt,
-        refId: invoice.id,
-      });
-    }
-  }
-  for (const item of settlementItems) {
-    const settlement = item.settlement;
-    items.push({
-      id: item.id,
-      type: `SETTLEMENT_${settlement.status}`,
-      message: `Settlement ${settlement.status.toLowerCase()}`,
-      time: settlement.paidAt ?? settlement.finalizedAt ?? settlement.createdAt,
-      refId: settlement.id,
-    });
-  }
+  const readiness = evaluateLoadReadinessProjection({
+    dispatch: {
+      assignedDriverId,
+      truckId: assignedTruckId,
+      trailerId: assignedTrailerId,
+      stops: load.stops,
+      exceptions: load.dispatchExceptions,
+      now: new Date(),
+    },
+    billing: {
+      loadStatus: load.status,
+      deliveredAt: load.deliveredAt,
+      customerId: load.customerId ?? null,
+      customerName: load.customerName ?? null,
+      customer: load.customer
+        ? {
+            billingEmail: load.customer.billingEmail,
+            remitToAddress: load.customer.remitToAddress,
+            termsDays: load.customer.termsDays,
+          }
+        : null,
+      stops: load.stops,
+      docs: load.docs,
+      accessorials: load.accessorials,
+      invoices: load.invoices,
+      requireRateCon: settings?.requireRateCon ?? FinanceRateConRequirement.BROKERED_ONLY,
+      requireBOL: settings?.requireBOL ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+      requireSignedPOD: settings?.requireSignedPOD ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+    },
+    compliance: {
+      now: new Date(),
+      driverDocExpirations: [
+        assignedDriver?.licenseExpiresAt ?? null,
+        assignedDriver?.medCardExpiresAt ?? null,
+        ...driverVaultDocs.map((doc) => doc.expiresAt ?? null),
+      ],
+      equipmentDocExpirations: truckVaultDocs.map((doc) => doc.expiresAt ?? null),
+      expiringSoonDays: READINESS_POLICY_DEFAULTS.complianceExpiringSoonDays,
+    },
+  });
+  const issuesProjection = mapReadinessProjectionToIssues(readiness);
 
-  items.sort((a, b) => b.time.getTime() - a.time.getTime());
-  res.json({ load, timeline: items });
+  res.json({
+    load,
+    settings,
+    issuesTop: issuesProjection.issuesTop,
+    issuesText: issuesProjection.issuesText,
+    issues: issuesProjection.issues,
+    issuesByFocusSection: groupIssuesByFocusSection(issuesProjection.issues),
+    issueCounts: issuesProjection.issueCounts,
+  });
 });
+
+app.get(
+  "/timeline",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "OPS_MANAGER", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    const schema = z.object({
+      entityType: z.nativeEnum(NoteEntityType),
+      entityId: z.string().trim().min(1),
+    });
+    const parsed = schema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    let resolved: ResolvedNoteEntity;
+    try {
+      resolved = await resolveNoteEntity({
+        orgId: req.user!.orgId,
+        user: req.user!,
+        entityType: parsed.data.entityType,
+        entityId: parsed.data.entityId,
+      });
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message.endsWith("not found")) {
+        res.status(404).json({ error: message });
+        return;
+      }
+      res.status(400).json({ error: message });
+      return;
+    }
+    const timeline = await buildEntityTimeline({
+      orgId: req.user!.orgId,
+      entityType: resolved.entityType,
+      entityId: resolved.entityId,
+      userRole: req.user!.role as Role,
+    });
+    res.json({
+      entityType: resolved.entityType,
+      entityId: resolved.entityId,
+      timeline,
+    });
+  }
+);
+
+app.get(
+  "/loads/:id/timeline",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING"),
+  async (req, res) => {
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { customer: true },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user!, loadId: load.id }))) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    const timeline = await buildEntityTimeline({
+      orgId: req.user!.orgId,
+      entityType: NoteEntityType.LOAD,
+      entityId: load.id,
+      userRole: req.user!.role as Role,
+    });
+    res.json({ load, timeline: sortTimelineEntries(timeline) });
+  }
+);
 
 app.post(
   ["/load-confirmations/upload", "/api/load-confirmations/upload"],
@@ -5496,53 +7166,17 @@ app.post(
     const docs = [];
     for (const file of files) {
       const sha256 = crypto.createHash("sha256").update(file.buffer).digest("hex");
-      const existing = await prisma.loadConfirmationDocument.findFirst({
-        where: {
-          orgId: req.user!.orgId,
-          sha256,
-          status: { in: [LoadConfirmationStatus.CREATED, LoadConfirmationStatus.READY_TO_CREATE] },
-        },
-      });
-      if (existing) {
-        docs.push(existing);
-        continue;
-      }
-
-      const pending = await prisma.loadConfirmationDocument.create({
-        data: {
-          orgId: req.user!.orgId,
-          uploadedByUserId: req.user!.id,
-          filename: file.originalname || "load-confirmation",
-          contentType: file.mimetype,
-          sizeBytes: file.size,
-          storageKey: "pending",
-          sha256,
-          status: LoadConfirmationStatus.UPLOADED,
-        },
-      });
-      const saved = await saveLoadConfirmationFile(file, req.user!.orgId, pending.id);
-      const doc = await prisma.loadConfirmationDocument.update({
-        where: { id: pending.id },
-        data: { filename: saved.filename, storageKey: saved.storageKey },
-      });
-      await prisma.loadConfirmationExtractEvent.create({
-        data: {
-          orgId: req.user!.orgId,
-          docId: doc.id,
-          type: "UPLOADED",
-          message: "Load confirmation uploaded",
-        },
-      });
-      await logAudit({
+      const result = await createLoadConfirmationDocumentFromBuffer({
         orgId: req.user!.orgId,
-        userId: req.user!.id,
-        action: "LOAD_CONFIRMATION_UPLOADED",
-        entity: "LoadConfirmationDocument",
-        entityId: doc.id,
-        summary: `Uploaded load confirmation ${doc.filename}`,
-        meta: { sha256 },
+        uploadedByUserId: req.user!.id,
+        filename: file.originalname || "load-confirmation",
+        contentType: file.mimetype || "application/octet-stream",
+        byteSize: file.size,
+        buffer: file.buffer,
+        sha256,
+        source: "OPS_UPLOAD",
       });
-      docs.push(doc);
+      docs.push(result.doc);
     }
     res.json({ docs });
   }
@@ -5915,6 +7549,33 @@ app.post(
   }
 );
 
+app.post("/inbound/ratecon/email", upload.any(), async (req, res) => {
+  const auth = isInboundWebhookAuthorized({
+    configuredToken: process.env.INBOUND_RATECON_WEBHOOK_TOKEN,
+    providedToken:
+      (typeof req.headers["x-inbound-token"] === "string" ? req.headers["x-inbound-token"] : undefined) ??
+      (typeof req.query.token === "string" ? req.query.token : undefined),
+  });
+  if (!auth.ok) {
+    res.status(401).json({
+      status: "rejected",
+      error: auth.reason,
+      inboundEmailId: null,
+      createdLoadConfirmationIds: [],
+      dedupedAttachmentCount: 0,
+    });
+    return;
+  }
+
+  const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+  const normalized = parseSendgridInboundEmail({
+    body: req.body as Record<string, unknown>,
+    files,
+  });
+  const result = await ingestInboundRateconEmail(normalized);
+  res.status(202).json(result);
+});
+
 app.post("/loads/:id/legs", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
   const schema = z.object({
     type: z.enum(["PICKUP", "LINEHAUL", "DELIVERY"]),
@@ -6163,7 +7824,19 @@ app.get(
       }),
       prisma.trip.count({ where }),
     ]);
-    res.json({ total, trips });
+    const noteIndicatorMap = await buildNoteIndicatorMap({
+      orgId: req.user!.orgId,
+      role: req.user!.role as Role,
+      entityType: NoteEntityType.TRIP,
+      entityIds: trips.map((trip) => trip.id),
+    });
+    res.json({
+      total,
+      trips: trips.map((trip) => ({
+        ...trip,
+        notesIndicator: noteIndicatorMap.get(trip.id) ?? "NONE",
+      })),
+    });
   }
 );
 
@@ -6180,7 +7853,18 @@ app.get(
       res.status(404).json({ error: "Trip not found" });
       return;
     }
-    res.json({ trip });
+    const noteIndicatorMap = await buildNoteIndicatorMap({
+      orgId: req.user!.orgId,
+      role: req.user!.role as Role,
+      entityType: NoteEntityType.TRIP,
+      entityIds: [trip.id],
+    });
+    res.json({
+      trip: {
+        ...trip,
+        notesIndicator: noteIndicatorMap.get(trip.id) ?? "NONE",
+      },
+    });
   }
 );
 
@@ -6364,13 +8048,9 @@ app.post(
       include: TRIP_INCLUDE,
     });
 
-    await applyTripAssignmentToLoads({
+    await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
-      loadIds: loads.map((load) => load.id),
-      driverId: trip.driverId,
-      truckId: trip.truckId,
-      trailerId: trip.trailerId,
-      tripStatus: trip.status,
+      tripId: trip.id,
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -6461,13 +8141,9 @@ app.post(
         })),
         skipDuplicates: true,
       });
-      await applyTripAssignmentToLoads({
+      await syncTripExecutionToLoadMirrors({
         orgId: req.user!.orgId,
-        loadIds: newLoads.map((load) => load.id),
-        driverId: trip.driverId,
-        truckId: trip.truckId,
-        trailerId: trip.trailerId,
-        tripStatus: trip.status,
+        tripId: trip.id,
       });
       if (trip.sourceManifestId) {
         await prisma.trailerManifestItem.createMany({
@@ -6589,17 +8265,15 @@ app.post(
         });
       }
 
-      await tx.load.update({
-        where: { id: target.loadId },
-        data: {
-          assignedDriverId: null,
-          truckId: null,
-          trailerId: null,
-          assignedDriverAt: null,
-          assignedTruckAt: null,
-          assignedTrailerAt: null,
-          status: LoadStatus.PLANNED,
-        },
+      await syncTripExecutionToLoadMirrors({
+        orgId: req.user!.orgId,
+        tripId: trip.id,
+        tx,
+      });
+      await syncTripExecutionToLoadMirrors({
+        orgId: req.user!.orgId,
+        tripId: splitTrip.id,
+        tx,
       });
 
       const [updatedTrip, createdTrip] = await Promise.all([
@@ -6747,13 +8421,9 @@ app.post(
       include: TRIP_INCLUDE,
     });
 
-    await applyTripAssignmentToLoads({
+    await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
-      loadIds: trip.loads.map((item) => item.loadId),
-      driverId: updated.driverId,
-      truckId: updated.truckId,
-      trailerId: updated.trailerId,
-      tripStatus: updated.status,
+      tripId: trip.id,
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -6830,13 +8500,9 @@ app.post(
       include: TRIP_INCLUDE,
     });
 
-    await applyTripAssignmentToLoads({
+    await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
-      loadIds: trip.loads.map((item) => item.loadId),
-      driverId: updated.driverId,
-      truckId: updated.truckId,
-      trailerId: updated.trailerId,
-      tripStatus: updated.status,
+      tripId: trip.id,
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -6890,7 +8556,6 @@ app.post(
       return;
     }
 
-    const loadIds = manifest.items.map((item) => item.loadId);
     const movementModes = new Set(manifest.items.map((item) => item.load.movementMode));
     const trip = await prisma.trip.create({
       data: {
@@ -6924,13 +8589,9 @@ app.post(
       include: TRIP_INCLUDE,
     });
 
-    await applyTripAssignmentToLoads({
+    await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
-      loadIds,
-      driverId: trip.driverId,
-      truckId: trip.truckId,
-      trailerId: trip.trailerId,
-      tripStatus: trip.status,
+      tripId: trip.id,
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -7514,6 +9175,24 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
+  const blockedExecutionFields = getBlockedLoadExecutionMutationFields(parsed.data as Record<string, unknown>);
+  if (blockedExecutionFields.length > 0) {
+    await logLegacyExecutionMutationRejected({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      role: req.user!.role as Role,
+      route: "/loads/:id",
+      method: req.method,
+      loadId: req.params.id,
+      blockedFields: blockedExecutionFields,
+      reason: "Load-level execution mutation blocked; trip service is authoritative.",
+    });
+    res.status(400).json({
+      error: LEGACY_EXECUTION_REJECTION_MESSAGE.edit,
+      blockedFields: blockedExecutionFields,
+    });
+    return;
+  }
   const existing = await prisma.load.findFirst({
     where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
     include: { customer: true },
@@ -7641,62 +9320,6 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     return;
   }
 
-  const statusRequested = parsed.data.status;
-  const statusChanged = statusRequested !== undefined && statusRequested !== existing.status;
-  let statusResult = { overridden: false };
-  if (statusChanged) {
-    try {
-      await assertLoadTripExecutionInvariant({
-        orgId: req.user!.orgId,
-        loadId: existing.id,
-        loadNumber: existing.loadNumber,
-        nextStatus: statusRequested as LoadStatus,
-      });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-      return;
-    }
-    try {
-      statusResult = assertLoadStatusTransition({
-        current: existing.status,
-        next: statusRequested as LoadStatus,
-        isAdmin: req.user!.role === "ADMIN",
-        overrideReason: parsed.data.overrideReason,
-      });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
-      return;
-    }
-  }
-  const completedAtUpdate =
-    statusChanged && statusRequested
-      ? resolveCompletedAtUpdate({
-          current: existing.status,
-          next: statusRequested as LoadStatus,
-          existing: existing.completedAt ?? null,
-        })
-      : undefined;
-  const deliveredAtUpdate =
-    statusChanged && statusRequested
-      ? resolveDeliveredAtUpdate({
-          current: existing.status,
-          next: statusRequested as LoadStatus,
-          existing: existing.deliveredAt ?? null,
-        })
-      : undefined;
-  const reachesDeliveredState =
-    statusChanged && statusRequested
-      ? !DELIVERY_REACHED_STATUSES.has(existing.status) && DELIVERY_REACHED_STATUSES.has(statusRequested as LoadStatus)
-      : false;
-  const autoPaidMiles =
-    reachesDeliveredState &&
-    parsed.data.paidMiles === undefined &&
-    (existing.paidMiles ?? null) === null &&
-    Number.isFinite(parsed.data.miles ?? existing.miles ?? NaN) &&
-    Number(parsed.data.miles ?? existing.miles ?? 0) > 0
-      ? Number(parsed.data.miles ?? existing.miles)
-      : undefined;
-
   const load = await prisma.load.update({
     where: { id: existing.id },
     data: {
@@ -7705,7 +9328,6 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       customerRef: parsed.data.customerRef ?? existing.customerRef ?? null,
       bolNumber: parsed.data.bolNumber ?? existing.bolNumber ?? null,
       loadType: parsed.data.loadType ?? existing.loadType,
-      movementMode: parsed.data.movementMode ?? existing.movementMode,
       operatingEntityId: operatingEntityId ?? existing.operatingEntityId,
       shipperReferenceNumber:
         shipperReferenceNumber !== undefined ? shipperReferenceNumber : existing.shipperReferenceNumber ?? null,
@@ -7715,20 +9337,15 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       weightLbs: weightLbs !== undefined ? weightLbs : existing.weightLbs ?? null,
       rate: parsed.data.rate !== undefined ? toDecimal(parsed.data.rate) : undefined,
       miles: parsed.data.miles,
-      paidMiles: paidMiles !== undefined ? paidMiles : autoPaidMiles !== undefined ? autoPaidMiles : undefined,
+      paidMiles: paidMiles !== undefined ? paidMiles : undefined,
       paidMilesSource:
         paidMiles !== undefined
           ? paidMilesVariancePct !== null && paidMilesVariancePct <= 0.01
             ? PayableMilesSource.PLANNED
             : PayableMilesSource.MANUAL_OVERRIDE
-          : autoPaidMiles !== undefined
-          ? PayableMilesSource.PLANNED
           : undefined,
       paidMilesApprovedById: paidMiles !== undefined ? req.user!.id : undefined,
       paidMilesApprovedAt: paidMiles !== undefined ? new Date() : undefined,
-      status: statusRequested,
-      completedAt: completedAtUpdate !== undefined ? completedAtUpdate : undefined,
-      deliveredAt: deliveredAtUpdate !== undefined ? deliveredAtUpdate : undefined,
     },
   });
   await logLoadFieldAudit({
@@ -7737,27 +9354,6 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     before: existing,
     after: load,
   });
-  if (statusChanged) {
-    await createEvent({
-      orgId: req.user!.orgId,
-      loadId: load.id,
-      userId: req.user!.id,
-      type: EventType.LOAD_STATUS_UPDATED,
-      message: `Load ${load.loadNumber} status ${existing.status} -> ${load.status}`,
-      meta: { overrideReason: parsed.data.overrideReason ?? null, overridden: statusResult.overridden },
-    });
-    await logAudit({
-      orgId: req.user!.orgId,
-      userId: req.user!.id,
-      action: "LOAD_STATUS",
-      entity: "Load",
-      entityId: load.id,
-      summary: `Load ${load.loadNumber} status ${existing.status} -> ${load.status}`,
-      meta: { overrideReason: parsed.data.overrideReason ?? null, overridden: statusResult.overridden },
-      before: { status: existing.status },
-      after: { status: load.status },
-    });
-  }
   if (attemptingLockedEdit && req.user!.role === "ADMIN") {
     await createEvent({
       orgId: req.user!.orgId,
@@ -7892,16 +9488,36 @@ app.post(
   requireOperationalOrg,
   requireCsrf,
   requirePermission(Permission.LOAD_ASSIGN),
-  async (_req, res) => {
+  async (req, res) => {
+    await logLegacyExecutionMutationRejected({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      role: req.user!.role as Role,
+      route: "/loads/:id/assign",
+      method: req.method,
+      loadId: req.params.id,
+      blockedFields: ["assignedDriverId", "truckId", "trailerId", "status"],
+      reason: "Direct load assignment endpoint is legacy and disabled.",
+    });
     res.status(400).json({
-      error: "Direct load assignment is disabled. Use trip assignment endpoints (/trips, /trips/:id/assign).",
+      error: LEGACY_EXECUTION_REJECTION_MESSAGE.assign,
     });
   }
 );
 
-app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (_req, res) => {
+app.post("/loads/:id/unassign", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  await logLegacyExecutionMutationRejected({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    role: req.user!.role as Role,
+    route: "/loads/:id/unassign",
+    method: req.method,
+    loadId: req.params.id,
+    blockedFields: ["assignedDriverId", "truckId", "trailerId", "status"],
+    reason: "Direct load unassign endpoint is legacy and disabled.",
+  });
   res.status(400).json({
-    error: "Direct load unassign is disabled. Update or unassign the trip instead.",
+    error: LEGACY_EXECUTION_REJECTION_MESSAGE.unassign,
   });
 });
 
@@ -8205,10 +9821,530 @@ app.get("/dispatch/availability", requireAuth, requirePermission(Permission.LOAD
   });
 });
 
+app.get("/dispatch/views", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const canManageTemplates = req.user!.role === Role.ADMIN;
+  const orgId = req.user!.orgId;
+
+  const [personalViews, templateViews] = await Promise.all([
+    prisma.dispatchView.findMany({
+      where: { orgId, scope: DispatchViewScope.PERSONAL, userId: req.user!.id },
+      orderBy: [{ updatedAt: "desc" }],
+    }),
+    prisma.dispatchView.findMany({
+      where: canManageTemplates
+        ? { orgId, scope: DispatchViewScope.ADMIN_TEMPLATE }
+        : {
+            orgId,
+            scope: DispatchViewScope.ADMIN_TEMPLATE,
+            OR: [{ role: null }, { role: req.user!.role as Role }],
+          },
+      orderBy: [{ isRoleDefault: "desc" }, { updatedAt: "desc" }],
+    }),
+  ]);
+
+  const roleDefaultTemplate = templateViews.find(
+    (view) => view.isRoleDefault && (view.role === req.user!.role || view.role === null)
+  );
+
+  res.json({
+    personalViews: personalViews.map(mapDispatchViewRow),
+    templates: templateViews.map(mapDispatchViewRow),
+    roleDefaultTemplateId: roleDefaultTemplate?.id ?? null,
+    canManageTemplates,
+  });
+});
+
+app.post("/dispatch/views", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const schema = z.object({
+    name: z.string().trim().min(2).max(120),
+    scope: z.nativeEnum(DispatchViewScope).optional(),
+    role: z.nativeEnum(Role).optional().nullable(),
+    isRoleDefault: z.boolean().optional(),
+    config: z.unknown(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+
+  const scope = parsed.data.scope ?? DispatchViewScope.PERSONAL;
+  const canManageTemplates = req.user!.role === Role.ADMIN;
+  if (scope === DispatchViewScope.ADMIN_TEMPLATE && !canManageTemplates) {
+    res.status(403).json({ error: "Only admins can create view templates." });
+    return;
+  }
+
+  const role = scope === DispatchViewScope.ADMIN_TEMPLATE ? parsed.data.role ?? null : null;
+  const isRoleDefault = scope === DispatchViewScope.ADMIN_TEMPLATE && role ? Boolean(parsed.data.isRoleDefault) : false;
+  const config = normalizeDispatchViewConfig(parsed.data.config);
+
+  const created = await prisma.$transaction(async (tx) => {
+    if (scope === DispatchViewScope.ADMIN_TEMPLATE && isRoleDefault && role) {
+      await tx.dispatchView.updateMany({
+        where: { orgId: req.user!.orgId, scope: DispatchViewScope.ADMIN_TEMPLATE, role },
+        data: { isRoleDefault: false },
+      });
+    }
+    return tx.dispatchView.create({
+      data: {
+        orgId: req.user!.orgId,
+        name: parsed.data.name.trim(),
+        scope,
+        userId: scope === DispatchViewScope.PERSONAL ? req.user!.id : null,
+        role,
+        isRoleDefault,
+        configJson: config,
+      },
+    });
+  });
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: scope === DispatchViewScope.ADMIN_TEMPLATE ? "DISPATCH_VIEW_TEMPLATE_CREATED" : "DISPATCH_VIEW_CREATED",
+    entity: "DispatchView",
+    entityId: created.id,
+    summary: `Created dispatch view ${created.name}`,
+    meta: { scope, role, isRoleDefault },
+  });
+
+  res.json({ view: mapDispatchViewRow(created) });
+});
+
+app.put("/dispatch/views/:id", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const schema = z.object({
+    name: z.string().trim().min(2).max(120).optional(),
+    role: z.nativeEnum(Role).optional().nullable(),
+    isRoleDefault: z.boolean().optional(),
+    config: z.unknown().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+
+  const existing = await prisma.dispatchView.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "View not found" });
+    return;
+  }
+
+  const canManageTemplates = req.user!.role === Role.ADMIN;
+  if (existing.scope === DispatchViewScope.ADMIN_TEMPLATE && !canManageTemplates) {
+    res.status(403).json({ error: "Only admins can update templates." });
+    return;
+  }
+  if (
+    existing.scope === DispatchViewScope.PERSONAL &&
+    existing.userId !== req.user!.id &&
+    !canManageTemplates
+  ) {
+    res.status(403).json({ error: "You can only edit your own views." });
+    return;
+  }
+
+  const nextRole =
+    existing.scope === DispatchViewScope.ADMIN_TEMPLATE
+      ? parsed.data.role === undefined
+        ? existing.role
+        : parsed.data.role
+      : null;
+  const nextIsRoleDefault =
+    existing.scope === DispatchViewScope.ADMIN_TEMPLATE && nextRole
+      ? parsed.data.isRoleDefault === undefined
+        ? existing.isRoleDefault
+        : parsed.data.isRoleDefault
+      : false;
+
+  const updated = await prisma.$transaction(async (tx) => {
+    if (existing.scope === DispatchViewScope.ADMIN_TEMPLATE && nextIsRoleDefault && nextRole) {
+      await tx.dispatchView.updateMany({
+        where: {
+          orgId: req.user!.orgId,
+          scope: DispatchViewScope.ADMIN_TEMPLATE,
+          role: nextRole,
+          id: { not: existing.id },
+        },
+        data: { isRoleDefault: false },
+      });
+    }
+    return tx.dispatchView.update({
+      where: { id: existing.id },
+      data: {
+        name: parsed.data.name?.trim() ?? undefined,
+        role: existing.scope === DispatchViewScope.ADMIN_TEMPLATE ? nextRole : null,
+        isRoleDefault: existing.scope === DispatchViewScope.ADMIN_TEMPLATE ? nextIsRoleDefault : false,
+        configJson:
+          parsed.data.config === undefined ? undefined : normalizeDispatchViewConfig(parsed.data.config),
+      },
+    });
+  });
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: existing.scope === DispatchViewScope.ADMIN_TEMPLATE ? "DISPATCH_VIEW_TEMPLATE_UPDATED" : "DISPATCH_VIEW_UPDATED",
+    entity: "DispatchView",
+    entityId: updated.id,
+    summary: `Updated dispatch view ${updated.name}`,
+    meta: { scope: updated.scope, role: updated.role, isRoleDefault: updated.isRoleDefault },
+  });
+
+  res.json({ view: mapDispatchViewRow(updated) });
+});
+
+app.delete("/dispatch/views/:id", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const existing = await prisma.dispatchView.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "View not found" });
+    return;
+  }
+
+  const canManageTemplates = req.user!.role === Role.ADMIN;
+  if (existing.scope === DispatchViewScope.ADMIN_TEMPLATE && !canManageTemplates) {
+    res.status(403).json({ error: "Only admins can delete templates." });
+    return;
+  }
+  if (
+    existing.scope === DispatchViewScope.PERSONAL &&
+    existing.userId !== req.user!.id &&
+    !canManageTemplates
+  ) {
+    res.status(403).json({ error: "You can only delete your own views." });
+    return;
+  }
+
+  await prisma.dispatchView.delete({ where: { id: existing.id } });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: existing.scope === DispatchViewScope.ADMIN_TEMPLATE ? "DISPATCH_VIEW_TEMPLATE_DELETED" : "DISPATCH_VIEW_DELETED",
+    entity: "DispatchView",
+    entityId: existing.id,
+    summary: `Deleted dispatch view ${existing.name}`,
+    meta: { scope: existing.scope, role: existing.role },
+  });
+  res.json({ ok: true });
+});
+
+app.get("/dispatch/exceptions", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const statusParamRaw = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "OPEN";
+  const severityParamRaw = typeof req.query.severity === "string" ? req.query.severity.trim().toUpperCase() : "";
+  const loadId = typeof req.query.loadId === "string" ? req.query.loadId.trim() : "";
+  const tripId = typeof req.query.tripId === "string" ? req.query.tripId.trim() : "";
+  const requestedLoadId = loadId || null;
+
+  const statusParam =
+    statusParamRaw === "ALL"
+      ? "ALL"
+      : z.nativeEnum(DispatchExceptionStatus).safeParse(statusParamRaw).success
+        ? (statusParamRaw as DispatchExceptionStatus)
+        : DispatchExceptionStatus.OPEN;
+  const severityParam = z.nativeEnum(DispatchExceptionSeverity).safeParse(severityParamRaw).success
+    ? (severityParamRaw as DispatchExceptionSeverity)
+    : null;
+
+  const where: Prisma.DispatchExceptionWhereInput = {
+    orgId: req.user!.orgId,
+    status: statusParam === "ALL" ? undefined : statusParam,
+    severity: severityParam ?? undefined,
+    tripId: tripId || undefined,
+  };
+  const andConditions: Prisma.DispatchExceptionWhereInput[] = [];
+  if (requestedLoadId) {
+    andConditions.push({ loadId: requestedLoadId });
+  }
+
+  const scope = await getUserTeamScope(req.user!);
+  if (!scope.canSeeAllTeams) {
+    await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.LOAD, scope.defaultTeamId!);
+    const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, scope);
+    andConditions.push({ loadId: { in: scopedLoadIds ?? [] } });
+  }
+  if (andConditions.length > 0) {
+    where.AND = andConditions;
+  }
+
+  const exceptions = await prisma.dispatchException.findMany({
+    where,
+    include: {
+      load: { select: { id: true, loadNumber: true, status: true } },
+      trip: { select: { id: true, tripNumber: true, status: true } },
+    },
+    orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+    take: 500,
+  });
+
+  const openCount = exceptions.filter((row) => row.status === DispatchExceptionStatus.OPEN).length;
+  const acknowledgedCount = exceptions.filter((row) => row.status === DispatchExceptionStatus.ACKNOWLEDGED).length;
+  const blockerCount = exceptions.filter((row) => row.severity === DispatchExceptionSeverity.BLOCKER).length;
+
+  res.json({
+    exceptions: exceptions.map((row) => ({
+      id: row.id,
+      loadId: row.loadId,
+      loadNumber: row.load?.loadNumber ?? null,
+      loadStatus: row.load?.status ?? null,
+      tripId: row.tripId,
+      tripNumber: row.trip?.tripNumber ?? null,
+      tripStatus: row.trip?.status ?? null,
+      type: row.type,
+      severity: row.severity,
+      owner: row.owner,
+      status: row.status,
+      title: row.title,
+      detail: row.detail ?? null,
+      source: row.source ?? null,
+      createdById: row.createdById ?? null,
+      acknowledgedById: row.acknowledgedById ?? null,
+      acknowledgedAt: row.acknowledgedAt ?? null,
+      resolvedById: row.resolvedById ?? null,
+      resolvedAt: row.resolvedAt ?? null,
+      resolutionNote: row.resolutionNote ?? null,
+      meta: row.meta ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    })),
+    summary: {
+      total: exceptions.length,
+      open: openCount,
+      acknowledged: acknowledgedCount,
+      blockers: blockerCount,
+    },
+  });
+});
+
+app.post("/dispatch/exceptions", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const schema = z.object({
+    loadId: z.string().trim().min(1),
+    tripId: z.string().trim().optional().nullable(),
+    type: z.string().trim().min(2).max(80),
+    title: z.string().trim().min(2).max(180),
+    detail: z.string().trim().max(2000).optional().nullable(),
+    severity: z.nativeEnum(DispatchExceptionSeverity).optional(),
+    owner: z.nativeEnum(DispatchExceptionOwner).optional(),
+    source: z.string().trim().max(80).optional().nullable(),
+    meta: z.unknown().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+
+  const load = await prisma.load.findFirst({
+    where: { id: parsed.data.loadId, orgId: req.user!.orgId },
+    select: { id: true, loadNumber: true },
+  });
+  if (!load) {
+    res.status(404).json({ error: "Load not found" });
+    return;
+  }
+  if (!(await userCanAccessLoad({ user: req.user, loadId: load.id }))) {
+    res.status(404).json({ error: "Load not found" });
+    return;
+  }
+
+  if (parsed.data.tripId) {
+    const [trip, tripLoad] = await Promise.all([
+      prisma.trip.findFirst({
+        where: { id: parsed.data.tripId, orgId: req.user!.orgId },
+        select: { id: true },
+      }),
+      prisma.tripLoad.findFirst({
+        where: { orgId: req.user!.orgId, tripId: parsed.data.tripId, loadId: load.id },
+        select: { id: true },
+      }),
+    ]);
+    if (!trip) {
+      res.status(400).json({ error: "Trip not found" });
+      return;
+    }
+    if (!tripLoad) {
+      res.status(400).json({ error: "Trip does not include this load" });
+      return;
+    }
+  }
+
+  const metaValue = parsed.data.meta;
+  const created = await prisma.dispatchException.create({
+    data: {
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      tripId: parsed.data.tripId ?? null,
+      type: parsed.data.type,
+      severity: parsed.data.severity ?? DispatchExceptionSeverity.WARNING,
+      owner: parsed.data.owner ?? DispatchExceptionOwner.DISPATCH,
+      status: DispatchExceptionStatus.OPEN,
+      title: parsed.data.title,
+      detail: parsed.data.detail ?? null,
+      source: parsed.data.source ?? "manual",
+      createdById: req.user!.id,
+      ...(metaValue === undefined
+        ? {}
+        : { meta: metaValue === null ? Prisma.JsonNull : (metaValue as Prisma.InputJsonValue) }),
+    },
+  });
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "DISPATCH_EXCEPTION_CREATED",
+    entity: "DispatchException",
+    entityId: created.id,
+    summary: `Created exception on load ${load.loadNumber}`,
+    meta: {
+      loadId: created.loadId,
+      tripId: created.tripId,
+      type: created.type,
+      severity: created.severity,
+      owner: created.owner,
+    },
+  });
+
+  res.json({ exception: created });
+});
+
+app.post(
+  "/dispatch/exceptions/:id/acknowledge",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const current = await prisma.dispatchException.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: { id: true, loadId: true, status: true, title: true },
+    });
+    if (!current) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user, loadId: current.loadId }))) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+    const acknowledged = await prisma.dispatchException.update({
+      where: { id: current.id },
+      data: {
+        status: DispatchExceptionStatus.ACKNOWLEDGED,
+        acknowledgedById: req.user!.id,
+        acknowledgedAt: new Date(),
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "DISPATCH_EXCEPTION_ACKNOWLEDGED",
+      entity: "DispatchException",
+      entityId: acknowledged.id,
+      summary: `Acknowledged exception ${current.title}`,
+      meta: { previousStatus: current.status, nextStatus: acknowledged.status },
+    });
+    res.json({ exception: acknowledged });
+  }
+);
+
+app.post(
+  "/dispatch/exceptions/:id/resolve",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const schema = z.object({
+      resolutionNote: z.string().trim().min(3).max(500),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Resolution note is required." });
+      return;
+    }
+
+    const current = await prisma.dispatchException.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: { id: true, loadId: true, status: true, title: true },
+    });
+    if (!current) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user, loadId: current.loadId }))) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+
+    const resolved = await prisma.dispatchException.update({
+      where: { id: current.id },
+      data: {
+        status: DispatchExceptionStatus.RESOLVED,
+        resolvedById: req.user!.id,
+        resolvedAt: new Date(),
+        resolutionNote: parsed.data.resolutionNote,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "DISPATCH_EXCEPTION_RESOLVED",
+      entity: "DispatchException",
+      entityId: resolved.id,
+      summary: `Resolved exception ${current.title}`,
+      meta: { previousStatus: current.status, nextStatus: resolved.status },
+    });
+    res.json({ exception: resolved });
+  }
+);
+
+app.post(
+  "/dispatch/exceptions/:id/reopen",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const current = await prisma.dispatchException.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: { id: true, loadId: true, status: true, title: true },
+    });
+    if (!current) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user, loadId: current.loadId }))) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+
+    const reopened = await prisma.dispatchException.update({
+      where: { id: current.id },
+      data: {
+        status: DispatchExceptionStatus.OPEN,
+        resolvedById: null,
+        resolvedAt: null,
+        resolutionNote: null,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "DISPATCH_EXCEPTION_REOPENED",
+      entity: "DispatchException",
+      entityId: reopened.id,
+      summary: `Reopened exception ${current.title}`,
+      meta: { previousStatus: current.status, nextStatus: reopened.status },
+    });
+    res.json({ exception: reopened });
+  }
+);
+
 app.get(
   "/search",
   requireAuth,
-  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING"),
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
     if (!query) {
@@ -8646,6 +10782,10 @@ async function getDriverAssignmentRole(loadId: string, driverId: string) {
 }
 
 app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) => {
+  const now = new Date();
+  const visibleDriverNoteTypes = (Object.values(NoteType) as NoteType[]).filter((noteType) =>
+    canRoleViewNoteType({ role: req.user!.role as Role, noteType })
+  );
   const driver = await prisma.driver.findFirst({
     where: { userId: req.user!.id, orgId: req.user!.orgId },
   });
@@ -8670,8 +10810,14 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
               driver: true,
               customer: true,
               loadNotes: {
-                where: { deletedAt: null },
-                orderBy: { createdAt: "desc" },
+                where: {
+                  deletedAt: null,
+                  ...(visibleDriverNoteTypes.length > 0
+                    ? { noteType: { in: visibleDriverNoteTypes } }
+                    : { id: "__no_notes__" }),
+                  OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+                },
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
                 include: { createdBy: { select: { id: true, name: true, role: true } } },
               },
               assignmentMembers: { include: { driver: { select: { id: true, name: true } } } },
@@ -8705,7 +10851,7 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
       orgId: req.user!.orgId,
       isActive: true,
       id: { not: req.user!.id },
-      role: { in: [Role.HEAD_DISPATCHER, Role.DISPATCHER, Role.ADMIN] },
+      role: { in: [Role.HEAD_DISPATCHER, Role.OPS_MANAGER, Role.DISPATCHER, Role.ADMIN] },
       phone: { not: null },
     },
     select: { id: true, name: true, role: true, phone: true, createdAt: true },
@@ -8715,6 +10861,7 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
   const priorityByRole: Partial<Record<Role, number>> = {
     ADMIN: 3,
     HEAD_DISPATCHER: 1,
+    OPS_MANAGER: 2,
     DISPATCHER: 2,
   };
   dispatcherContacts.sort(
@@ -8760,7 +10907,7 @@ app.get("/driver/settings", requireAuth, requireRole("DRIVER"), async (req, res)
   });
 });
 
-app.get("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
+app.get("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
   const user = await prisma.user.findFirst({
     where: { id: req.user!.id, orgId: req.user!.orgId },
   });
@@ -8781,7 +10928,7 @@ app.get("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPAT
   });
 });
 
-app.get("/me/appearance", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), async (req, res) => {
+app.get("/me/appearance", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
   const user = await prisma.user.findFirst({
     where: { id: req.user!.id, orgId: req.user!.orgId },
     select: APPEARANCE_SELECT,
@@ -8792,7 +10939,7 @@ app.get("/me/appearance", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "
 app.put(
   "/me/appearance",
   requireAuth,
-  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"),
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"),
   requireCsrf,
   async (req, res) => {
     const parsed = appearancePayloadSchema.safeParse(req.body);
@@ -8850,7 +10997,7 @@ app.put(
   }
 );
 
-app.patch("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"), requireCsrf, async (req, res) => {
+app.patch("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), requireCsrf, async (req, res) => {
   const schema = z.object({
     name: z.string().trim().min(1).max(120).optional(),
     phone: z.string().trim().max(32).optional().nullable(),
@@ -8875,7 +11022,7 @@ app.patch("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISP
 app.post(
   "/profile/photo",
   requireAuth,
-  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "DRIVER"),
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"),
   requireCsrf,
   upload.single("file"),
   async (req, res) => {
@@ -9138,7 +11285,15 @@ app.post("/driver/stops/:stopId/depart", requireAuth, requireCsrf, requireRole("
 });
 
 app.post("/driver/note", requireAuth, requireCsrf, requireRole("DRIVER"), async (req, res) => {
-  const schema = z.object({ loadId: z.string(), note: z.string().min(1).max(500) });
+  const schema = z.object({
+    loadId: z.string(),
+    note: z.string().min(1).max(500),
+    noteType: z.nativeEnum(NoteType).optional(),
+    priority: z.nativeEnum(NotePriority).optional(),
+    replyToNoteId: z.string().optional().nullable(),
+    reportIssue: z.boolean().optional(),
+    issueSeverity: z.nativeEnum(DispatchExceptionSeverity).optional(),
+  });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload" });
@@ -9170,35 +11325,84 @@ app.post("/driver/note", requireAuth, requireCsrf, requireRole("DRIVER"), async 
     res.status(403).json({ error: "Only the primary driver can add notes" });
     return;
   }
-  const note = await prisma.loadNote.create({
-    data: {
-      orgId: req.user!.orgId,
-      loadId: load.id,
-      text: parsed.data.note.trim(),
-      visibility: LoadNoteVisibility.NORMAL,
+  let noteType: NoteType;
+  try {
+    noteType = normalizeNoteTypeForRole({
+      role: req.user!.role as Role,
+      noteType: parsed.data.noteType ?? NoteType.OPERATIONAL,
       source: LoadNoteSource.DRIVER,
-      createdById: req.user!.id,
-    },
-    select: { id: true },
-  });
+    });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+    return;
+  }
+  let note: { id: string };
+  try {
+    const created = await createImmutableNote({
+      orgId: req.user!.orgId,
+      user: req.user!,
+      entityType: NoteEntityType.LOAD,
+      entityId: load.id,
+      body: parsed.data.note.trim(),
+      source: LoadNoteSource.DRIVER,
+      noteType,
+      priority: parsed.data.priority ?? NotePriority.NORMAL,
+      replyToNoteId: parsed.data.replyToNoteId ?? null,
+    });
+    note = { id: created.note.id };
+  } catch (error) {
+    const message = (error as Error).message;
+    if (message.endsWith("not found")) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    res.status(400).json({ error: message });
+    return;
+  }
+  let exceptionId: string | null = null;
+  if (parsed.data.reportIssue) {
+    const tripLink = await prisma.tripLoad.findFirst({
+      where: { loadId: load.id },
+      orderBy: { createdAt: "desc" },
+      select: { tripId: true },
+    });
+    const createdException = await prisma.dispatchException.create({
+      data: {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        tripId: tripLink?.tripId ?? null,
+        type: "DRIVER_REPORTED_ISSUE",
+        severity: parsed.data.issueSeverity ?? DispatchExceptionSeverity.WARNING,
+        owner: DispatchExceptionOwner.DISPATCH,
+        status: DispatchExceptionStatus.OPEN,
+        title: "Driver reported issue",
+        detail: parsed.data.note.trim(),
+        source: "driver.note",
+        createdById: req.user!.id,
+        meta: { loadNoteId: note.id, driverId: driver.id },
+      },
+      select: { id: true },
+    });
+    exceptionId = createdException.id;
+  }
   await createEvent({
     orgId: req.user!.orgId,
     loadId: load.id,
     userId: req.user!.id,
     type: EventType.DRIVER_NOTE,
     message: "Driver note added",
-    meta: { note: parsed.data.note, loadNoteId: note.id },
+    meta: { note: parsed.data.note, loadNoteId: note.id, exceptionId },
   });
   await logAudit({
     orgId: req.user!.orgId,
     userId: req.user!.id,
-    action: "DRIVER_NOTE",
+    action: parsed.data.reportIssue ? "DRIVER_ISSUE_REPORTED" : "DRIVER_NOTE",
     entity: "Load",
     entityId: load.id,
-    summary: `Driver note on ${load.loadNumber}`,
-    meta: { note: parsed.data.note, loadNoteId: note.id },
+    summary: parsed.data.reportIssue ? `Driver issue reported on ${load.loadNumber}` : `Driver note on ${load.loadNumber}`,
+    meta: { note: parsed.data.note, loadNoteId: note.id, exceptionId },
   });
-  res.json({ ok: true });
+  res.json({ ok: true, issueCreated: Boolean(exceptionId), exceptionId });
 });
 
 app.post("/driver/undo", requireAuth, requireCsrf, requireRole("DRIVER"), async (req, res) => {
@@ -9273,7 +11477,7 @@ app.post("/driver/undo", requireAuth, requireCsrf, requireRole("DRIVER"), async 
 app.post(
   "/tracking/load/:loadId/start",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "DRIVER"),
+  requireRole(...DISPATCH_TRACKING_ROLES),
   requireCsrf,
   async (req, res) => {
   const schema = z.object({ providerType: z.enum(["PHONE"]).optional() });
@@ -9282,7 +11486,7 @@ app.post(
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
-  if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "DRIVER"].includes(req.user!.role)) {
+  if (!DISPATCH_TRACKING_ROLES.includes(req.user!.role as (typeof DISPATCH_TRACKING_ROLES)[number])) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -9351,10 +11555,10 @@ app.post(
 app.post(
   "/tracking/load/:loadId/stop",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "DRIVER"),
+  requireRole(...DISPATCH_TRACKING_ROLES),
   requireCsrf,
   async (req, res) => {
-  if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "DRIVER"].includes(req.user!.role)) {
+  if (!DISPATCH_TRACKING_ROLES.includes(req.user!.role as (typeof DISPATCH_TRACKING_ROLES)[number])) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -9413,10 +11617,10 @@ app.post(
 app.post(
   "/tracking/load/:loadId/ping",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "DRIVER"),
+  requireRole(...DISPATCH_TRACKING_ROLES),
   requireCsrf,
   async (req, res) => {
-  if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "DRIVER"].includes(req.user!.role)) {
+  if (!DISPATCH_TRACKING_ROLES.includes(req.user!.role as (typeof DISPATCH_TRACKING_ROLES)[number])) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -9503,7 +11707,7 @@ app.post(
   res.json({ ping });
 });
 
-app.get("/tracking/load/:loadId/latest", requireAuth, requireRole("ADMIN", "DISPATCHER", "DRIVER"), async (req, res) => {
+app.get("/tracking/load/:loadId/latest", requireAuth, requireRole(...DISPATCH_TRACKING_ROLES), async (req, res) => {
   const load = await prisma.load.findFirst({
     where: { id: req.params.loadId, orgId: req.user!.orgId },
     include: { truck: true },
@@ -9583,7 +11787,7 @@ app.get("/tracking/load/:loadId/latest", requireAuth, requireRole("ADMIN", "DISP
   res.json({ session: activeSession, ping, error: samsaraError });
 });
 
-app.get("/tracking/load/:loadId/history", requireAuth, requireRole("ADMIN", "DISPATCHER", "DRIVER"), async (req, res) => {
+app.get("/tracking/load/:loadId/history", requireAuth, requireRole(...DISPATCH_TRACKING_ROLES), async (req, res) => {
   const load = await prisma.load.findFirst({
     where: { id: req.params.loadId, orgId: req.user!.orgId },
   });
@@ -9621,7 +11825,7 @@ app.get("/tracking/load/:loadId/history", requireAuth, requireRole("ADMIN", "DIS
 app.post(
   "/loads/:loadId/docs",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "BILLING"),
+  requireRole(...DISPATCH_EXECUTION_OR_BILLING_ROLES),
   requireCsrf,
   upload.single("file"),
   async (req, res) => {
@@ -10707,17 +12911,99 @@ app.post(
     }
 
     if (trailerId) {
-      await prisma.load.updateMany({
+      const memberships = await prisma.tripLoad.findMany({
         where: {
           orgId: req.user!.orgId,
-          deletedAt: null,
-          id: { in: touchedLoads },
+          loadId: { in: touchedLoads },
         },
-        data: {
-          trailerId,
-          assignedTrailerAt: new Date(),
+        select: {
+          loadId: true,
+          tripId: true,
+          trip: {
+            select: {
+              id: true,
+              status: true,
+              driverId: true,
+              truckId: true,
+              trailerId: true,
+            },
+          },
         },
       });
+      const membershipCount = new Map<string, number>();
+      for (const membership of memberships) {
+        membershipCount.set(membership.loadId, (membershipCount.get(membership.loadId) ?? 0) + 1);
+      }
+      const invalidLoadIds = touchedLoads.filter((id) => (membershipCount.get(id) ?? 0) !== 1);
+      if (invalidLoadIds.length > 0) {
+        await logLegacyExecutionMutationRejected({
+          orgId: req.user!.orgId,
+          userId: req.user!.id,
+          role: req.user!.role as Role,
+          route: "/integrations/yardos/plan-apply",
+          method: req.method,
+          loadId: null,
+          blockedFields: ["trailerId", "assignedTrailerAt"],
+          reason:
+            "Trailer assignment requires each load to belong to exactly one trip. Trip membership mismatch detected.",
+        });
+        res.status(400).json({
+          error: "Trailer assignment requires each load to belong to exactly one trip.",
+          invalidLoadIds,
+        });
+        return;
+      }
+      const tripIds = Array.from(new Set(memberships.map((membership) => membership.tripId)));
+      if (tripIds.length !== 1) {
+        await logLegacyExecutionMutationRejected({
+          orgId: req.user!.orgId,
+          userId: req.user!.id,
+          role: req.user!.role as Role,
+          route: "/integrations/yardos/plan-apply",
+          method: req.method,
+          loadId: null,
+          blockedFields: ["trailerId", "assignedTrailerAt"],
+          reason: "Trailer assignment attempted across multiple trips from a load-level integration path.",
+        });
+        res.status(400).json({
+          error: "Trailer assignment must target loads from one trip. Split by trip and retry.",
+          tripIds,
+        });
+        return;
+      }
+      const tripId = tripIds[0];
+      const tripBefore = memberships[0]?.trip;
+      if (!tripBefore || tripBefore.id !== tripId) {
+        res.status(404).json({ error: "Trip not found for selected loads" });
+        return;
+      }
+      if (tripBefore.trailerId !== trailerId) {
+        const updatedTrip = await prisma.trip.update({
+          where: { id: tripId },
+          data: { trailerId },
+          select: { id: true, status: true, driverId: true, truckId: true, trailerId: true },
+        });
+        await syncTripExecutionToLoadMirrors({
+          orgId: req.user!.orgId,
+          tripId: updatedTrip.id,
+        });
+        await syncTripAssetStatuses({
+          orgId: req.user!.orgId,
+          tripId: updatedTrip.id,
+          previous: {
+            status: tripBefore.status,
+            driverId: tripBefore.driverId,
+            truckId: tripBefore.truckId,
+            trailerId: tripBefore.trailerId,
+          },
+          next: {
+            status: updatedTrip.status,
+            driverId: updatedTrip.driverId,
+            truckId: updatedTrip.truckId,
+            trailerId: updatedTrip.trailerId,
+          },
+        });
+      }
     }
 
     const summary = summarizeYardOsPlan({
@@ -13609,6 +15895,191 @@ app.get("/admin/settings", requireAuth, requireRole("ADMIN"), async (req, res) =
   res.json({ settings });
 });
 
+app.get("/admin/inbound-email-aliases", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const aliases = await prisma.inboundEmailAlias.findMany({
+    where: { orgId: req.user!.orgId },
+    orderBy: [{ isActive: "desc" }, { createdAt: "desc" }],
+    select: {
+      id: true,
+      address: true,
+      isActive: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  res.json({ aliases });
+});
+
+app.post("/admin/inbound-email-aliases", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    address: z.string().trim().email(),
+    isActive: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+
+  const normalizedAddress = parsed.data.address.trim().toLowerCase();
+  const nextIsActive = parsed.data.isActive ?? true;
+  const existing = await prisma.inboundEmailAlias.findFirst({
+    where: { address: normalizedAddress },
+    select: { id: true, orgId: true, address: true, isActive: true },
+  });
+
+  if (existing && existing.orgId !== req.user!.orgId) {
+    res.status(409).json({ error: "Alias address is already used by another organization" });
+    return;
+  }
+
+  if (existing && existing.orgId === req.user!.orgId) {
+    const alias =
+      existing.isActive === nextIsActive
+        ? await prisma.inboundEmailAlias.findFirst({
+            where: { id: existing.id, orgId: req.user!.orgId },
+            select: {
+              id: true,
+              address: true,
+              isActive: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          })
+        : await prisma.inboundEmailAlias.update({
+            where: { id: existing.id },
+            data: { isActive: nextIsActive },
+            select: {
+              id: true,
+              address: true,
+              isActive: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          });
+    res.json({ alias });
+    return;
+  }
+
+  try {
+    const alias = await prisma.inboundEmailAlias.create({
+      data: {
+        orgId: req.user!.orgId,
+        address: normalizedAddress,
+        isActive: nextIsActive,
+      },
+      select: {
+        id: true,
+        address: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    res.json({ alias });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      res.status(409).json({ error: "Alias address already exists" });
+      return;
+    }
+    sendServerError(res, "Failed to create inbound email alias", error);
+  }
+});
+
+app.patch("/admin/inbound-email-aliases/:id", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    address: z.string().trim().email().optional(),
+    isActive: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  if (parsed.data.address === undefined && parsed.data.isActive === undefined) {
+    res.status(400).json({ error: "No updates provided" });
+    return;
+  }
+
+  const existing = await prisma.inboundEmailAlias.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+    select: { id: true },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Inbound email alias not found" });
+    return;
+  }
+
+  const updates: Prisma.InboundEmailAliasUpdateInput = {};
+  if (parsed.data.address !== undefined) updates.address = parsed.data.address.trim().toLowerCase();
+  if (parsed.data.isActive !== undefined) updates.isActive = parsed.data.isActive;
+
+  try {
+    const alias = await prisma.inboundEmailAlias.update({
+      where: { id: existing.id },
+      data: updates,
+      select: {
+        id: true,
+        address: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    res.json({ alias });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      res.status(409).json({ error: "Alias address already exists" });
+      return;
+    }
+    sendServerError(res, "Failed to update inbound email alias", error);
+  }
+});
+
+app.get("/admin/inbound-emails", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit : "50";
+  const limit = Math.min(200, Math.max(1, parseInt(limitRaw, 10) || 50));
+  const rows = await prisma.inboundEmail.findMany({
+    where: { orgId: req.user!.orgId },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    include: {
+      alias: { select: { id: true, address: true } },
+      attachments: {
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          filename: true,
+          contentType: true,
+          byteSize: true,
+          sha256: true,
+          storageKey: true,
+          deduped: true,
+          loadConfirmationDocumentId: true,
+          createdAt: true,
+        },
+      },
+    },
+  });
+  res.json({
+    emails: rows.map((row) => ({
+      id: row.id,
+      provider: row.provider,
+      status: row.status,
+      fromAddress: row.fromAddress,
+      toAddresses: row.toAddresses,
+      subject: row.subject,
+      messageId: row.messageId,
+      messageDate: row.messageDate,
+      dedupedAttachmentCount: row.dedupedAttachmentCount,
+      createdLoadConfirmationCount: row.createdLoadConfirmationCount,
+      createdAt: row.createdAt,
+      alias: row.alias,
+      attachments: row.attachments,
+    })),
+  });
+});
+
 app.delete("/admin/organizations/:orgId", requireAuth, requireCsrf, async (req, res) => {
   const allowlist = parseDeleteOrgAllowlist(process.env.ADMIN_DELETE_ORG_ALLOWLIST);
   const result = await performOrganizationDelete({
@@ -13899,7 +16370,7 @@ app.post("/admin/teams/assign", requireAuth, requireCsrf, requireRole("ADMIN"), 
   }
 });
 
-app.post("/teams/assign-loads", requireAuth, requireCsrf, requireRole("ADMIN", "HEAD_DISPATCHER"), async (req, res) => {
+app.post("/teams/assign-loads", requireAuth, requireCsrf, requireRole("ADMIN", "HEAD_DISPATCHER", "OPS_MANAGER"), async (req, res) => {
   if (!canAssignTeams(req.user!.role as Role)) {
     res.status(403).json({ error: "Forbidden" });
     return;
@@ -14034,6 +16505,7 @@ app.put("/admin/settings", requireAuth, requireCsrf, requireRole("ADMIN"), async
     missingPodAfterMinutes: z.number(),
     reminderFrequencyMinutes: z.number(),
     requireRateConBeforeDispatch: z.boolean().optional(),
+    inboundRateconEmailEnabled: z.boolean().optional(),
     trackingPreference: z.enum(["MANUAL", "SAMSARA", "MOTIVE", "OTHER"]).optional(),
     settlementSchedule: z.enum(["WEEKLY", "BIWEEKLY", "SEMI_MONTHLY", "MONTHLY"]).optional(),
     settlementTemplate: z
@@ -14089,6 +16561,7 @@ app.put("/admin/settings", requireAuth, requireCsrf, requireRole("ADMIN"), async
       invoiceTermsDays: existingSettings.invoiceTermsDays,
       requiredDocs: existingSettings.requiredDocs,
       requireRateConBeforeDispatch: existingSettings.requireRateConBeforeDispatch,
+      inboundRateconEmailEnabled: existingSettings.inboundRateconEmailEnabled,
       trackingPreference: existingSettings.trackingPreference,
       settlementSchedule: existingSettings.settlementSchedule,
     },
@@ -14101,6 +16574,7 @@ app.put("/admin/settings", requireAuth, requireCsrf, requireRole("ADMIN"), async
       invoiceTermsDays: settings.invoiceTermsDays,
       requiredDocs: settings.requiredDocs,
       requireRateConBeforeDispatch: settings.requireRateConBeforeDispatch,
+      inboundRateconEmailEnabled: settings.inboundRateconEmailEnabled,
       trackingPreference: settings.trackingPreference,
       settlementSchedule: settings.settlementSchedule,
     },
@@ -14418,6 +16892,11 @@ app.post("/onboarding/basics", requireAuth, requireCsrf, requireRole("ADMIN"), a
     res.status(400).json({ error: "Invalid payload" });
     return;
   }
+  const timezone = normalizeOptionalText(parsed.data.timezone);
+  if (timezone && !isValidTimeZone(timezone)) {
+    res.status(400).json({ error: "Invalid timezone." });
+    return;
+  }
   const existingSettings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
   const org = await prisma.organization.update({
     where: { id: req.user!.orgId },
@@ -14455,13 +16934,13 @@ app.post("/onboarding/basics", requireAuth, requireCsrf, requireRole("ADMIN"), a
       operatingMode: parsed.data.operatingMode as any,
       trackingPreference: "MANUAL",
       settlementSchedule: "WEEKLY",
-      timezone: parsed.data.timezone ?? null,
+      timezone,
     },
     update: {
       companyDisplayName: parsed.data.displayName ?? parsed.data.legalName,
       currency: parsed.data.currency,
       operatingMode: parsed.data.operatingMode as any,
-      timezone: parsed.data.timezone ?? null,
+      timezone,
     },
   });
   const entityType =
@@ -15088,7 +17567,7 @@ app.get("/admin/users", requireAuth, requireRole("ADMIN"), async (req, res) => {
 
 app.patch("/admin/members/:memberId/role", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
-    role: z.enum(["DISPATCHER", "HEAD_DISPATCHER", "BILLING"]),
+    role: z.enum(["DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"]),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -15775,8 +18254,8 @@ app.post("/imports/preview", requireAuth, async (req, res) => {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         errors.push("Invalid email");
       }
-      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(role)) {
-        errors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, or BILLING");
+      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"].includes(role)) {
+        errors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, OPS_MANAGER, BILLING, SAFETY, or SUPPORT");
       }
       return { rowNumber, data: { email, role, name, phone, timezone }, warnings, errors };
     }
@@ -16080,8 +18559,8 @@ app.post("/imports/commit", requireAuth, async (req, res) => {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         rowErrors.push("Invalid email");
       }
-      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(role)) {
-        rowErrors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, or BILLING");
+      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"].includes(role)) {
+        rowErrors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, OPS_MANAGER, BILLING, SAFETY, or SUPPORT");
       }
       if (rowErrors.length > 0) {
         errors.push({ rowNumber, errors: rowErrors });
@@ -16327,7 +18806,7 @@ async function createInvite(params: { orgId: string; email: string; role: Role; 
 app.post("/admin/invites", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
-    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]),
+    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -16879,7 +19358,7 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
   const schema = z.object({
     email: z.string().email(),
     name: z.string().optional(),
-    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "DRIVER"]),
+    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]),
     phone: z.string().optional(),
     timezone: z.string().optional(),
   });
