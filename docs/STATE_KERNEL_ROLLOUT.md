@@ -11,6 +11,7 @@ Use these flags on `api`:
 
 - `STATE_KERNEL_SHADOW`
 - `STATE_KERNEL_ENFORCE`
+- `STATE_KERNEL_ENFORCE_ORGS`
 - `STATE_KERNEL_DIVERGENCE_LOG`
 
 Expected values by phase:
@@ -21,6 +22,9 @@ Expected values by phase:
 | Phase B dry run hardening | `true` | `false` | `true` |
 | Phase C controlled enforce (pilot org) | `true` | `true` | `true` |
 | Phase C+ broad enforce | `true` | `true` | `true` |
+
+`STATE_KERNEL_ENFORCE_ORGS` must be a comma-separated list of org IDs for pilot enforcement scope.
+If `STATE_KERNEL_ENFORCE=true` and `STATE_KERNEL_ENFORCE_ORGS` is empty, enforcement remains disabled.
 
 ## 3) Covered Mutation Paths (current)
 
@@ -49,12 +53,22 @@ Shadow comparison is wired in:
 1. Deploy code with flags present and set:
    - `STATE_KERNEL_SHADOW=true`
    - `STATE_KERNEL_ENFORCE=false`
+   - `STATE_KERNEL_ENFORCE_ORGS=`
    - `STATE_KERNEL_DIVERGENCE_LOG=true`
 2. Run parity smoke tests in pre-prod or prod-local.
 3. Observe divergence logs for at least one full dispatch + billing cycle.
 4. Triage top divergence routes.
 5. Close route-level divergence gaps, then repeat.
 6. Only after stable parity, pilot `STATE_KERNEL_ENFORCE=true` on controlled org scope.
+
+Pilot example:
+
+```bash
+STATE_KERNEL_SHADOW=true
+STATE_KERNEL_ENFORCE=true
+STATE_KERNEL_ENFORCE_ORGS=cmluiq46j0000c8vh3s1fzz5p
+STATE_KERNEL_DIVERGENCE_LOG=true
+```
 
 ## 5) Verification Commands
 

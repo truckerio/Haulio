@@ -254,7 +254,14 @@ const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 
 const DEV_ERRORS = process.env.NODE_ENV !== "production";
 const DEFAULT_TEAM_NAME = "Default";
 const STATE_KERNEL_SHADOW = process.env.STATE_KERNEL_SHADOW === "true";
+const STATE_KERNEL_ENFORCE = process.env.STATE_KERNEL_ENFORCE === "true";
 const STATE_KERNEL_DIVERGENCE_LOG = process.env.STATE_KERNEL_DIVERGENCE_LOG === "true";
+const STATE_KERNEL_ENFORCE_ORGS = new Set(
+  String(process.env.STATE_KERNEL_ENFORCE_ORGS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
 
 const APPEARANCE_DEFAULTS = {
   theme: AppearanceTheme.SYSTEM,
@@ -619,6 +626,12 @@ type LegacyLoadKernelSnapshot = {
   podVerifiedAt: Date | null;
 };
 
+function isKernelEnforceEnabledForOrg(orgId: string) {
+  if (!STATE_KERNEL_ENFORCE) return false;
+  if (STATE_KERNEL_ENFORCE_ORGS.size === 0) return false;
+  return STATE_KERNEL_ENFORCE_ORGS.has(orgId);
+}
+
 async function maybeLogLoadKernelShadow(params: {
   orgId: string;
   userId: string;
@@ -657,6 +670,7 @@ async function maybeLogLoadKernelShadow(params: {
     kernelAfter: kernelResult.candidateState,
   });
   if (comparison.matches || !STATE_KERNEL_DIVERGENCE_LOG) return;
+  const enforceActive = isKernelEnforceEnabledForOrg(params.orgId);
 
   await logAudit({
     orgId: params.orgId,
@@ -686,8 +700,36 @@ async function maybeLogLoadKernelShadow(params: {
       legacyAfter: comparison.normalizedLegacyAfter,
       kernelAfter: comparison.kernelAfter,
       diffKeys: comparison.diffKeys,
+      enforceActive,
     },
   });
+
+  if (enforceActive) {
+    await logAudit({
+      orgId: params.orgId,
+      userId: params.userId,
+      action: "STATE_KERNEL_ENFORCE_VIOLATION",
+      entity: "Load",
+      entityId: params.loadId,
+      summary: `Kernel enforce violation candidate on ${params.method} ${params.route}`,
+      meta: {
+        route: params.route,
+        method: params.method,
+        diffKeys: comparison.diffKeys,
+        userRole: params.userRole ?? null,
+        orgId: params.orgId,
+        timestamp: new Date().toISOString(),
+      },
+      before: {
+        legacy: params.before,
+        kernel: beforeState,
+      },
+      after: {
+        legacy: comparison.normalizedLegacyAfter,
+        kernel: comparison.kernelAfter,
+      },
+    });
+  }
 }
 
 async function resolveNoteEntity(params: {
@@ -2236,6 +2278,14 @@ function extractMilesFromUpdateInput(value: Prisma.LoadUpdateInput["miles"]) {
   return undefined;
 }
 
+function extractLoadUpdateValue<T>(value: unknown): T | undefined {
+  if (value === undefined) return undefined;
+  if (value && typeof value === "object" && "set" in (value as Record<string, unknown>)) {
+    return (value as { set?: T }).set;
+  }
+  return value as T;
+}
+
 async function transitionLoadStatus(params: {
   load: LoadStatusRecord;
   nextStatus: LoadStatus;
@@ -2249,7 +2299,8 @@ async function transitionLoadStatus(params: {
   if (params.load.status === params.nextStatus) {
     return params.load;
   }
-  const kernelShadowBefore = STATE_KERNEL_SHADOW
+  const kernelEnforceActive = isKernelEnforceEnabledForOrg(params.orgId);
+  const kernelShadowBefore = STATE_KERNEL_SHADOW || kernelEnforceActive
     ? await prisma.load.findUnique({
       where: { id: params.load.id },
       select: { status: true, billingStatus: true, podVerifiedAt: true },
@@ -2307,6 +2358,66 @@ async function transitionLoadStatus(params: {
       if (!params.data || !Object.prototype.hasOwnProperty.call(params.data, "paidMilesSource")) {
         updateData.paidMilesSource = PayableMilesSource.PLANNED;
       }
+    }
+  }
+  if (kernelEnforceActive && kernelShadowBefore) {
+    const currentKernelState = buildKernelStateFromLegacyLoad({
+      status: kernelShadowBefore.status,
+      billingStatus: kernelShadowBefore.billingStatus,
+      podVerifiedAt: kernelShadowBefore.podVerifiedAt,
+    });
+    const nextBillingStatus =
+      extractLoadUpdateValue<BillingStatus | null>((updateData as Record<string, unknown>).billingStatus) ??
+      kernelShadowBefore.billingStatus;
+    const nextPodVerifiedAtUpdate = extractLoadUpdateValue<Date | null>(
+      (updateData as Record<string, unknown>).podVerifiedAt
+    );
+    const nextPodVerifiedAt =
+      nextPodVerifiedAtUpdate === undefined ? kernelShadowBefore.podVerifiedAt : nextPodVerifiedAtUpdate;
+    const nextKernelState = buildKernelStateFromLegacyLoad({
+      status: params.nextStatus,
+      billingStatus: nextBillingStatus ?? kernelShadowBefore.billingStatus,
+      podVerifiedAt: nextPodVerifiedAt ?? null,
+    });
+    const kernelPatch: Partial<typeof nextKernelState> = {};
+    if (currentKernelState.execution !== nextKernelState.execution) kernelPatch.execution = nextKernelState.execution;
+    if (currentKernelState.doc !== nextKernelState.doc) kernelPatch.doc = nextKernelState.doc;
+    if (currentKernelState.finance !== nextKernelState.finance) kernelPatch.finance = nextKernelState.finance;
+    if (currentKernelState.compliance !== nextKernelState.compliance) kernelPatch.compliance = nextKernelState.compliance;
+    const enforceResult = applyKernelTransition({
+      authority: "LOAD",
+      current: currentKernelState,
+      next: kernelPatch,
+      context: {
+        actorId: params.userId,
+        actorRole: params.role,
+        reason: "enforce-transition",
+        allowUnsafe: false,
+      },
+    });
+    if (!enforceResult.ok) {
+      const violation = enforceResult.violations.find((entry) => entry.severity === "ERROR") ?? enforceResult.violations[0];
+      await logAudit({
+        orgId: params.orgId,
+        userId: params.userId,
+        action: "STATE_KERNEL_ENFORCE_BLOCKED",
+        entity: "Load",
+        entityId: params.load.id,
+        summary: `Kernel enforcement blocked transition ${params.load.status} -> ${params.nextStatus}`,
+        meta: {
+          route: "transitionLoadStatus",
+          method: "INTERNAL",
+          violationCode: violation?.code ?? null,
+          violationMessage: violation?.message ?? null,
+          orgId: params.orgId,
+          userRole: params.role,
+        },
+        before: { legacy: kernelShadowBefore, kernel: currentKernelState },
+        after: { kernelCandidate: nextKernelState, violations: enforceResult.violations },
+      });
+      throw new Error(
+        violation?.message ?? `Kernel enforcement blocked transition ${params.load.status} -> ${params.nextStatus}`
+      );
     }
   }
   const updated = await prisma.load.update({
