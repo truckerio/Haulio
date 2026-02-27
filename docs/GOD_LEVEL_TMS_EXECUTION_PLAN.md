@@ -43,7 +43,7 @@ Use this table as the top-level PM tracker.
 | A. Canonical state contract |  |  |  | In Progress | `docs/STATE_KERNEL_SPEC.md`, `docs/STATE_AUTHORITY_MATRIX.md`, `apps/api/src/lib/state-kernel/*` |
 | B. Capability contract + auth parity |  |  |  | In Progress | `apps/api/src/lib/capabilities.ts`, `apps/web/lib/capabilities.ts`, authz/capability tests |
 | C. State kernel shadow rollout |  |  |  | Done | `docs/STATE_KERNEL_ROLLOUT.md`, `apps/api/src/index.ts`, `apps/api/scripts/smoke-kernel-first-wave.ts`, `pnpm ci:kernel:phase3` |
-| D. Workbench UI hardening |  |  |  | In Progress | dispatch/trip/load surface commits + nav/dispatch UI contracts (`apps/web/lib/navigation.test.ts`, `apps/web/components/dispatch/dispatch-grid-contract.test.ts`, `apps/web/components/dispatch/timeline-utils.test.ts`) |
+| D. Workbench UI hardening |  |  |  | Done | dispatch/trip/load role-first contracts + tests (`apps/web/lib/navigation.test.ts`, `apps/web/components/dispatch/dispatch-grid-contract.test.ts`, `apps/web/components/dispatch/timeline-utils.test.ts`, `apps/web/app/trips/trip-cockpit-layout.test.ts`, `apps/web/app/loads/load-overview-layout.test.ts`) |
 | E. Enforcement + CI drift gates |  |  |  | In Progress | phase pass docs + ongoing drift cleanup |
 
 ---
@@ -248,6 +248,8 @@ Gate C Status: PASS (pilot org `cmluiq46j0000c8vh3s1fzz5p`, February 27, 2026)
 - Dispatch, trip, and load pages align with role-first scanning behavior.
 - No unauthorized actions visible on primary surfaces.
 - Role landing and nav reflect capability contract.
+
+Gate D Status: PASS (February 27, 2026)
 
 ### Required Tests/Checks
 ```bash
