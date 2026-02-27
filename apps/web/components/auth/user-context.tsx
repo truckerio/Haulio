@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { apiFetch } from "@/lib/api";
+import { getRoleCapabilities } from "@/lib/capabilities";
 
 export type CurrentUser = {
   id: string;
@@ -17,9 +18,10 @@ export type CurrentUser = {
 
 type UserContextValue = {
   user: CurrentUser | null;
-  org: { id: string; name: string; companyDisplayName?: string | null } | null;
+  org: { id: string; name: string; companyDisplayName?: string | null; operatingMode?: string | null } | null;
   loading: boolean;
   error: string | null;
+  capabilities: ReturnType<typeof getRoleCapabilities>;
   refresh: () => void;
 };
 
@@ -28,7 +30,7 @@ const UserContext = createContext<UserContextValue | null>(null);
 export function UserProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [user, setUser] = useState<CurrentUser | null>(null);
-  const [org, setOrg] = useState<{ id: string; name: string; companyDisplayName?: string | null } | null>(null);
+  const [org, setOrg] = useState<{ id: string; name: string; companyDisplayName?: string | null; operatingMode?: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,7 +41,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
       // Route protection is handled by middleware; here we just hydrate if a session exists.
       const data = await apiFetch<{
         user: CurrentUser;
-        org?: { id: string; name: string; companyDisplayName?: string | null } | null;
+        org?: { id: string; name: string; companyDisplayName?: string | null; operatingMode?: string | null } | null;
       }>("/auth/me", { skipAuthRedirect: true });
       setUser(data.user ?? null);
       setOrg(data.org ?? null);
@@ -74,7 +76,11 @@ export function UserProvider({ children }: { children: ReactNode }) {
     }
   }, [pathname, user, refresh]);
 
-  const value = useMemo(() => ({ user, org, loading, error, refresh }), [user, org, loading, error, refresh]);
+  const capabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
+  const value = useMemo(
+    () => ({ user, org, loading, error, capabilities, refresh }),
+    [user, org, loading, error, capabilities, refresh]
+  );
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }
@@ -86,6 +92,7 @@ export function useUser() {
       org: null,
       loading: true,
       error: null,
+      capabilities: getRoleCapabilities(null),
       refresh: () => {},
     }
   );

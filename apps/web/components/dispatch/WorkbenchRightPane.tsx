@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -17,7 +17,10 @@ import { Badge } from "@/components/ui/badge";
 import { SuggestedAssignments, type AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
 import { formatDocStatusLabel } from "@/lib/status-format";
 import { apiFetch } from "@/lib/api";
+import { isForbiddenError } from "@/lib/capabilities";
+import { formatDateTime as formatDateTime24 } from "@/lib/date-time";
 import { AddLegDrawer } from "@/components/dispatch/AddLegDrawer";
+import type { DispatchInspectorFocusSection } from "@/components/dispatch/DispatchSpreadsheetGrid";
 
 export type WorkbenchAssignmentProps = {
   form: { driverId: string; truckId: string; trailerId: string };
@@ -72,6 +75,14 @@ type WorkbenchLoadSummary = {
     truck?: { id: string; unit: string } | null;
     trailer?: { id: string; unit: string } | null;
   };
+  exceptions?: Array<{
+    id: string;
+    title?: string;
+    detail?: string | null;
+    severity?: "WARNING" | "BLOCKER";
+    status?: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+    owner?: "DISPATCH" | "DRIVER" | "BILLING" | "CUSTOMER" | "SYSTEM";
+  }> | null;
 };
 
 const stopStatusLabel = (stop: any) => {
@@ -89,10 +100,7 @@ const stopStatusTone = (stop: any) => {
 };
 
 const formatDateTime = (value?: string | null) => {
-  if (!value) return "-";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "-";
-  return parsed.toLocaleString();
+  return formatDateTime24(value, "-");
 };
 
 const buildOptions = <T extends { id: string; name?: string | null; unit?: string | null; reason?: string | null }>(
@@ -103,6 +111,17 @@ const buildOptions = <T extends { id: string; name?: string | null; unit?: strin
   if (showAll) return [...available, ...unavailable];
   return available;
 };
+
+const TIMELINE_FILTER_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "note", label: "Notes" },
+  { value: "system", label: "System" },
+  { value: "exception", label: "Exceptions" },
+  { value: "document", label: "Documents" },
+] as const;
+
+const NOTE_TYPE_OPTIONS = ["OPERATIONAL", "BILLING", "COMPLIANCE", "INTERNAL", "CUSTOMER_VISIBLE"] as const;
+const NOTE_PRIORITY_OPTIONS = ["NORMAL", "IMPORTANT", "ALERT"] as const;
 
 export function WorkbenchRightPane({
   load,
@@ -125,6 +144,8 @@ export function WorkbenchRightPane({
   canStartTracking,
   yardOsLaunch,
   teamAssignment,
+  focusSection,
+  focusNonce,
 }: {
   load: any;
   loadSummary: WorkbenchLoadSummary | null;
@@ -148,6 +169,8 @@ export function WorkbenchRightPane({
     href: string;
     onOpen: () => void;
   };
+  focusSection?: DispatchInspectorFocusSection | null;
+  focusNonce?: number;
   teamAssignment?: {
     enabled: boolean;
     teams: Array<{ id: string; name: string }>;
@@ -157,12 +180,29 @@ export function WorkbenchRightPane({
     error?: string | null;
   };
 }) {
-  const [activeTab, setActiveTab] = useState<"stops" | "documents" | "tracking">("stops");
+  const [activeTab, setActiveTab] = useState<"stops" | "documents" | "tracking" | "timeline" | "exceptions">("stops");
   const [assignmentExpanded, setAssignmentExpanded] = useState(false);
   const [trackingError, setTrackingError] = useState<string | null>(null);
+  const [trackingRestricted, setTrackingRestricted] = useState(false);
   const [showMoreSuggestions, setShowMoreSuggestions] = useState(false);
+  const [timelineItems, setTimelineItems] = useState<any[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [timelineFilter, setTimelineFilter] = useState<(typeof TIMELINE_FILTER_OPTIONS)[number]["value"]>("all");
+  const [noteBody, setNoteBody] = useState("");
+  const [noteType, setNoteType] = useState<(typeof NOTE_TYPE_OPTIONS)[number]>("OPERATIONAL");
+  const [notePriority, setNotePriority] = useState<(typeof NOTE_PRIORITY_OPTIONS)[number]>("NORMAL");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteStatus, setNoteStatus] = useState<string | null>(null);
   const readOnlyHint = readOnly ? "Read-only in History view" : undefined;
   const primaryTrip = load?.tripLoads?.[0]?.trip ?? null;
+  const assignmentAnchorRef = useRef<HTMLDivElement | null>(null);
+  const stopsAnchorRef = useRef<HTMLDivElement | null>(null);
+  const docsAnchorRef = useRef<HTMLDivElement | null>(null);
+  const trackingAnchorRef = useRef<HTMLDivElement | null>(null);
+  const timelineAnchorRef = useRef<HTMLDivElement | null>(null);
+  const exceptionsAnchorRef = useRef<HTMLDivElement | null>(null);
+  const timelineLoadId = loadSummary?.id ?? load?.id ?? null;
 
   const assignedSummary = assignment.assignedSummary ?? {
     driverName: loadSummary?.assignment?.driver?.name ?? null,
@@ -186,6 +226,72 @@ export function WorkbenchRightPane({
   useEffect(() => {
     setShowMoreSuggestions(false);
   }, [load?.id]);
+
+  useEffect(() => {
+    setTrackingRestricted(false);
+  }, [load?.id]);
+
+  useEffect(() => {
+    if (!focusSection) return;
+    const scrollToRef = (target: { current: HTMLDivElement | null }) => {
+      window.requestAnimationFrame(() => {
+        target.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      });
+    };
+    if (focusSection === "assignment") {
+      setAssignmentExpanded(true);
+      scrollToRef(assignmentAnchorRef);
+      return;
+    }
+    if (focusSection === "documents") {
+      setActiveTab("documents");
+      scrollToRef(docsAnchorRef);
+      return;
+    }
+    if (focusSection === "tracking") {
+      setActiveTab("tracking");
+      scrollToRef(trackingAnchorRef);
+      return;
+    }
+    if (focusSection === "exceptions") {
+      setActiveTab("exceptions");
+      scrollToRef(exceptionsAnchorRef);
+      return;
+    }
+    setActiveTab("stops");
+    scrollToRef(stopsAnchorRef);
+  }, [focusNonce, focusSection, load?.id]);
+
+  useEffect(() => {
+    setTimelineItems([]);
+    setTimelineError(null);
+    setTimelineLoading(false);
+    setTimelineFilter("all");
+    setNoteBody("");
+    setNoteType("OPERATIONAL");
+    setNotePriority("NORMAL");
+    setNoteStatus(null);
+  }, [timelineLoadId]);
+
+  const loadTimeline = useCallback(async () => {
+    if (!timelineLoadId) return;
+    setTimelineLoading(true);
+    setTimelineError(null);
+    try {
+      const data = await apiFetch<{ timeline?: any[] }>(`/loads/${timelineLoadId}/timeline`);
+      setTimelineItems(Array.isArray(data.timeline) ? data.timeline : []);
+    } catch (error) {
+      setTimelineError((error as Error).message);
+    } finally {
+      setTimelineLoading(false);
+    }
+  }, [timelineLoadId]);
+
+  useEffect(() => {
+    if (activeTab !== "timeline") return;
+    if (!timelineLoadId) return;
+    loadTimeline();
+  }, [activeTab, loadTimeline, timelineLoadId]);
 
   const laneLabel = useMemo(() => {
     const shipper = loadSummary?.route?.shipperCity;
@@ -218,6 +324,53 @@ export function WorkbenchRightPane({
 
   const showSuggestions = assignmentExpanded || !isAssigned;
   const suggestionLimit = showMoreSuggestions ? 3 : 1;
+  const visibleTimelineItems = useMemo(() => {
+    const filtered = timelineItems.filter((item) => {
+      if (timelineFilter === "all") return true;
+      if (timelineFilter === "note") return item?.kind === "NOTE";
+      if (timelineFilter === "system") return item?.kind === "SYSTEM_EVENT";
+      if (timelineFilter === "exception") return item?.kind === "EXCEPTION";
+      if (timelineFilter === "document") return item?.kind === "DOCUMENT_EVENT";
+      return true;
+    });
+    return filtered;
+  }, [timelineFilter, timelineItems]);
+  const pinnedNotes = useMemo(
+    () => visibleTimelineItems.filter((item) => item?.kind === "NOTE" && Boolean(item?.payload?.pinned)),
+    [visibleTimelineItems]
+  );
+  const timelineEvents = useMemo(
+    () => visibleTimelineItems.filter((item) => !(item?.kind === "NOTE" && Boolean(item?.payload?.pinned))),
+    [visibleTimelineItems]
+  );
+  const submitTimelineNote = useCallback(async () => {
+    const trimmed = noteBody.trim();
+    if (!timelineLoadId || !trimmed) return;
+    setNoteSaving(true);
+    setNoteStatus(null);
+    setTimelineError(null);
+    try {
+      await apiFetch(`/loads/${timelineLoadId}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          body: trimmed,
+          noteType,
+          priority: notePriority,
+        }),
+      });
+      setNoteBody("");
+      setNoteType("OPERATIONAL");
+      setNotePriority("NORMAL");
+      setNoteStatus("Note added.");
+      await loadTimeline();
+      onRefresh();
+    } catch (error) {
+      setTimelineError((error as Error).message);
+    } finally {
+      setNoteSaving(false);
+    }
+  }, [loadTimeline, noteBody, notePriority, noteType, onRefresh, timelineLoadId]);
 
   return (
     <div className="relative">
@@ -310,7 +463,7 @@ export function WorkbenchRightPane({
           </div>
         ) : null}
 
-        <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
+        <div ref={assignmentAnchorRef} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Trip assignment</div>
@@ -518,12 +671,14 @@ export function WorkbenchRightPane({
             { label: "Stops", value: "stops" },
             { label: "Documents", value: "documents" },
             { label: "Tracking", value: "tracking" },
+            { label: "Timeline", value: "timeline" },
+            { label: "Exceptions", value: "exceptions" },
           ]}
-          onChange={(value) => setActiveTab(value as "stops" | "documents" | "tracking")}
+          onChange={(value) => setActiveTab(value as "stops" | "documents" | "tracking" | "timeline" | "exceptions")}
         />
 
         {activeTab === "stops" ? (
-          <div className="mt-4 space-y-3">
+          <div ref={stopsAnchorRef} className="mt-4 space-y-3">
             {legAddedNote ? (
               <div className="text-xs font-medium text-[color:var(--color-success)]">{legAddedNote}</div>
             ) : null}
@@ -612,7 +767,7 @@ export function WorkbenchRightPane({
         ) : null}
 
         {activeTab === "documents" ? (
-          <div className="mt-4 space-y-3">
+          <div ref={docsAnchorRef} className="mt-4 space-y-3">
             <SectionHeader title="Documents" subtitle="POD and RateCon status" />
             <div className="grid gap-2">
               {(load?.docs ?? []).map((doc: any) => (
@@ -635,13 +790,13 @@ export function WorkbenchRightPane({
         ) : null}
 
         {activeTab === "tracking" ? (
-          <div className="mt-4 space-y-3">
+          <div ref={trackingAnchorRef} className="mt-4 space-y-3">
             <SectionHeader title="Tracking" subtitle="Latest ping and status" />
             <Card className="space-y-2">
               <div className="text-sm text-[color:var(--color-text-muted)]">Status: {trackingState}</div>
               <div className="text-sm text-[color:var(--color-text-muted)]">Last ping: {lastPingAt ? formatDateTime(lastPingAt) : "-"}</div>
               {trackingError ? <div className="text-xs text-[color:var(--color-danger)]">{trackingError}</div> : null}
-              {trackingState === "OFF" && canStartTracking ? (
+              {trackingState === "OFF" && canStartTracking && !trackingRestricted ? (
                 <Button
                   size="sm"
                   disabled={readOnly}
@@ -657,6 +812,9 @@ export function WorkbenchRightPane({
                       });
                       onRefresh();
                     } catch (err) {
+                      if (isForbiddenError(err)) {
+                        setTrackingRestricted(true);
+                      }
                       setTrackingError((err as Error).message);
                     }
                   }}
@@ -664,7 +822,7 @@ export function WorkbenchRightPane({
                   Start tracking
                 </Button>
               ) : null}
-              {trackingState === "ON" && canStartTracking ? (
+              {trackingState === "ON" && canStartTracking && !trackingRestricted ? (
                 <Button
                   size="sm"
                   variant="secondary"
@@ -677,6 +835,9 @@ export function WorkbenchRightPane({
                       await apiFetch(`/tracking/load/${load.id}/stop`, { method: "POST" });
                       onRefresh();
                     } catch (err) {
+                      if (isForbiddenError(err)) {
+                        setTrackingRestricted(true);
+                      }
                       setTrackingError((err as Error).message);
                     }
                   }}
@@ -684,7 +845,152 @@ export function WorkbenchRightPane({
                   Stop tracking
                 </Button>
               ) : null}
+              {trackingRestricted ? (
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  Restricted: tracking controls are unavailable for this user.
+                </div>
+              ) : null}
             </Card>
+          </div>
+        ) : null}
+        {activeTab === "timeline" ? (
+          <div ref={timelineAnchorRef} className="mt-4 space-y-3">
+            <SectionHeader title="Timeline" subtitle="Pinned notes first, then chronological events" />
+            <Card className="space-y-3">
+              <div className="grid gap-3 lg:grid-cols-2">
+                <FormField label="Type" htmlFor="timelineFilter">
+                  <Select
+                    id="timelineFilter"
+                    value={timelineFilter}
+                    onChange={(event) =>
+                      setTimelineFilter(event.target.value as (typeof TIMELINE_FILTER_OPTIONS)[number]["value"])
+                    }
+                  >
+                    {TIMELINE_FILTER_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+                {!readOnly ? (
+                  <div className="text-xs text-[color:var(--color-text-muted)]">
+                    Add dispatch notes with type and priority directly from inspector.
+                  </div>
+                ) : null}
+              </div>
+
+              {!readOnly ? (
+                <div className="grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-soft)] p-3">
+                  <FormField label="Add note" htmlFor="timelineNoteBody">
+                    <Textarea
+                      id="timelineNoteBody"
+                      value={noteBody}
+                      onChange={(event) => setNoteBody(event.target.value)}
+                      placeholder="Operational update, billing context, or customer-visible note"
+                      className="min-h-[84px]"
+                      disabled={noteSaving}
+                    />
+                  </FormField>
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <FormField label="Note type" htmlFor="timelineNoteType">
+                      <Select
+                        id="timelineNoteType"
+                        value={noteType}
+                        onChange={(event) => setNoteType(event.target.value as (typeof NOTE_TYPE_OPTIONS)[number])}
+                        disabled={noteSaving}
+                      >
+                        {NOTE_TYPE_OPTIONS.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </Select>
+                    </FormField>
+                    <FormField label="Priority" htmlFor="timelineNotePriority">
+                      <Select
+                        id="timelineNotePriority"
+                        value={notePriority}
+                        onChange={(event) =>
+                          setNotePriority(event.target.value as (typeof NOTE_PRIORITY_OPTIONS)[number])
+                        }
+                        disabled={noteSaving}
+                      >
+                        {NOTE_PRIORITY_OPTIONS.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </Select>
+                    </FormField>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" onClick={submitTimelineNote} disabled={noteSaving || !noteBody.trim()}>
+                      {noteSaving ? "Saving..." : "Add note"}
+                    </Button>
+                    {noteStatus ? <div className="text-xs text-[color:var(--color-success)]">{noteStatus}</div> : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {timelineLoading ? <div className="text-sm text-[color:var(--color-text-muted)]">Loading timeline…</div> : null}
+              {timelineError ? <div className="text-sm text-[color:var(--color-danger)]">{timelineError}</div> : null}
+
+              {pinnedNotes.length > 0 ? (
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Pinned notes</div>
+                  {pinnedNotes.map((item) => (
+                    <Card key={item.id} className="space-y-1 border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)]">
+                      <div className="text-xs text-[color:var(--color-text-muted)]">
+                        {(item?.actor?.name ?? "User")} · {item?.payload?.noteType ?? "INTERNAL"} · {item?.payload?.priority ?? "NORMAL"}
+                      </div>
+                      <div className="text-sm text-ink">{item?.payload?.body ?? item?.message ?? "Pinned note"}</div>
+                      <div className="text-xs text-[color:var(--color-text-muted)]">{formatDateTime(item?.timestamp ?? item?.time)}</div>
+                    </Card>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="space-y-2">
+                <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Timeline</div>
+                {timelineEvents.length ? (
+                  timelineEvents.map((item) => (
+                    <Card key={item.id} className="space-y-1">
+                      <div className="text-xs uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">
+                        {item.kind ?? "EVENT"}
+                      </div>
+                      <div className="text-sm font-medium text-ink">{item.message ?? "Event"}</div>
+                      {item.kind === "NOTE" ? (
+                        <div className="text-xs text-[color:var(--color-text-muted)]">
+                          {(item?.actor?.name ?? "User")} · {item?.payload?.noteType ?? "INTERNAL"} · {item?.payload?.priority ?? "NORMAL"}
+                        </div>
+                      ) : null}
+                      <div className="text-xs text-[color:var(--color-text-muted)]">{formatDateTime(item?.timestamp ?? item?.time)}</div>
+                    </Card>
+                  ))
+                ) : (
+                  <EmptyState title="No timeline events." />
+                )}
+              </div>
+            </Card>
+          </div>
+        ) : null}
+        {activeTab === "exceptions" ? (
+          <div ref={exceptionsAnchorRef} className="mt-4 space-y-3">
+            <SectionHeader title="Exceptions" subtitle="Open dispatch risks and ownership" />
+            {(loadSummary?.exceptions ?? []).length ? (
+              (loadSummary?.exceptions ?? []).map((exception) => (
+                <Card key={exception.id} className="space-y-1">
+                  <div className="text-sm font-semibold text-ink">{exception.title ?? "Exception"}</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">{exception.detail ?? "No detail"}</div>
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">
+                    {exception.status ?? "OPEN"} · {exception.severity ?? "WARNING"} · {exception.owner ?? "DISPATCH"}
+                  </div>
+                </Card>
+              ))
+            ) : (
+              <EmptyState title="No open exceptions." />
+            )}
           </div>
         ) : null}
       </div>

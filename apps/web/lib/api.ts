@@ -104,7 +104,9 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
         }
       }
       const message = error?.error || error?.message || "Request failed";
-      throw new Error(message);
+      const err = new Error(message);
+      (err as { status?: number }).status = 403;
+      throw err;
     }
     const error = await res.json().catch(() => ({}));
     const message =
@@ -115,8 +117,9 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
       "Request failed";
     const buildError = (text: string) => {
       const err = new Error(text);
-      (err as { code?: string; ctaHref?: string }).code = error?.code;
-      (err as { code?: string; ctaHref?: string }).ctaHref = error?.ctaHref;
+      (err as { code?: string; ctaHref?: string; status?: number }).code = error?.code;
+      (err as { code?: string; ctaHref?: string; status?: number }).ctaHref = error?.ctaHref;
+      (err as { code?: string; ctaHref?: string; status?: number }).status = res.status;
       return err;
     };
     if (res.status >= 500) {

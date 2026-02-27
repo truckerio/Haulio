@@ -18,10 +18,14 @@ import { BlockerCard } from "@/components/ui/blocker-card";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api";
+import { formatDateTime as formatDateTime24 } from "@/lib/date-time";
+import { applyFailClosedCapability, getRoleCapabilities, isForbiddenError } from "@/lib/capabilities";
 import { formatDocStatusLabel, formatInvoiceStatusLabel, formatStatusLabel } from "@/lib/status-format";
 
 import { API_BASE } from "@/lib/apiBase";
 const DOC_TYPES = ["POD", "RATECON", "BOL", "LUMPER", "SCALE", "DETENTION", "OTHER"] as const;
+const NOTE_TYPES = ["INTERNAL", "OPERATIONAL", "BILLING", "COMPLIANCE", "CUSTOMER_VISIBLE"] as const;
+const NOTE_PRIORITIES = ["NORMAL", "IMPORTANT", "ALERT"] as const;
 const CHARGE_TYPES = ["LINEHAUL", "LUMPER", "DETENTION", "LAYOVER", "OTHER", "ADJUSTMENT"] as const;
 const CHARGE_LABELS: Record<string, string> = {
   LINEHAUL: "Linehaul",
@@ -114,10 +118,21 @@ export default function LoadDetailsPage() {
   const proofInputRef = useRef<HTMLInputElement | null>(null);
   const [billingActionError, setBillingActionError] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
-  const [noteVisibility, setNoteVisibility] = useState<"NORMAL" | "LOCKED">("NORMAL");
+  const [noteType, setNoteType] = useState<(typeof NOTE_TYPES)[number]>("INTERNAL");
+  const [notePriority, setNotePriority] = useState<(typeof NOTE_PRIORITIES)[number]>("NORMAL");
+  const [noteReplyTargetId, setNoteReplyTargetId] = useState<string | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteError, setNoteError] = useState<string | null>(null);
   const [noteStatus, setNoteStatus] = useState<string | null>(null);
+  const [restrictedActions, setRestrictedActions] = useState({
+    uploadDocs: false,
+    verifyDocs: false,
+    editLoad: false,
+    editCharges: false,
+    manageAccessorials: false,
+    startTracking: false,
+    createNotes: false,
+  });
   const [freightForm, setFreightForm] = useState({
     loadType: "COMPANY",
     movementMode: "FTL",
@@ -130,6 +145,14 @@ export default function LoadDetailsPage() {
   });
   const tabParam = searchParams?.get("tab");
   const docTypeParam = searchParams?.get("docType");
+  const roleCapabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
+
+  const markActionRestricted = useCallback(
+    (key: keyof typeof restrictedActions) => {
+      setRestrictedActions((prev) => ({ ...prev, [key]: true }));
+    },
+    []
+  );
 
   useEffect(() => {
     if (!user) return;
@@ -197,41 +220,24 @@ export default function LoadDetailsPage() {
       await apiFetch(`/loads/${loadId}/notes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, visibility: noteVisibility }),
+        body: JSON.stringify({
+          text,
+          noteType,
+          priority: notePriority,
+          replyToNoteId: noteReplyTargetId,
+        }),
       });
       setNoteText("");
-      setNoteVisibility("NORMAL");
+      setNoteType("INTERNAL");
+      setNotePriority("NORMAL");
+      setNoteReplyTargetId(null);
       setNoteStatus("Saved");
       await loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("createNotes");
+      }
       setNoteError((err as Error).message || "Failed to save note.");
-    } finally {
-      setNoteSaving(false);
-      window.setTimeout(() => setNoteStatus(null), 2000);
-    }
-  };
-
-  const handleDeleteNote = async (note: any) => {
-    if (!loadId || !note?.id) return;
-    const isLocked = note.visibility === "LOCKED";
-    const reason = isLocked ? window.prompt("Reason required to delete locked note:") ?? "" : "";
-    if (isLocked && !reason.trim()) {
-      setNoteError("Reason required to delete locked note.");
-      return;
-    }
-    setNoteSaving(true);
-    setNoteError(null);
-    setNoteStatus(null);
-    try {
-      await apiFetch(`/loads/${loadId}/notes/${note.id}`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: reason.trim() || undefined }),
-      });
-      setNoteStatus("Deleted");
-      await loadData();
-    } catch (err) {
-      setNoteError((err as Error).message || "Failed to delete note.");
     } finally {
       setNoteSaving(false);
       window.setTimeout(() => setNoteStatus(null), 2000);
@@ -422,28 +428,42 @@ export default function LoadDetailsPage() {
 
   const verifyDoc = async (docId: string) => {
     const checklist = docChecklist[docId] || { signature: true, printed: true, date: true, pages: 1 };
-    await apiFetch(`/docs/${docId}/verify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        requireSignature: Boolean(checklist.signature),
-        requirePrintedName: Boolean(checklist.printed),
-        requireDeliveryDate: Boolean(checklist.date),
-        pages: Number(checklist.pages || 1),
-      }),
-    });
-    loadData();
+    try {
+      await apiFetch(`/docs/${docId}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requireSignature: Boolean(checklist.signature),
+          requirePrintedName: Boolean(checklist.printed),
+          requireDeliveryDate: Boolean(checklist.date),
+          pages: Number(checklist.pages || 1),
+        }),
+      });
+      loadData();
+    } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("verifyDocs");
+      }
+      setUploadNote((err as Error).message);
+    }
   };
 
   const rejectDoc = async (docId: string) => {
     const reason = docRejectReasons[docId];
     if (!reason) return;
-    await apiFetch(`/docs/${docId}/reject`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rejectReason: reason }),
-    });
-    loadData();
+    try {
+      await apiFetch(`/docs/${docId}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rejectReason: reason }),
+      });
+      loadData();
+    } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("verifyDocs");
+      }
+      setUploadNote((err as Error).message);
+    }
   };
 
   const uploadDoc = async (file: File) => {
@@ -458,23 +478,23 @@ export default function LoadDetailsPage() {
       setUploadNote("Document uploaded.");
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("uploadDocs");
+      }
       setUploadNote((err as Error).message);
     } finally {
       setUploading(false);
     }
   };
 
-  const canEditCharges =
-    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
-  const canViewCharges =
-    user?.role === "ADMIN" ||
-    user?.role === "DISPATCHER" ||
-    user?.role === "HEAD_DISPATCHER" ||
-    user?.role === "BILLING";
-  const canManageAccessorials =
-    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER" || user?.role === "BILLING";
-  const canApproveAccessorials = user?.role === "ADMIN" || user?.role === "BILLING";
-  const canBillActions = user?.role === "ADMIN" || user?.role === "BILLING";
+  const canEditCharges = applyFailClosedCapability(roleCapabilities.canEditCharges, restrictedActions.editCharges);
+  const canViewCharges = roleCapabilities.canViewCharges;
+  const canManageAccessorials = applyFailClosedCapability(
+    roleCapabilities.canManageAccessorials,
+    restrictedActions.manageAccessorials
+  );
+  const canApproveAccessorials = roleCapabilities.canApproveAccessorials;
+  const canBillActions = roleCapabilities.canBillActions;
   const quickbooksEnabled = process.env.NEXT_PUBLIC_QUICKBOOKS_ENABLED === "true";
 
   const formatAmount = (cents: number) => (cents / 100).toFixed(2);
@@ -532,6 +552,9 @@ export default function LoadDetailsPage() {
       resetChargeForm();
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("editCharges");
+      }
       setChargeError((err as Error).message);
     } finally {
       setChargeSaving(false);
@@ -558,6 +581,9 @@ export default function LoadDetailsPage() {
       }
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("editCharges");
+      }
       setChargeError((err as Error).message);
     } finally {
       setChargeSaving(false);
@@ -604,6 +630,9 @@ export default function LoadDetailsPage() {
       resetAccessorialForm();
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("manageAccessorials");
+      }
       setAccessorialError((err as Error).message);
     } finally {
       setAccessorialSaving(false);
@@ -633,6 +662,10 @@ export default function LoadDetailsPage() {
       await uploadAccessorialProof(file, proofTargetId);
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("manageAccessorials");
+        markActionRestricted("uploadDocs");
+      }
       setAccessorialError((err as Error).message);
     } finally {
       setAccessorialActionId(null);
@@ -648,6 +681,9 @@ export default function LoadDetailsPage() {
       await apiFetch(`/accessorials/${accessorialId}/approve`, { method: "POST" });
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("manageAccessorials");
+      }
       setAccessorialError((err as Error).message);
     } finally {
       setAccessorialActionId(null);
@@ -665,6 +701,9 @@ export default function LoadDetailsPage() {
       });
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("manageAccessorials");
+      }
       setAccessorialError((err as Error).message);
     } finally {
       setAccessorialActionId(null);
@@ -737,6 +776,9 @@ export default function LoadDetailsPage() {
       setFreightEditing(false);
       loadData();
     } catch (err) {
+      if (isForbiddenError(err)) {
+        markActionRestricted("editLoad");
+      }
       setError((err as Error).message);
     } finally {
       setFreightSaving(false);
@@ -797,24 +839,61 @@ export default function LoadDetailsPage() {
   const pingLng = latestPing?.lng ? Number(latestPing.lng) : null;
   const mapLink = pingLat !== null && pingLng !== null ? `https://www.google.com/maps?q=${pingLat},${pingLng}` : null;
 
-  const canVerify = user?.role === "ADMIN" || user?.role === "BILLING" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
-  const canUpload =
-    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
-  const canEditLoad =
-    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+  const canVerify = applyFailClosedCapability(roleCapabilities.canVerifyDocs, restrictedActions.verifyDocs);
+  const canUpload = applyFailClosedCapability(roleCapabilities.canUploadLoadDocs, restrictedActions.uploadDocs);
+  const canEditLoad = applyFailClosedCapability(roleCapabilities.canEditLoad, restrictedActions.editLoad);
+  const canCreateNotes = applyFailClosedCapability(roleCapabilities.canCreateLoadNotes, restrictedActions.createNotes);
 
   const timelineItems = timeline.map((item) => ({
     id: item.id,
-    title: item.message,
-    subtitle: item.type,
-    time: item.time ? new Date(item.time).toLocaleString() : undefined,
+    title:
+      item.kind === "NOTE"
+        ? item.payload?.text || item.message
+        : item.message || item.payload?.message || "System event",
+    subtitle:
+      item.kind === "NOTE"
+        ? `NOTE · ${item.payload?.noteType ?? "INTERNAL"} · ${item.payload?.priority ?? "NORMAL"}`
+        : item.type || "SYSTEM_EVENT",
+    time: (item.timestamp || item.time) ? formatDateTime24(item.timestamp || item.time) : undefined,
   }));
 
+  const noteThreads = useMemo(() => {
+    const notes = Array.isArray(load?.loadNotes) ? [...load.loadNotes] : [];
+    notes.sort((left: any, right: any) => {
+      const leftTime = new Date(left.createdAt).getTime();
+      const rightTime = new Date(right.createdAt).getTime();
+      if (leftTime !== rightTime) return rightTime - leftTime;
+      return String(right.id).localeCompare(String(left.id));
+    });
+    const repliesByParent = new Map<string, any[]>();
+    const roots: any[] = [];
+    for (const note of notes) {
+      const parentId = note.replyToNoteId ? String(note.replyToNoteId) : null;
+      if (!parentId) {
+        roots.push(note);
+        continue;
+      }
+      const bucket = repliesByParent.get(parentId) ?? [];
+      bucket.push(note);
+      repliesByParent.set(parentId, bucket);
+    }
+    for (const [key, replies] of repliesByParent.entries()) {
+      replies.sort((left: any, right: any) => {
+        const leftTime = new Date(left.createdAt).getTime();
+        const rightTime = new Date(right.createdAt).getTime();
+        if (leftTime !== rightTime) return leftTime - rightTime;
+        return String(left.id).localeCompare(String(right.id));
+      });
+      repliesByParent.set(key, replies);
+    }
+    return roots.map((root) => ({
+      root,
+      replies: repliesByParent.get(root.id) ?? [],
+    }));
+  }, [load?.loadNotes]);
+
   const formatDateTime = (value?: string | null) => {
-    if (!value) return "-";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "-";
-    return date.toLocaleString();
+    return formatDateTime24(value, "-");
   };
 
   const formatAge = (value?: string | null) => {
@@ -842,6 +921,16 @@ export default function LoadDetailsPage() {
 
   const podTone: "success" | "danger" | "warning" | "neutral" =
     podStatus === "Verified" ? "success" : podStatus === "Rejected" ? "danger" : podStatus === "Uploaded" ? "warning" : "neutral";
+
+  const notePriorityBadgeClass = (priority?: string | null) => {
+    if (priority === "ALERT") {
+      return "bg-[color:var(--color-danger-soft)] text-[color:var(--color-danger)]";
+    }
+    if (priority === "IMPORTANT") {
+      return "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]";
+    }
+    return "";
+  };
 
   const billingLabel = useMemo(() => {
     if (invoice?.status) return formatInvoiceStatusLabel(invoice.status);
@@ -917,11 +1006,7 @@ export default function LoadDetailsPage() {
   const pingStale = lastPingAt ? Date.now() - new Date(lastPingAt).getTime() > 15 * 60 * 1000 : true;
   const trackingState =
     tracking?.session?.status === "ON" || (lastPingAt && !pingStale) ? "ON" : tracking?.session?.status ?? "OFF";
-  const canStartTracking =
-    user?.role === "ADMIN" ||
-    user?.role === "DISPATCHER" ||
-    user?.role === "HEAD_DISPATCHER" ||
-    user?.role === "DRIVER";
+  const canStartTracking = applyFailClosedCapability(roleCapabilities.canStartTracking, restrictedActions.startTracking);
 
   const formatStopLocation = (stop: any) => {
     if (!stop) return "-";
@@ -1100,7 +1185,7 @@ export default function LoadDetailsPage() {
       {deleteError ? <ErrorBanner message={deleteError} /> : null}
       {load?.deletedAt ? (
         <Card className="border border-[color:var(--color-danger-soft)] bg-[color:var(--color-danger-soft)]/50 px-4 py-3 text-sm text-[color:var(--color-danger)]">
-          This load was deleted on {new Date(load.deletedAt).toLocaleString()}
+          This load was deleted on {formatDateTime24(load.deletedAt)}
           {load.deletedBy ? ` by ${load.deletedBy.name ?? load.deletedBy.email}` : ""}
           {load.deletedReason ? ` · Reason: ${load.deletedReason}` : ""}.
         </Card>
@@ -1252,119 +1337,173 @@ export default function LoadDetailsPage() {
                 </div>
               </Card>
 
-              <Card className="space-y-3">
-                <SectionHeader title="Details" subtitle="Stops, documents, notes, and history" />
-                <details open className="group" id="stops">
-                  <summary className="cursor-pointer text-sm font-medium text-ink">Stops</summary>
-                  <div className="mt-3 grid gap-3">
-                    {load?.stops?.map((stop: any) => (
-                      <div key={stop.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-3">
-                        <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
-                          {stop.type === "PICKUP" ? "Shipper" : stop.type === "DELIVERY" ? "Consignee" : "Yard"}
-                        </div>
-                        <div className="text-sm font-semibold text-ink">{stop.name}</div>
-                        <div className="text-xs text-[color:var(--color-text-muted)]">
-                          {stop.address}, {stop.city} {stop.state} {stop.zip}
-                        </div>
-                        <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">Status: {stop.status}</div>
+              <Card className="space-y-3" id="stops">
+                <SectionHeader title="Stops & appointments" subtitle="Execution-critical stop data is always visible" />
+                <div className="grid gap-3">
+                  {load?.stops?.map((stop: any) => (
+                    <div key={stop.id} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-3">
+                      <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
+                        {stop.type === "PICKUP" ? "Shipper" : stop.type === "DELIVERY" ? "Consignee" : "Yard"}
                       </div>
-                    ))}
-                    {load?.stops?.length ? null : <EmptyState title="No stops yet." />}
-                  </div>
-                </details>
-                <details className="group">
-                  <summary className="cursor-pointer text-sm font-medium text-ink">Documents</summary>
-                  <div className="mt-3 grid gap-2">
-                    {load?.docs?.map((doc: any) => (
-                      <div
-                        key={doc.id}
-                        className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-2"
-                      >
-                        <div>
-                          <div className="text-sm font-semibold text-ink">{doc.type}</div>
-                          <div className="text-xs text-[color:var(--color-text-muted)]">
-                            {formatDocStatusLabel(doc.status)}
-                          </div>
-                        </div>
-                        <Button size="sm" variant="secondary" onClick={() => openDoc(doc)}>
-                          Open
-                        </Button>
+                      <div className="text-sm font-semibold text-ink">{stop.name}</div>
+                      <div className="text-xs text-[color:var(--color-text-muted)]">
+                        {stop.address}, {stop.city} {stop.state} {stop.zip}
                       </div>
-                    ))}
-                    {docCount === 0 ? <EmptyState title="No documents yet." /> : null}
-                  </div>
-                </details>
-                <details className="group">
-                  <summary className="cursor-pointer text-sm font-medium text-ink">Notes</summary>
-                  <div className="mt-3 space-y-3">
-                    <div className="grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
-                      <FormField label="Add note" htmlFor="loadNoteText">
-                        <textarea
-                          id="loadNoteText"
-                          className="min-h-[84px] w-full rounded-[var(--radius-input)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-base)] px-3 py-2 text-sm text-ink focus:border-[color:var(--color-accent-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--color-accent-soft)]/30"
-                          placeholder="Add context for dispatch, billing, or driver handoff"
-                          value={noteText}
-                          onChange={(event) => {
-                            setNoteText(event.target.value);
-                            if (noteError) setNoteError(null);
-                          }}
-                        />
-                      </FormField>
-                      <div className="flex flex-wrap items-end gap-2">
-                        <FormField label="Type" htmlFor="loadNoteVisibility">
-                          <Select
-                            id="loadNoteVisibility"
-                            value={noteVisibility}
-                            onChange={(event) => setNoteVisibility(event.target.value as "NORMAL" | "LOCKED")}
-                          >
-                            <option value="NORMAL">Normal (creator can delete)</option>
-                            <option value="LOCKED">Locked (admin/head dispatcher only)</option>
-                          </Select>
-                        </FormField>
-                        <Button size="sm" onClick={handleCreateNote} disabled={noteSaving}>
-                          {noteSaving ? "Saving..." : "Save note"}
-                        </Button>
-                        {noteStatus ? <div className="text-xs text-[color:var(--color-text-muted)]">{noteStatus}</div> : null}
+                      <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
+                        Appointment: {formatDateTime(stop.appointmentStart)} - {formatDateTime(stop.appointmentEnd)}
                       </div>
-                      {noteError ? <ErrorBanner message={noteError} /> : null}
+                      <div className="text-xs text-[color:var(--color-text-muted)]">
+                        Arrived: {formatDateTime(stop.arrivedAt)} · Departed: {formatDateTime(stop.departedAt)}
+                      </div>
+                      <div className="text-xs text-[color:var(--color-text-muted)]">Status: {stop.status}</div>
                     </div>
+                  ))}
+                  {load?.stops?.length ? null : <EmptyState title="No stops yet." />}
+                </div>
+              </Card>
 
-                    <div className="space-y-2">
-                      {(load?.loadNotes ?? []).map((note: any) => {
-                        const canDeleteLocked = user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER";
-                        const canDeleteNote =
-                          canDeleteLocked || (note.visibility !== "LOCKED" && note.createdById === user?.id);
-                        return (
-                          <div
-                            key={note.id}
-                            className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2"
+              <Card className="space-y-3">
+                <SectionHeader title="Notes" subtitle="Dispatcher and billing context remains visible" />
+                {canCreateNotes ? (
+                  <div className="grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
+                    <FormField label="Add note" htmlFor="loadNoteText">
+                      <textarea
+                        id="loadNoteText"
+                        className="min-h-[84px] w-full rounded-[var(--radius-input)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-base)] px-3 py-2 text-sm text-ink focus:border-[color:var(--color-accent-soft)] focus:outline-none focus:ring-2 focus:ring-[color:var(--color-accent-soft)]/30"
+                        placeholder="Add context for dispatch, billing, or driver handoff"
+                        value={noteText}
+                        onChange={(event) => {
+                          setNoteText(event.target.value);
+                          if (noteError) setNoteError(null);
+                        }}
+                      />
+                    </FormField>
+                    {noteReplyTargetId ? (
+                      <div className="rounded-[var(--radius-input)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+                        Clarification reply enabled.
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="ml-2"
+                          onClick={() => setNoteReplyTargetId(null)}
+                          disabled={noteSaving}
+                        >
+                          Clear reply target
+                        </Button>
+                      </div>
+                    ) : null}
+                    <div className="flex flex-wrap items-end gap-2">
+                      <FormField label="Note type" htmlFor="loadNoteType">
+                        <Select
+                          id="loadNoteType"
+                          value={noteType}
+                          onChange={(event) => setNoteType(event.target.value as (typeof NOTE_TYPES)[number])}
+                        >
+                          {NOTE_TYPES.map((type) => (
+                            <option key={type} value={type}>
+                              {type}
+                            </option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <FormField label="Priority" htmlFor="loadNotePriority">
+                        <Select
+                          id="loadNotePriority"
+                          value={notePriority}
+                          onChange={(event) => setNotePriority(event.target.value as (typeof NOTE_PRIORITIES)[number])}
+                        >
+                          {NOTE_PRIORITIES.map((priority) => (
+                            <option key={priority} value={priority}>
+                              {priority}
+                            </option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <Button size="sm" onClick={handleCreateNote} disabled={noteSaving}>
+                        {noteSaving ? "Saving..." : "Save note"}
+                      </Button>
+                      {noteStatus ? <div className="text-xs text-[color:var(--color-text-muted)]">{noteStatus}</div> : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-[color:var(--color-text-muted)]">
+                    Restricted: you cannot create notes on this load.
+                  </div>
+                )}
+                {noteError ? <ErrorBanner message={noteError} /> : null}
+
+                <div className="space-y-2">
+                  {noteThreads.map(({ root, replies }) => (
+                    <div
+                      key={root.id}
+                      className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs text-[color:var(--color-text-muted)]">
+                          {(root.createdBy?.name || "User")} · {root.source} · {formatDateTime(root.createdAt)}
+                        </div>
+                        {canCreateNotes ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setNoteReplyTargetId(root.id)}
+                            disabled={noteSaving}
                           >
-                            <div className="flex flex-wrap items-center justify-between gap-2">
+                            Add clarification
+                          </Button>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <Badge>{root.noteType ?? "INTERNAL"}</Badge>
+                        <Badge className={notePriorityBadgeClass(root.priority)}>{root.priority ?? "NORMAL"}</Badge>
+                      </div>
+                      <div className="mt-2 whitespace-pre-wrap text-sm text-ink">{root.body ?? root.text}</div>
+                      {replies.length > 0 ? (
+                        <div className="mt-3 space-y-2 border-l border-[color:var(--color-divider)] pl-3">
+                          {replies.map((reply: any) => (
+                            <div key={reply.id} className="rounded-[var(--radius-input)] bg-[color:var(--color-bg-muted)] px-3 py-2">
                               <div className="text-xs text-[color:var(--color-text-muted)]">
-                                {(note.createdBy?.name || "User")} · {note.source} · {note.visibility} · {formatDateTime(note.createdAt)}
+                                {(reply.createdBy?.name || "User")} · {reply.source} · {formatDateTime(reply.createdAt)}
                               </div>
-                              {canDeleteNote ? (
-                                <Button size="sm" variant="ghost" onClick={() => handleDeleteNote(note)} disabled={noteSaving}>
-                                  Delete
-                                </Button>
-                              ) : null}
+                              <div className="mt-1 flex flex-wrap items-center gap-2">
+                                <Badge>{reply.noteType ?? "INTERNAL"}</Badge>
+                                <Badge className={notePriorityBadgeClass(reply.priority)}>{reply.priority ?? "NORMAL"}</Badge>
+                              </div>
+                              <div className="mt-1 whitespace-pre-wrap text-sm text-ink">{reply.body ?? reply.text}</div>
                             </div>
-                            <div className="mt-1 whitespace-pre-wrap text-sm text-ink">{note.text}</div>
-                          </div>
-                        );
-                      })}
-                      {(load?.loadNotes ?? []).length === 0 ? (
-                        <div className="text-sm text-[color:var(--color-text-muted)]">No notes yet.</div>
+                          ))}
+                        </div>
                       ) : null}
                     </div>
-                  </div>
-                </details>
-                <details className="group">
-                  <summary className="cursor-pointer text-sm font-medium text-ink">History</summary>
-                  <div className="mt-3">
-                    <Timeline items={timelineItems} />
-                  </div>
-                </details>
+                  ))}
+                  {noteThreads.length === 0 ? <div className="text-sm text-[color:var(--color-text-muted)]">No notes yet.</div> : null}
+                </div>
+              </Card>
+
+              <Card className="space-y-3">
+                <SectionHeader title="Documents snapshot" subtitle="Quick scan before opening full Documents tab" />
+                <div className="grid gap-2">
+                  {load?.docs?.map((doc: any) => (
+                    <div
+                      key={doc.id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-2"
+                    >
+                      <div>
+                        <div className="text-sm font-semibold text-ink">{doc.type}</div>
+                        <div className="text-xs text-[color:var(--color-text-muted)]">{formatDocStatusLabel(doc.status)}</div>
+                      </div>
+                      <Button size="sm" variant="secondary" onClick={() => openDoc(doc)}>
+                        Open
+                      </Button>
+                    </div>
+                  ))}
+                  {docCount === 0 ? <EmptyState title="No documents yet." /> : null}
+                </div>
+              </Card>
+
+              <Card className="space-y-3">
+                <SectionHeader title="History" subtitle="Timeline events" />
+                <Timeline items={timelineItems} />
               </Card>
             </>
           ) : null}
@@ -1458,6 +1597,10 @@ export default function LoadDetailsPage() {
                             Reject
                           </Button>
                         </div>
+                      </div>
+                    ) : doc.type === "POD" ? (
+                      <div className="mt-3 text-xs text-[color:var(--color-text-muted)]">
+                        Restricted: POD verification is not available for your role.
                       </div>
                     ) : null}
                   </div>
@@ -1871,7 +2014,9 @@ export default function LoadDetailsPage() {
                   </FormField>
                   {uploadNote ? <div className="text-xs text-[color:var(--color-text-muted)]">{uploadNote}</div> : null}
                 </div>
-              ) : null}
+              ) : (
+                <div className="text-xs text-[color:var(--color-text-muted)]">Restricted: document upload is not available.</div>
+              )}
             </Card>
 
             <Card id="tracking" className="space-y-2">
@@ -1893,12 +2038,17 @@ export default function LoadDetailsPage() {
                       });
                       loadData();
                     } catch (err) {
+                      if (isForbiddenError(err)) {
+                        markActionRestricted("startTracking");
+                      }
                       setError((err as Error).message);
                     }
                   }}
                 >
                   Start tracking
                 </Button>
+              ) : trackingState === "OFF" ? (
+                <div className="text-xs text-[color:var(--color-text-muted)]">Restricted: tracking controls are unavailable.</div>
               ) : null}
               {!pingStale && mapLink ? (
                 <div className="space-y-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] px-3 py-3 text-xs text-[color:var(--color-text-muted)]">
