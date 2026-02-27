@@ -20,7 +20,7 @@
     "test:today": "node --import tsx src/modules/today/scope.test.ts && node --import tsx src/modules/today/warnings.test.ts && node --import tsx src/modules/today/issue-summary.test.ts",
     "test:activity": "node --import tsx src/modules/activity/summary.test.ts",
     "test:inbound": "node --import tsx src/modules/inbound-email/sendgrid.test.ts && node --import tsx src/modules/inbound-email/service.test.ts",
-    "test:authz": "node --import tsx src/lib/dispatch-role-parity.test.ts",
+    "test:authz": "node --import tsx src/lib/dispatch-role-parity.test.ts && node --import tsx src/lib/settlement-preview-auth.test.ts",
     "test:teams": "tsx src/modules/teams/assign.test.ts",
     "test:vault": "tsx src/lib/vault-status.test.ts"
   },

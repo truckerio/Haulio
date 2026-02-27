@@ -9,8 +9,9 @@
     "lint": "next lint",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "pnpm run lint && pnpm run typecheck",
-    "test": "pnpm run test:today && pnpm run test:capabilities",
+    "test": "pnpm run test:today && pnpm run test:trips && pnpm run test:capabilities",
     "test:capabilities": "node --import tsx lib/capabilities.test.ts",
+    "test:trips": "node --import tsx app/trips/settlement-visibility.test.ts",
     "test:today": "node --import tsx app/today/priority-stack.test.ts && node --import tsx app/today/activity-view.test.ts && node --import tsx app/today/activity-contract.test.ts"
   },
   "dependencies": {
