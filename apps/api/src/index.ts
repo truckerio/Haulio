@@ -12542,6 +12542,18 @@ app.post("/docs/:id/verify", requireAuth, requireCsrf, requirePermission(Permiss
     trigger: "verified",
     dedupeSuffix: doc.id,
   });
+  await maybeLogLoadKernelShadow({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    loadId: load.id,
+    route: "/docs/:id/verify",
+    method: "POST",
+    before: {
+      status: load.status,
+      billingStatus: load.billingStatus,
+      podVerifiedAt: load.podVerifiedAt,
+    },
+  });
   res.json({
     doc: updated,
     invoice: null,
@@ -12564,6 +12576,10 @@ app.post("/docs/:id/reject", requireAuth, requireCsrf, requirePermission(Permiss
     res.status(404).json({ error: "Document not found" });
     return;
   }
+  const loadBefore = await prisma.load.findFirst({
+    where: { id: doc.loadId, orgId: req.user!.orgId },
+    select: { id: true, status: true, billingStatus: true, podVerifiedAt: true },
+  });
   const updated = await prisma.document.update({
     where: { id: doc.id },
     data: {
@@ -12601,6 +12617,20 @@ app.post("/docs/:id/reject", requireAuth, requireCsrf, requirePermission(Permiss
     trigger: "rejected",
     dedupeSuffix: doc.id,
   });
+  if (loadBefore) {
+    await maybeLogLoadKernelShadow({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      loadId: loadBefore.id,
+      route: "/docs/:id/reject",
+      method: "POST",
+      before: {
+        status: loadBefore.status,
+        billingStatus: loadBefore.billingStatus,
+        podVerifiedAt: loadBefore.podVerifiedAt,
+      },
+    });
+  }
   res.json({ doc: updated });
 });
 
@@ -13890,7 +13920,7 @@ app.post(
   async (req, res) => {
     const load = await prisma.load.findFirst({
       where: { id: req.params.loadId, orgId: req.user!.orgId },
-      select: { id: true, loadNumber: true, billingStatus: true },
+      select: { id: true, loadNumber: true, status: true, billingStatus: true, podVerifiedAt: true },
     });
     if (!load) {
       res.status(404).json({ error: "Load not found" });
@@ -13929,6 +13959,18 @@ app.post(
       stage: null,
       billingStatus: BillingStatus.INVOICED,
       dedupeSuffix: `mark-invoiced:${Date.now()}`,
+    });
+    await maybeLogLoadKernelShadow({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      loadId: load.id,
+      route: "/billing/readiness/:loadId/mark-invoiced",
+      method: "POST",
+      before: {
+        status: load.status,
+        billingStatus: load.billingStatus,
+        podVerifiedAt: load.podVerifiedAt,
+      },
     });
     res.json({ load: updated });
   }
