@@ -78,6 +78,7 @@ Run from repository root:
 pnpm --filter @truckerio/api run test:kernel
 pnpm --filter @truckerio/api run test:authz
 pnpm --filter @truckerio/api exec node --import tsx src/modules/dispatch/queue-view.test.ts
+ORG_ID=<ORG_ID> pnpm demo:kernel:report
 ```
 
 Prod-local stack start:
