@@ -12,7 +12,7 @@
     "test": "pnpm run test:today && pnpm run test:trips && pnpm run test:loads && pnpm run test:capabilities && pnpm run test:navigation && pnpm run test:dispatch",
     "test:capabilities": "node --import tsx lib/capabilities.test.ts",
     "test:navigation": "node --import tsx lib/navigation.test.ts",
-    "test:dispatch": "node --import tsx components/dispatch/dispatch-grid-contract.test.ts && node --import tsx components/dispatch/timeline-utils.test.ts",
+    "test:dispatch": "node --import tsx components/dispatch/dispatch-grid-contract.test.ts && node --import tsx components/dispatch/trip-grid-contract.test.ts && node --import tsx components/dispatch/timeline-utils.test.ts",
     "test:trips": "node --import tsx app/trips/settlement-visibility.test.ts && node --import tsx app/trips/trip-load-grouping.test.ts && node --import tsx app/trips/trip-loads-panel-contract.test.ts && node --import tsx app/trips/trip-cockpit-layout.test.ts",
     "test:loads": "node --import tsx app/loads/load-overview-layout.test.ts",
     "test:today": "node --import tsx app/today/priority-stack.test.ts && node --import tsx app/today/activity-view.test.ts && node --import tsx app/today/activity-contract.test.ts"

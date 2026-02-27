@@ -12,6 +12,11 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Select } from "@/components/ui/select";
 import { StatusChip } from "@/components/ui/status-chip";
+import {
+  TripSpreadsheetGrid,
+  type TripGridRow,
+  type TripGridSortMode,
+} from "@/components/dispatch/TripSpreadsheetGrid";
 import { apiFetch } from "@/lib/api";
 import { getRoleCapabilities } from "@/lib/capabilities";
 
@@ -88,7 +93,6 @@ const statusTone = (status: TripStatus) => {
 };
 
 const isConsolidationMode = (mode: MovementMode) => mode === "LTL" || mode === "POOL_DISTRIBUTION";
-type TripSortMode = "newest" | "status" | "loads" | "trip";
 type DetailTab = "assignment" | "status" | "cargo" | "loads";
 
 const STATUS_SORT_WEIGHT: Record<TripStatus, number> = {
@@ -133,9 +137,9 @@ export function TripsWorkspace() {
   const [formError, setFormError] = useState<string | null>(null);
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [showCreatePanel, setShowCreatePanel] = useState(false);
-  const [showRefinePanel, setShowRefinePanel] = useState(true);
-  const [sortMode, setSortMode] = useState<TripSortMode>("newest");
+  const [sortMode, setSortMode] = useState<TripGridSortMode>("newest");
   const [detailTab, setDetailTab] = useState<DetailTab>("assignment");
+  const [selectedGridRows, setSelectedGridRows] = useState<Set<string>>(new Set());
   const [newTripLoadNumbers, setNewTripLoadNumbers] = useState("");
   const [newTripMovementMode, setNewTripMovementMode] = useState<MovementMode>("FTL");
   const [assignForm, setAssignForm] = useState({ driverId: "", truckId: "", trailerId: "" });
@@ -188,6 +192,33 @@ export function TripsWorkspace() {
     });
     return list;
   }, [trips, sortMode]);
+  const spreadsheetRows = useMemo<TripGridRow[]>(
+    () =>
+      sortedTrips.map((trip) => ({
+        id: trip.id,
+        tripNumber: trip.tripNumber,
+        status: trip.status,
+        movementMode: trip.movementMode,
+        loadsCount: trip.loads.length,
+        origin: trip.origin ?? trip.sourceManifest?.origin ?? "-",
+        destination: trip.destination ?? trip.sourceManifest?.destination ?? "-",
+        plannedDepartureAt: trip.plannedDepartureAt ?? null,
+        plannedArrivalAt: trip.plannedArrivalAt ?? null,
+        assignment: {
+          driverName: trip.driver?.name ?? "No driver",
+          truckUnit: `Truck ${trip.truck?.unit ?? "-"}`,
+          trailerUnit: `Trailer ${trip.trailer?.unit ?? "-"}`,
+        },
+        cargo:
+          isConsolidationMode(trip.movementMode)
+            ? trip.sourceManifest
+              ? "LINKED"
+              : "UNLINKED"
+            : "N/A",
+        updatedAt: trip.createdAt ?? null,
+      })),
+    [sortedTrips]
+  );
 
   const syncTripParam = useCallback(
     (tripId: string | null) => {
@@ -490,29 +521,6 @@ export function TripsWorkspace() {
           >
             Reset filters
           </Button>
-          <button
-            type="button"
-            aria-label={showRefinePanel ? "Hide refine filters" : "Open refine filters"}
-            title={showRefinePanel ? "Hide refine filters" : "Refine filters"}
-            onClick={() => setShowRefinePanel((prev) => !prev)}
-            className="relative inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
-          >
-            <svg
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-            >
-              <path d="M4 6h16M7 12h10M10 18h4" strokeLinecap="round" />
-            </svg>
-            {activeTripFilterCount > 0 ? (
-              <span className="absolute -right-1 -top-1 inline-flex h-[var(--icon-badge-size)] min-w-[var(--icon-badge-size)] items-center justify-center rounded-full bg-[color:var(--color-accent)] px-1 text-[10px] font-semibold leading-none text-white">
-                {activeTripFilterCount}
-              </span>
-            ) : null}
-          </button>
           <Button onClick={() => setShowCreatePanel((prev) => !prev)}>
             {showCreatePanel ? "Close new trip" : "New trip"}
           </Button>
@@ -566,105 +574,45 @@ export function TripsWorkspace() {
         </Card>
       ) : null}
 
-      <div
-        className={
-          showRefinePanel
-            ? "grid gap-4 xl:grid-cols-[18rem_minmax(24rem,1fr)_minmax(28rem,1fr)]"
-            : "grid gap-4 xl:grid-cols-[minmax(24rem,1fr)_minmax(28rem,1fr)]"
-        }
-      >
-        {showRefinePanel ? (
-          <Card className="h-fit space-y-4 xl:sticky xl:top-4">
-            <SectionHeader title="Refine trips" subtitle="Narrow the list quickly" />
-            <FormField label="Search" htmlFor="tripSearch">
-              <Input
-                id="tripSearch"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Trip #, load #, customer"
-              />
-            </FormField>
-            <FormField label="Status" htmlFor="tripStatus">
-              <Select id="tripStatus" value={status} onChange={(event) => setStatus(event.target.value)}>
-                <option value="">All statuses</option>
-                {STATUS_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            <FormField label="Movement mode" htmlFor="tripMovementMode">
-              <Select id="tripMovementMode" value={movementMode} onChange={(event) => setMovementMode(event.target.value)}>
-                <option value="">All movement modes</option>
-                {MOVEMENT_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
-            <div className="space-y-2">
-              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Sort</div>
-              <SegmentedControl
-                value={sortMode}
-                options={[
-                  { label: "Newest", value: "newest" },
-                  { label: "Status", value: "status" },
-                  { label: "Loads", value: "loads" },
-                  { label: "Trip #", value: "trip" },
-                ]}
-                onChange={(value) => setSortMode(value as TripSortMode)}
-              />
-            </div>
-            <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
-              {sortedTrips.length} trip{sortedTrips.length === 1 ? "" : "s"} in view
-            </div>
-          </Card>
-        ) : null}
-
-        <Card className="min-h-[62vh] space-y-3">
-          <SectionHeader title="Trips" subtitle="Choose a trip to manage" />
-          {loading ? (
-            <div className="text-sm text-[color:var(--color-text-muted)]">Loading trips...</div>
-          ) : sortedTrips.length === 0 ? (
-            <EmptyState title="No trips found" description="Create a trip or adjust your filters." />
-          ) : (
-            <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
-              {sortedTrips.map((trip) => (
-                <button
-                  key={trip.id}
-                  type="button"
-                  onClick={() => chooseTrip(trip.id)}
-                  className={`w-full rounded-[var(--radius-card)] border px-4 py-4 text-left transition ${
-                    trip.id === selectedTripId
-                      ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)]/20"
-                      : "border-[color:var(--color-divider)] bg-[color:var(--color-surface)] hover:bg-[color:var(--color-bg-muted)]"
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-base font-semibold text-ink">{trip.tripNumber}</div>
-                    <div className="flex items-center gap-2">
-                      {isConsolidationMode(trip.movementMode) ? (
-                        <StatusChip
-                          label={trip.sourceManifest ? "Cargo linked" : "Cargo unlinked"}
-                          tone={trip.sourceManifest ? "success" : "warning"}
-                        />
-                      ) : null}
-                      <StatusChip label={trip.status} tone={statusTone(trip.status)} />
-                    </div>
-                  </div>
-                  <div className="mt-2 text-sm text-[color:var(--color-text-muted)]">
-                    {trip.movementMode} · {trip.loads.length} load{trip.loads.length === 1 ? "" : "s"}
-                  </div>
-                  <div className="mt-1 text-sm text-[color:var(--color-text-muted)]">
-                    {trip.driver?.name ?? "No driver"} · Truck {trip.truck?.unit ?? "-"} · Trailer {trip.trailer?.unit ?? "-"}
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-        </Card>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(28rem,1fr)]">
+        <TripSpreadsheetGrid
+          rows={spreadsheetRows}
+          loading={loading}
+          selectedTripId={selectedTripId}
+          selectedRows={selectedGridRows}
+          search={search}
+          status={status}
+          movementMode={movementMode}
+          sortMode={sortMode}
+          filterCount={activeTripFilterCount}
+          onSearchChange={setSearch}
+          onStatusChange={setStatus}
+          onMovementModeChange={setMovementMode}
+          onSortModeChange={setSortMode}
+          onSelectTrip={(tripId) => {
+            chooseTrip(tripId);
+          }}
+          onToggleRowSelection={(tripId, selected) => {
+            setSelectedGridRows((prev) => {
+              const next = new Set(prev);
+              if (selected) next.add(tripId);
+              else next.delete(tripId);
+              return next;
+            });
+          }}
+          onToggleSelectAllVisible={(selected) => {
+            setSelectedGridRows((prev) => {
+              if (!selected) {
+                const next = new Set(prev);
+                spreadsheetRows.forEach((row) => next.delete(row.id));
+                return next;
+              }
+              const next = new Set(prev);
+              spreadsheetRows.forEach((row) => next.add(row.id));
+              return next;
+            });
+          }}
+        />
 
         <Card className="min-h-[62vh] space-y-4">
           {selectedTripSummary ? (
