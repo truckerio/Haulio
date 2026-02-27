@@ -1,40 +1,12 @@
 import type { Response, NextFunction } from "express";
 import type { AuthRequest } from "./auth";
 import { Permission, Role } from "@truckerio/db";
-
-const roleDefaults: Record<Role, Permission[]> = {
-  ADMIN: Object.values(Permission),
-  DISPATCHER: [
-    Permission.LOAD_CREATE,
-    Permission.LOAD_EDIT,
-    Permission.LOAD_ASSIGN,
-    Permission.STOP_EDIT,
-    Permission.TASK_ASSIGN,
-    Permission.DOC_VERIFY,
-  ],
-  HEAD_DISPATCHER: [
-    Permission.LOAD_CREATE,
-    Permission.LOAD_EDIT,
-    Permission.LOAD_ASSIGN,
-    Permission.STOP_EDIT,
-    Permission.TASK_ASSIGN,
-    Permission.DOC_VERIFY,
-  ],
-  BILLING: [
-    Permission.DOC_VERIFY,
-    Permission.INVOICE_GENERATE,
-    Permission.INVOICE_SEND,
-    Permission.INVOICE_VOID,
-    Permission.SETTLEMENT_GENERATE,
-    Permission.SETTLEMENT_FINALIZE,
-  ],
-  DRIVER: [],
-};
+import { getRoleDefaultPermissions, hasCapability, type AppCapability } from "./capabilities";
 
 export function hasPermission(user: AuthRequest["user"] | undefined, permission: Permission) {
   if (!user) return false;
   if (user.role === "ADMIN") return true;
-  const base = roleDefaults[user.role as Role] ?? [];
+  const base = getRoleDefaultPermissions(user.role);
   const combined = new Set<string>([...base, ...(user.permissions ?? [])]);
   return combined.has(permission);
 }
@@ -59,4 +31,18 @@ export function authorize(params: { roles?: Role[]; permissions?: Permission[] }
 
 export function requirePermission(...permissions: Permission[]) {
   return authorize({ permissions });
+}
+
+export function requireCapability(...capabilities: AppCapability[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (capabilities.some((capability) => hasCapability(req.user, capability))) {
+      next();
+      return;
+    }
+    res.status(403).json({ error: "Forbidden" });
+  };
 }

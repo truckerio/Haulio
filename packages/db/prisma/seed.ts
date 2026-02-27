@@ -191,6 +191,34 @@ async function main() {
     )
   );
 
+  const safetyUsers = await Promise.all(
+    ["safety1@demo.com"].map((email, index) =>
+      prisma.user.create({
+        data: {
+          orgId: org.id,
+          email,
+          passwordHash,
+          role: "SAFETY",
+          name: `Safety ${index + 1}`,
+        },
+      })
+    )
+  );
+
+  const supportUsers = await Promise.all(
+    ["support1@demo.com"].map((email, index) =>
+      prisma.user.create({
+        data: {
+          orgId: org.id,
+          email,
+          passwordHash,
+          role: "SUPPORT",
+          name: `Support ${index + 1}`,
+        },
+      })
+    )
+  );
+
   const driverUsers = await Promise.all(
     Array.from({ length: Math.min(DRIVER_COUNT, 10) }).map((_, index) =>
       prisma.user.create({
@@ -216,7 +244,7 @@ async function main() {
   const inboundTeam = teams.find((team) => team.name === "Inbound") ?? teams[0];
   const outboundTeam = teams.find((team) => team.name === "Outbound") ?? teams[0];
 
-  const allUsers = [admin, admin2, ...headDispatchers, ...dispatchers, ...billingUsers, ...driverUsers];
+  const allUsers = [admin, admin2, ...headDispatchers, ...dispatchers, ...billingUsers, ...safetyUsers, ...supportUsers, ...driverUsers];
   await prisma.user.updateMany({
     where: { orgId: org.id },
     data: { defaultTeamId: defaultTeam.id },

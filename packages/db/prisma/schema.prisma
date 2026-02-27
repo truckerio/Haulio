@@ -14,6 +14,8 @@ enum Role {
   HEAD_DISPATCHER
   BILLING
   DRIVER
+  SAFETY
+  SUPPORT
 }
 
 enum UserStatus {
@@ -165,6 +167,22 @@ enum LoadConfirmationStatus {
   READY_TO_CREATE
   CREATED
   FAILED
+}
+
+enum InboundEmailProvider {
+  SENDGRID
+  POSTMARK
+  MAILGUN
+  SES
+  GENERIC
+}
+
+enum InboundEmailStatus {
+  ACCEPTED
+  ACCEPTED_DISABLED
+  UNROUTED
+  REJECTED
+  DEDUPED
 }
 
 enum EventType {
@@ -567,6 +585,50 @@ enum LoadNoteSource {
   SYSTEM
 }
 
+enum NoteEntityType {
+  LOAD
+  TRIP
+  STOP
+}
+
+enum NoteType {
+  OPERATIONAL
+  BILLING
+  COMPLIANCE
+  INTERNAL
+  CUSTOMER_VISIBLE
+}
+
+enum NotePriority {
+  NORMAL
+  IMPORTANT
+  ALERT
+}
+
+enum DispatchViewScope {
+  PERSONAL
+  ADMIN_TEMPLATE
+}
+
+enum DispatchExceptionSeverity {
+  WARNING
+  BLOCKER
+}
+
+enum DispatchExceptionStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum DispatchExceptionOwner {
+  DISPATCH
+  DRIVER
+  BILLING
+  CUSTOMER
+  SYSTEM
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
@@ -586,6 +648,9 @@ model Organization {
   loadConfirmationDocuments        LoadConfirmationDocument[]
   loadConfirmationExtractEvents    LoadConfirmationExtractEvent[]
   loadConfirmationLearningExamples LoadConfirmationLearningExample[]
+  inboundEmailAliases              InboundEmailAlias[]
+  inboundEmails                    InboundEmail[]
+  inboundEmailAttachments          InboundEmailAttachment[]
   learningExamples                 LearningExample[]
   learnedMappings                  LearnedMapping[]
   events                           Event[]
@@ -623,7 +688,9 @@ model Organization {
   financeOutboxEvents              FinanceOutboxEvent[]
   qboSyncJobs                      QboSyncJob[]
   invoicePayments                  InvoicePayment[]
-  loadNotes                        LoadNote[]
+  loadNotes                        Note[]
+  dispatchViews                    DispatchView[]
+  dispatchExceptions               DispatchException[]
 }
 
 model SetupCode {
@@ -698,34 +765,34 @@ model TeamAssignment {
 }
 
 model User {
-  id                     String       @id @default(cuid())
+  id                     String                @id @default(cuid())
   orgId                  String
-  email                  String       @db.Citext
+  email                  String                @db.Citext
   passwordHash           String
   role                   Role
-  status                 UserStatus   @default(ACTIVE)
+  status                 UserStatus            @default(ACTIVE)
   name                   String?
   phone                  String?
   profilePhotoUrl        String?
-  permissions            Permission[] @default([])
-  isActive               Boolean      @default(true)
-  canSeeAllTeams         Boolean      @default(false)
+  permissions            Permission[]          @default([])
+  isActive               Boolean               @default(true)
+  canSeeAllTeams         Boolean               @default(false)
   defaultTeamId          String?
   timezone               String?
-  appearanceTheme        AppearanceTheme      @default(SYSTEM)
-  appearanceTextScale    AppearanceTextScale  @default(DEFAULT)
-  appearanceContrast     AppearanceContrast   @default(NORMAL)
-  appearanceFontWeight   AppearanceFontWeight @default(NORMAL)
-  appearanceNavDensity   AppearanceNavDensity @default(COMFORTABLE)
-  appearanceMotion       AppearanceMotion     @default(FULL)
-  appearanceFocusRing    AppearanceFocusRing  @default(STANDARD)
+  appearanceTheme        AppearanceTheme       @default(SYSTEM)
+  appearanceTextScale    AppearanceTextScale   @default(DEFAULT)
+  appearanceContrast     AppearanceContrast    @default(NORMAL)
+  appearanceFontWeight   AppearanceFontWeight  @default(NORMAL)
+  appearanceNavDensity   AppearanceNavDensity  @default(COMFORTABLE)
+  appearanceMotion       AppearanceMotion      @default(FULL)
+  appearanceFocusRing    AppearanceFocusRing   @default(STANDARD)
   appearanceColorPreset  AppearanceColorPreset @default(DEFAULT)
   lastLoginAt            DateTime?
-  mfaEnabled             Boolean      @default(false)
+  mfaEnabled             Boolean               @default(false)
   mfaTotpSecretEncrypted String?
   mfaRecoveryCodesHash   String?
-  mfaEnforced            Boolean      @default(false)
-  createdAt              DateTime     @default(now())
+  mfaEnforced            Boolean               @default(false)
+  createdAt              DateTime              @default(now())
 
   org                             Organization               @relation(fields: [orgId], references: [id])
   defaultTeam                     Team?                      @relation("UserDefaultTeam", fields: [defaultTeamId], references: [id])
@@ -757,9 +824,9 @@ model User {
   invoicePaymentsCreated          InvoicePayment[]           @relation("InvoicePaymentCreatedBy")
   payableRunsCreated              PayableRun[]               @relation("PayableRunCreatedBy")
   settlementPolicyVersionsCreated SettlementPolicyVersion[]  @relation("SettlementPolicyVersionCreatedBy")
-  loadNotesCreated                LoadNote[]                 @relation("LoadNoteCreatedBy")
-  loadNotesUpdated                LoadNote[]                 @relation("LoadNoteUpdatedBy")
-  loadNotesDeleted                LoadNote[]                 @relation("LoadNoteDeletedBy")
+  loadNotesCreated                Note[]                     @relation("LoadNoteCreatedBy")
+  loadNotesUpdated                Note[]                     @relation("LoadNoteUpdatedBy")
+  loadNotesDeleted                Note[]                     @relation("LoadNoteDeletedBy")
 
   @@unique([orgId, email])
 }
@@ -935,6 +1002,7 @@ model Load {
   tripNumber                       String?                 @db.VarChar(64)
   salesRepName                     String?                 @db.VarChar(128)
   dropName                         String?                 @db.VarChar(128)
+  // Deprecated: use immutable LoadNote records (entityType=LOAD) instead.
   notes                            String?
   desiredInvoiceDate               DateTime?
   bolNumber                        String?
@@ -1008,7 +1076,8 @@ model Load {
   invoicePayments           InvoicePayment[]
   payableLineItems          PayableLineItem[]
   financeOutboxEvents       FinanceOutboxEvent[]
-  loadNotes                 LoadNote[]
+  loadNotes                 Note[]
+  dispatchExceptions        DispatchException[]
 
   @@unique([orgId, loadNumber])
   @@unique([orgId, tripNumber])
@@ -1021,29 +1090,99 @@ model Load {
   @@index([orgId, movementMode, status])
 }
 
-model LoadNote {
-  id           String             @id @default(cuid())
-  orgId        String
-  loadId       String
-  text         String             @db.VarChar(1000)
-  visibility   LoadNoteVisibility @default(NORMAL)
-  source       LoadNoteSource     @default(OPS)
-  createdById  String
-  updatedById  String?
-  deletedAt    DateTime?
-  deletedById  String?
-  deleteReason String?            @db.VarChar(500)
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+model Note {
+  id            String             @id @default(cuid())
+  orgId         String
+  entityType    NoteEntityType     @default(LOAD)
+  entityId      String
+  loadId        String?
+  stopId        String?
+  replyToNoteId String?
+  body          String             @map("text") @db.VarChar(1000)
+  noteType      NoteType           @default(INTERNAL)
+  priority      NotePriority       @default(NORMAL)
+  // Deprecated legacy flag. Ignored by Notes V1 (immutability enforced for all notes).
+  visibility    LoadNoteVisibility @default(NORMAL)
+  source        LoadNoteSource     @default(OPS)
+  createdById   String
+  updatedById   String?
+  deletedAt     DateTime?
+  deletedById   String?
+  deleteReason  String?            @db.VarChar(500)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  editedAt      DateTime?
+  expiresAt     DateTime?
+  pinned        Boolean            @default(false)
 
-  org       Organization @relation(fields: [orgId], references: [id])
-  load      Load         @relation(fields: [loadId], references: [id])
-  createdBy User         @relation("LoadNoteCreatedBy", fields: [createdById], references: [id])
-  updatedBy User?        @relation("LoadNoteUpdatedBy", fields: [updatedById], references: [id])
-  deletedBy User?        @relation("LoadNoteDeletedBy", fields: [deletedById], references: [id])
+  org           Organization @relation(fields: [orgId], references: [id])
+  load          Load?        @relation(fields: [loadId], references: [id])
+  stop          Stop?        @relation(fields: [stopId], references: [id])
+  replyTo       Note?        @relation("LoadNoteReplies", fields: [replyToNoteId], references: [id])
+  replies       Note[]       @relation("LoadNoteReplies")
+  createdBy     User         @relation("LoadNoteCreatedBy", fields: [createdById], references: [id])
+  updatedBy     User?        @relation("LoadNoteUpdatedBy", fields: [updatedById], references: [id])
+  deletedBy     User?        @relation("LoadNoteDeletedBy", fields: [deletedById], references: [id])
 
+  @@index([orgId, entityType, entityId, createdAt])
+  @@index([orgId, entityType, entityId, priority])
   @@index([orgId, loadId, createdAt])
   @@index([orgId, loadId, deletedAt])
+  @@index([orgId, stopId, createdAt])
+  @@index([replyToNoteId])
+  @@index([orgId, entityType, entityId, expiresAt])
+  @@index([orgId, entityType, entityId, pinned])
+  @@map("LoadNote")
+}
+
+model DispatchView {
+  id            String            @id @default(cuid())
+  orgId         String
+  name          String            @db.VarChar(120)
+  scope         DispatchViewScope
+  userId        String?
+  role          Role?
+  isRoleDefault Boolean           @default(false)
+  configJson    Json
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, scope, userId])
+  @@index([orgId, scope, role, isRoleDefault])
+  @@index([orgId, createdAt])
+}
+
+model DispatchException {
+  id               String                    @id @default(cuid())
+  orgId            String
+  loadId           String
+  tripId           String?
+  type             String                    @db.VarChar(80)
+  severity         DispatchExceptionSeverity @default(WARNING)
+  owner            DispatchExceptionOwner    @default(DISPATCH)
+  status           DispatchExceptionStatus   @default(OPEN)
+  title            String                    @db.VarChar(180)
+  detail           String?
+  source           String?                   @db.VarChar(80)
+  createdById      String?
+  acknowledgedById String?
+  acknowledgedAt   DateTime?
+  resolvedById     String?
+  resolvedAt       DateTime?
+  resolutionNote   String?                   @db.VarChar(500)
+  meta             Json?
+  createdAt        DateTime                  @default(now())
+  updatedAt        DateTime                  @updatedAt
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  load Load         @relation(fields: [loadId], references: [id])
+  trip Trip?        @relation(fields: [tripId], references: [id])
+
+  @@index([orgId, status, severity, createdAt])
+  @@index([orgId, loadId, status])
+  @@index([orgId, tripId, status])
 }
 
 model LoadAssignmentMember {
@@ -1272,6 +1411,7 @@ model Stop {
   state            String
   zip              String
   phone            String?
+  // Deprecated: use immutable LoadNote records (entityType=STOP) instead.
   notes            String?
   lat              Float?
   lng              Float?
@@ -1290,6 +1430,7 @@ model Stop {
   Document Document[]
   Event    Event[]
   Task     Task[]
+  loadNotes Note[]
 
   @@index([loadId, sequence])
 }
@@ -1338,12 +1479,13 @@ model Trip {
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
-  org            Organization     @relation(fields: [orgId], references: [id])
-  driver         Driver?          @relation(fields: [driverId], references: [id])
-  truck          Truck?           @relation(fields: [truckId], references: [id])
-  trailer        Trailer?         @relation(fields: [trailerId], references: [id])
-  sourceManifest TrailerManifest? @relation(fields: [sourceManifestId], references: [id])
-  loads          TripLoad[]
+  org                Organization        @relation(fields: [orgId], references: [id])
+  driver             Driver?             @relation(fields: [driverId], references: [id])
+  truck              Truck?              @relation(fields: [truckId], references: [id])
+  trailer            Trailer?            @relation(fields: [trailerId], references: [id])
+  sourceManifest     TrailerManifest?    @relation(fields: [sourceManifestId], references: [id])
+  loads              TripLoad[]
+  dispatchExceptions DispatchException[]
 
   @@unique([orgId, tripNumber])
   @@index([orgId, status])
@@ -1463,9 +1605,78 @@ model LoadConfirmationDocument {
   createdLoad      Load?                             @relation(fields: [createdLoadId], references: [id])
   extractEvents    LoadConfirmationExtractEvent[]
   learningExamples LoadConfirmationLearningExample[]
+  inboundEmailAttachments InboundEmailAttachment[]
 
   @@index([orgId, sha256])
   @@index([orgId, status])
+}
+
+model InboundEmailAlias {
+  id        String   @id @default(cuid())
+  orgId     String
+  address   String   @unique @db.Citext
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org    Organization  @relation(fields: [orgId], references: [id])
+  emails InboundEmail[]
+
+  @@index([orgId, isActive])
+}
+
+model InboundEmail {
+  id                           String               @id @default(cuid())
+  orgId                        String?
+  aliasId                      String?
+  provider                     InboundEmailProvider
+  status                       InboundEmailStatus   @default(ACCEPTED)
+  fromAddress                  String
+  toAddresses                  String[]
+  subject                      String?
+  messageId                    String?
+  messageDate                  DateTime?
+  textBody                     String?              @db.Text
+  htmlBody                     String?              @db.Text
+  rawHeaders                   Json?
+  dedupedAttachmentCount       Int                  @default(0)
+  createdLoadConfirmationCount Int                  @default(0)
+  createdAt                    DateTime             @default(now())
+  updatedAt                    DateTime             @updatedAt
+
+  org         Organization?            @relation(fields: [orgId], references: [id])
+  alias       InboundEmailAlias?       @relation(fields: [aliasId], references: [id])
+  attachments InboundEmailAttachment[]
+
+  @@unique([orgId, provider, messageId])
+  @@index([orgId, createdAt])
+  @@index([provider, messageId])
+  @@index([status, createdAt])
+}
+
+model InboundEmailAttachment {
+  id                         String   @id @default(cuid())
+  inboundEmailId             String
+  orgId                      String?
+  filename                   String
+  contentType                String
+  byteSize                   Int
+  sha256                     String
+  storageKey                 String
+  deduped                    Boolean  @default(false)
+  dedupedFromAttachmentId    String?
+  loadConfirmationDocumentId String?
+  createdAt                  DateTime @default(now())
+
+  inboundEmail             InboundEmail              @relation(fields: [inboundEmailId], references: [id])
+  org                      Organization?             @relation(fields: [orgId], references: [id])
+  dedupedFromAttachment    InboundEmailAttachment?   @relation("InboundAttachmentDedupe", fields: [dedupedFromAttachmentId], references: [id])
+  dedupedAttachments       InboundEmailAttachment[]  @relation("InboundAttachmentDedupe")
+  loadConfirmationDocument LoadConfirmationDocument? @relation(fields: [loadConfirmationDocumentId], references: [id])
+
+  @@index([inboundEmailId, createdAt])
+  @@index([orgId, sha256, createdAt])
+  @@index([loadConfirmationDocumentId])
 }
 
 model LoadConfirmationLearningExample {
@@ -1696,6 +1907,7 @@ model OrgSettings {
   factoringEmail               String?
   factoringCcEmails            String[]                           @default([])
   factoringAttachmentMode      FactoringAttachmentMode            @default(LINK_ONLY)
+  inboundRateconEmailEnabled   Boolean                            @default(false)
   quickbooksCompanyId          String?
   defaultPaymentTermsDays      Int?
   trackingPreference           TrackingPreference                 @default(MANUAL)
