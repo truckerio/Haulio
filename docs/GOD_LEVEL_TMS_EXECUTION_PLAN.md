@@ -293,6 +293,7 @@ pnpm --filter @truckerio/api run test
 pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit
 pnpm --filter @truckerio/web run test
 pnpm --filter @truckerio/web run typecheck
+pnpm ci:drift
 pnpm prod:local
 pnpm demo:smoke
 ```
