@@ -27,6 +27,21 @@ const ROLE_OPTIONS = [
 ] as const;
 const EDITABLE_ROLE_OPTIONS = ["DISPATCHER", "HEAD_DISPATCHER", "BILLING"] as const;
 
+function formatRoleLabel(role: string) {
+  switch (role) {
+    case "HEAD_DISPATCHER":
+      return "Head Dispatcher";
+    case "BILLING":
+      return "Billing";
+    case "DISPATCHER":
+      return "Dispatcher";
+    case "ADMIN":
+      return "Admin";
+    default:
+      return role;
+  }
+}
+
 const SORT_OPTIONS = [
   { value: "name", label: "Name (A-Z)" },
   { value: "recent", label: "Recently created" },
@@ -373,13 +388,13 @@ function EmployeesPageContent() {
                             >
                               {EDITABLE_ROLE_OPTIONS.map((role) => (
                                 <option key={role} value={role}>
-                                  {role === "HEAD_DISPATCHER" ? "Head Dispatcher" : role}
+                                  {formatRoleLabel(role)}
                                 </option>
                               ))}
                             </Select>
                           ) : (
                             <div className="text-xs text-[color:var(--color-text-muted)]">
-                              {user.role === "ADMIN" ? "Admin" : user.role}
+                              {formatRoleLabel(user.role)}
                             </div>
                           )}
                         </td>

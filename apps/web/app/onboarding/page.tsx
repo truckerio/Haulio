@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { ImportWizard } from "@/components/ImportWizard";
 import { apiFetch } from "@/lib/api";
+import { getCountryTimeZones, inferCountryFromTimeZone, ONBOARDING_COUNTRY_OPTIONS } from "@/lib/timezone-country";
 
 type OnboardingState = {
   completedSteps: string[];
@@ -85,6 +86,7 @@ function OnboardingWizard() {
   const [basicsForm, setBasicsForm] = useState({
     legalName: "",
     displayName: "",
+    countryCode: "US",
     timezone: "",
     currency: "",
     operatingMode: "",
@@ -162,6 +164,10 @@ function OnboardingWizard() {
     }
   }, []);
 
+  const countryTimezones = useMemo(() => {
+    return getCountryTimeZones(basicsForm.countryCode);
+  }, [basicsForm.countryCode]);
+
   const loadOnboarding = useCallback(async () => {
     setLoading(true);
     try {
@@ -202,6 +208,10 @@ function OnboardingWizard() {
       ...prev,
       legalName: prev.legalName || settings.companyDisplayName || "",
       displayName: prev.displayName || settings.companyDisplayName || "",
+      countryCode:
+        prev.countryCode ||
+        inferCountryFromTimeZone(prev.timezone || settings.timezone || detectedTimezone) ||
+        "US",
       timezone: prev.timezone || settings.timezone || detectedTimezone || "",
       currency: prev.currency || settings.currency || "USD",
       operatingMode: prev.operatingMode || settings.operatingMode || "CARRIER",
@@ -222,6 +232,18 @@ function OnboardingWizard() {
       includeAccessorials: settings.settlementTemplate?.includeAccessorials ?? prev.includeAccessorials,
     }));
   }, [settings, entities, detectedTimezone]);
+
+  useEffect(() => {
+    setBasicsForm((prev) => {
+      const available = getCountryTimeZones(prev.countryCode);
+      if (available.length === 0) return prev;
+      if (prev.timezone && available.includes(prev.timezone)) return prev;
+      const detected = detectedTimezone && available.includes(detectedTimezone) ? detectedTimezone : null;
+      const nextTimezone = detected ?? available[0] ?? "";
+      if (nextTimezone === prev.timezone) return prev;
+      return { ...prev, timezone: nextTimezone };
+    });
+  }, [detectedTimezone, basicsForm.countryCode]);
 
   const markStepComplete = async (stepKey: string, nextStep?: number) => {
     const data = await apiFetch<{ state: OnboardingState }>("/onboarding/complete-step", {
@@ -453,12 +475,34 @@ function OnboardingWizard() {
                 placeholder=""
               />
             </FormField>
-            <FormField label="Timezone" htmlFor="timezone">
-              <Input
+            <FormField label="Country" htmlFor="countryCode" required>
+              <Select
+                value={basicsForm.countryCode}
+                onChange={(e) => setBasicsForm({ ...basicsForm, countryCode: e.target.value })}
+              >
+                {ONBOARDING_COUNTRY_OPTIONS.map((country) => (
+                  <option key={country.code} value={country.code}>
+                    {country.label}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+            <FormField
+              label="Timezone (org-wide)"
+              htmlFor="timezone"
+              hint={detectedTimezone ? `Detected: ${detectedTimezone}` : "Choose one timezone for the full organization."}
+              required
+            >
+              <Select
                 value={basicsForm.timezone}
                 onChange={(e) => setBasicsForm({ ...basicsForm, timezone: e.target.value })}
-                placeholder=""
-              />
+              >
+                {countryTimezones.map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone.replaceAll("_", " ")}
+                  </option>
+                ))}
+              </Select>
             </FormField>
             <FormField label="Currency" htmlFor="currency">
               <Select
@@ -623,6 +667,7 @@ function OnboardingWizard() {
                 >
                   <option value="">Select role</option>
                   <option value="ADMIN">Admin</option>
+                  <option value="HEAD_DISPATCHER">Head Dispatcher</option>
                   <option value="DISPATCHER">Dispatcher</option>
                   <option value="BILLING">Billing</option>
                 </Select>
@@ -1004,6 +1049,8 @@ function OnboardingWizard() {
     preferences,
     trackingChoice,
     financeForm,
+    countryTimezones,
+    detectedTimezone,
     entities,
     trailers,
     users,

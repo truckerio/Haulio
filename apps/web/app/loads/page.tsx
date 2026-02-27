@@ -14,13 +14,20 @@ import { CheckboxField } from "@/components/ui/checkbox";
 import { SectionHeader } from "@/components/ui/section-header";
 import { Textarea } from "@/components/ui/textarea";
 import { RefinePanel } from "@/components/ui/refine-panel";
-import { StatusChip } from "@/components/ui/status-chip";
 import { EmptyState } from "@/components/ui/empty-state";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch, getApiBase } from "@/lib/api";
 import { BulkLoadImport } from "@/components/BulkLoadImport";
 import { ImportWizard } from "@/components/ImportWizard";
+import {
+  DispatchSpreadsheetGrid,
+  type DispatchGridColumnKey,
+  type DispatchGridDensity,
+  type DispatchGridFilterState,
+  type DispatchGridRow,
+  type DispatchGridSortRule,
+} from "@/components/dispatch/DispatchSpreadsheetGrid";
 import {
   deriveBlocker,
   deriveDocsBlocker,
@@ -118,6 +125,12 @@ function LoadsPageContent() {
   const [totalCount, setTotalCount] = useState(0);
   const [refine, setRefine] = useState<RefineState>(defaultRefine);
   const [pageIndex, setPageIndex] = useState(0);
+  const [gridFilters, setGridFilters] = useState<DispatchGridFilterState>({});
+  const [gridSortRules, setGridSortRules] = useState<DispatchGridSortRule[]>([{ column: "pickupAppt", direction: "asc" }]);
+  const [gridDensity] = useState<DispatchGridDensity>("compact");
+  const [gridColumnVisibility] = useState<Partial<Record<DispatchGridColumnKey, boolean>>>({});
+  const [selectedGridLoadId, setSelectedGridLoadId] = useState<string | null>(null);
+  const [selectedGridRows, setSelectedGridRows] = useState<Set<string>>(new Set());
   const [customerSuggestion, setCustomerSuggestion] = useState<{
     customerId: string;
     customerName: string;
@@ -197,7 +210,8 @@ function LoadsPageContent() {
     loadNotes: "",
   });
 
-  const canImport = user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
+  const canImport =
+    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
   const canSeeAllTeams = Boolean(
     user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER" || user?.canSeeAllTeams
   );
@@ -820,17 +834,140 @@ function LoadsPageContent() {
 
   const pagedLoads = filteredLoads;
 
+  const loadWorkflowMacros = useMemo(
+    () => chipDefinitions.map((chip) => ({ id: chip.id, label: chip.label })),
+    [chipDefinitions]
+  );
+
+  const spreadsheetRows = useMemo<DispatchGridRow[]>(() => {
+    const now = Date.now();
+    return pagedLoads.map(({ load, opsStatus, blocker, trackingBadge }) => {
+      const stops = Array.isArray(load.stops) ? load.stops : [];
+      const nextStop = stops.find((stop: any) => !stop.arrivedAt || !stop.departedAt) ?? null;
+      const nextStopTime = nextStop?.appointmentStart ?? nextStop?.appointmentEnd ?? load.shipperApptStart ?? load.consigneeApptEnd ?? null;
+      const nextStopEnd = nextStop?.appointmentEnd ?? null;
+      const overdueStopWindow =
+        Boolean(nextStopEnd) &&
+        now > new Date(nextStopEnd).getTime() &&
+        !nextStop?.arrivedAt;
+
+      const trip = load?.tripLoads?.[0]?.trip ?? null;
+      const needsAssignment = !trip
+        ? !(load?.driver?.id && load?.truck?.id && load?.trailer?.id)
+        : !(trip?.driverId && trip?.truckId && trip?.trailerId) || trip?.status === "PLANNED";
+      const trackingOffInTransit = opsStatus === "IN_TRANSIT" && trackingBadge.state === "OFF";
+
+      const docs = Array.isArray(load.docs) ? load.docs : [];
+      const hasDoc = (types: string[]) => docs.some((doc: any) => types.includes(doc?.type) && doc?.status !== "REJECTED");
+      const hasPod = load.podStatus
+        ? load.podStatus === "VERIFIED" || load.podStatus === "UPLOADED"
+        : hasDoc(["POD"]);
+      const hasBol = hasDoc(["BOL"]);
+      const hasRateCon = hasDoc(["RATECON", "RATE_CONFIRMATION"]);
+
+      const unresolvedExceptions = (load.dispatchExceptions ?? [])
+        .filter((exception: any) => exception?.status !== "RESOLVED")
+        .map((exception: any) => ({
+          id: String(exception.id),
+          type: exception.type ?? "EXCEPTION",
+          severity: exception.severity === "BLOCKER" ? "BLOCKER" : "WARNING",
+          status: exception.status ?? "OPEN",
+          title: exception.title ?? exception.message ?? exception.type ?? "Dispatch issue",
+          message: exception.message ?? null,
+          code: exception.code ?? null,
+        }));
+
+      const issueType = blocker?.type ?? undefined;
+      const issuesTop: DispatchGridRow["issuesTop"] = blocker
+        ? [{
+            type: issueType || "LOAD_ISSUE",
+            label: blocker.title,
+            severity: blocker.severity === "danger" ? "BLOCKER" : "WARNING",
+            focusSection:
+              blocker.type === "NEEDS_DISPATCH"
+                ? "assignment"
+                : blocker.type === "TRACKING_OFF_IN_TRANSIT"
+                ? "tracking"
+                : "documents",
+            actionHint: blocker.subtitle ?? blocker.title,
+          }]
+        : null;
+
+      return {
+        id: load.id,
+        loadNumber: load.loadNumber ?? "Load",
+        status: opsStatus,
+        customerName: load.customer?.name ?? load.customerName ?? null,
+        miles: load.miles ?? null,
+        paidMiles: load.paidMiles ?? null,
+        rate: load.rate ?? null,
+        updatedAt: load.updatedAt ?? load.createdAt ?? null,
+        trip: trip
+          ? {
+              id: trip.id,
+              tripNumber: trip.tripNumber ?? "-",
+              status: trip.status ?? "PLANNED",
+            }
+          : null,
+        assignment: {
+          driver: load.driver?.id ? { id: load.driver.id, name: load.driver.name ?? "Driver" } : null,
+          truck: load.truck?.id ? { id: load.truck.id, unit: load.truck.unit ?? "-" } : null,
+          trailer: load.trailer?.id ? { id: load.trailer.id, unit: load.trailer.unit ?? "-" } : null,
+        },
+        route: {
+          shipperCity: load.shipperCity ?? null,
+          shipperState: load.shipperState ?? null,
+          consigneeCity: load.consigneeCity ?? null,
+          consigneeState: load.consigneeState ?? null,
+        },
+        nextStop: {
+          appointmentStart: load.shipperApptStart ?? nextStop?.appointmentStart ?? null,
+          appointmentEnd: load.consigneeApptEnd ?? nextStop?.appointmentEnd ?? null,
+        },
+        notesIndicator: load.notesIndicator ?? "NONE",
+        docs: {
+          hasPod,
+          hasBol,
+          hasRateCon,
+        },
+        exceptions: unresolvedExceptions,
+        issuesTop,
+        issues: issuesTop,
+        issuesText: blocker?.title ?? null,
+        riskFlags: {
+          needsAssignment,
+          trackingOffInTransit,
+          overdueStopWindow,
+          atRisk: trackingOffInTransit || overdueStopWindow || Boolean(blocker),
+          nextStopTime,
+        },
+      };
+    });
+  }, [pagedLoads]);
+
   const clearFilters = () => {
     setSearchTerm("");
     setActiveChip("active");
     setRefine(defaultRefine);
     setTeamFilterId("");
+    setGridFilters({});
+    setGridSortRules([{ column: "pickupAppt", direction: "asc" }]);
+    setSelectedGridRows(new Set());
+    setSelectedGridLoadId(null);
   };
 
   return (
     <AppShell title="Loads" subtitle="Create, import, and manage loads">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="text-sm text-[color:var(--color-text-muted)]">Exception-first load queue</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-sm text-[color:var(--color-text-muted)]">Exception-first load queue</div>
+          <span className="inline-flex items-center rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] px-2 py-0.5 text-[11px] font-medium text-ink">
+            Loads {filteredLoads.length}
+          </span>
+          {filteredLoads.length !== searchFiltered.length ? (
+            <span className="text-[11px] text-[color:var(--color-text-subtle)]">of {searchFiltered.length} loaded</span>
+          ) : null}
+        </div>
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => setShowCreate((prev) => !prev)}>
             {showCreate ? "Close create" : "Create load"}
@@ -1740,118 +1877,40 @@ function LoadsPageContent() {
         />
       ) : (
         <div className="grid gap-3">
-          {pagedLoads.map(({ load, opsStatus, billingStatus, trackingBadge, blocker, primaryAction }) => {
-            const routeLeft =
-              load.shipperCity && load.shipperState
-                ? `${load.shipperCity}, ${load.shipperState}`
-                : load.shipperName ?? "Shipper";
-            const routeRight =
-              load.consigneeCity && load.consigneeState
-                ? `${load.consigneeCity}, ${load.consigneeState}`
-                : load.consigneeName ?? "Consignee";
-            const trackingText = trackingBadge.state === "ON"
-              ? `Tracking ON${trackingBadge.lastPingAge ? ` · last ping ${trackingBadge.lastPingAge}` : ""}`
-              : `Tracking OFF${trackingBadge.lastPingAge ? ` · last ping ${trackingBadge.lastPingAge}` : ""}`;
-            const bannerTone =
-              blocker?.severity === "danger"
-                ? "border-[color:var(--color-danger)] bg-[color:var(--color-danger-soft)] text-[color:var(--color-danger)]"
-                : blocker?.severity === "warning"
-                  ? "border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
-                  : blocker?.severity === "info"
-                    ? "border-[color:var(--color-info)] bg-[color:var(--color-info-soft)] text-[color:var(--color-info)]"
-                    : "border-transparent";
-            return (
-              <div
-                key={load.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => router.push(`/loads/${load.id}`)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    router.push(`/loads/${load.id}`);
-                  }
-                }}
-                className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-4 shadow-[var(--shadow-subtle)] transition hover:translate-y-[-1px] hover:shadow-[var(--shadow-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="text-sm font-semibold text-ink">LOAD {load.loadNumber}</div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusChip label={opsStatus} tone={statusTone(opsStatus)} />
-                    {billingStatus ? (
-                      <StatusChip
-                        label={billingStatus === "READY" ? "READY TO BILL" : billingStatus}
-                        tone={
-                          billingStatus === "INVOICED"
-                            ? "info"
-                            : billingStatus === "READY"
-                            ? "success"
-                            : "warning"
-                        }
-                      />
-                    ) : null}
-                  </div>
-                </div>
-                <div className="mt-2 text-sm text-[color:var(--color-text-muted)]">
-                  {routeLeft} → {routeRight} • {load.customer?.name ?? load.customerName ?? "Customer"}
-                </div>
-                <div className="mt-2 flex flex-wrap gap-3 text-xs text-[color:var(--color-text-muted)]">
-                  <div>Driver: {load.driver?.name ?? "Unassigned"}</div>
-                  <div>Mode: {load.movementMode ?? "FTL"}</div>
-                  {load.miles ? <div>Miles: {load.miles}</div> : null}
-                  {load.rate ? <div>Rate: {load.rate}</div> : null}
-                  <div>{trackingText}</div>
-                </div>
-                {blocker ? (
-                  <div
-                    className={`mt-3 rounded-[var(--radius-control)] border px-3 py-2 text-xs font-medium leading-snug ${bannerTone}`}
-                  >
-                    {blocker.title}
-                    {blocker.subtitle ? ` • ${blocker.subtitle}` : ""}
-                  </div>
-                ) : null}
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                  <Button
-                    size="sm"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      router.push(primaryAction.href);
-                    }}
-                  >
-                    {primaryAction.label}
-                  </Button>
-                  <details
-                    className="relative"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <summary className="cursor-pointer list-none rounded-full border border-[color:var(--color-divider)] px-3 py-1 text-xs text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]">
-                      •••
-                    </summary>
-                    <div className="absolute right-0 mt-2 w-40 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-2 text-xs shadow-[var(--shadow-card)]">
-                      <button
-                        className="w-full rounded-[var(--radius-control)] px-2 py-2 text-left text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
-                        onClick={() => router.push(`/loads/${load.id}`)}
-                      >
-                        View details
-                      </button>
-                      <button
-                        className="mt-1 w-full rounded-[var(--radius-control)] px-2 py-2 text-left text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
-                        onClick={() => router.push(`/loads/${load.id}`)}
-                      >
-                        Edit load
-                      </button>
-                      <button
-                        className="mt-1 w-full rounded-[var(--radius-control)] px-2 py-2 text-left text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
-                        onClick={() => router.push(`/loads/${load.id}`)}
-                      >
-                        Upload doc
-                      </button>
-                    </div>
-                  </details>
-                </div>
-              </div>
-            );
-          })}
+          <DispatchSpreadsheetGrid
+            rows={spreadsheetRows}
+            filters={gridFilters}
+            sortRules={gridSortRules}
+            selectedLoadId={selectedGridLoadId}
+            selectedRowIds={selectedGridRows}
+            columnVisibility={gridColumnVisibility}
+            density={gridDensity}
+            readOnly
+            onSelectLoad={(loadId) => {
+              setSelectedGridLoadId(loadId);
+              router.push(`/loads/${loadId}`);
+            }}
+            onToggleRowSelection={(loadId, selected) => {
+              setSelectedGridRows((prev) => {
+                const next = new Set(prev);
+                if (selected) next.add(loadId);
+                else next.delete(loadId);
+                return next;
+              });
+            }}
+            onToggleAllRows={(selected, rowIds) => {
+              setSelectedGridRows(selected ? new Set(rowIds) : new Set());
+            }}
+            onFiltersChange={setGridFilters}
+            onSortRulesChange={setGridSortRules}
+            onInlineEdit={async () => undefined}
+            workflowMacros={loadWorkflowMacros}
+            onApplyWorkflowMacro={(macroId) => {
+              if (!chipDefinitions.some((chip) => chip.id === macroId)) return;
+              setActiveChip(macroId);
+              setPageIndex(0);
+            }}
+          />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-[color:var(--color-text-muted)]">
               Page {pageIndex + 1} of {totalPages}

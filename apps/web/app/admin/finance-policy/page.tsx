@@ -40,6 +40,15 @@ const OVERRIDE_ROLE_OPTIONS: Array<"ADMIN" | "BILLING" | "HEAD_DISPATCHER" | "DI
   "DISPATCHER",
 ];
 
+function formatRoleLabel(role: string) {
+  switch (role) {
+    case "HEAD_DISPATCHER":
+      return "Head Dispatcher";
+    default:
+      return role.charAt(0) + role.slice(1).toLowerCase();
+  }
+}
+
 export default function FinancePolicySettingsPage() {
   const router = useRouter();
   const [policy, setPolicy] = useState<FinancePolicy | null>(null);
@@ -220,7 +229,7 @@ export default function FinancePolicySettingsPage() {
                   <CheckboxField
                     key={role}
                     id={`overrideRole_${role}`}
-                    label={role}
+                    label={formatRoleLabel(role)}
                     checked={draft.overrideRoles.includes(role)}
                     onChange={(e) => {
                       if (!draft) return;

@@ -6,128 +6,93 @@ import { AppShell } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { SectionHeader } from "@/components/ui/section-header";
-import { SegmentedControl } from "@/components/ui/segmented-control";
 import { ErrorBanner } from "@/components/ui/error-banner";
+import { Input } from "@/components/ui/input";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
-
-type TodayItem = {
-  severity: "block" | "warning" | "info";
-  title: string;
-  detail?: string | null;
-  href?: string | null;
-  entityType?: string | null;
-  entityId?: string | null;
-  ruleId?: string | null;
-};
-
-type TodayData = {
-  blocks: TodayItem[];
-  warnings: TodayItem[];
-  info: TodayItem[];
-  teamsEnabled?: boolean;
-  scope?: "org" | "team";
-  warningSummary?: Record<string, number>;
-  teamBreakdown?: Array<{ teamId: string; teamName: string; warnings: Record<string, number> }>;
-};
+import {
+  compactRelativeTime,
+  filterActivityItems,
+  roleDefaultDomain,
+  selectActivityBucket,
+  type ActivityDomain,
+  type ActivityDomainFilter,
+  type ActivitySeverity,
+  type ActivitySummaryData,
+  type ActivityTimeFilter,
+} from "./activity-view";
 
 type OnboardingState = {
   status?: "NOT_ACTIVATED" | "OPERATIONAL";
   percentComplete?: number;
-  completedSteps?: string[];
-};
-
-type WarningDetailLoad = {
-  id: string;
-  loadNumber?: string | null;
-  tripId?: string | null;
-  tripNumber?: string | null;
-  customerName?: string | null;
-  status?: string | null;
-  warningReason: string;
-  ageMinutes?: number | null;
-  assignedDriverName?: string | null;
-  stopSummary?: string | null;
-};
-
-type WarningDetails = {
-  teamsEnabled: boolean;
-  scope: "org" | "team";
-  type: string;
-  team?: { teamId: string; teamName: string };
-  loads: WarningDetailLoad[];
-  pageInfo?: { nextCursor?: string | null };
-};
-
-const SECTION_META = [
-  {
-    key: "blocks",
-    label: "Blocks",
-    subtitle: "Must resolve before the next step",
-    tone: "danger",
-  },
-  {
-    key: "warnings",
-    label: "Warnings",
-    subtitle: "Needs eyes within the next shift",
-    tone: "warning",
-  },
-  {
-    key: "info",
-    label: "Info",
-    subtitle: "Nice to close out today",
-    tone: "info",
-  },
-] as const;
-
-const WARNING_META = [
-  { key: "dispatch_unassigned_loads", label: "Unassigned trips", title: "Unassigned trips need coverage" },
-  { key: "dispatch_stuck_in_transit", label: "Stuck in transit", title: "Trips stuck in transit" },
-] as const;
-
-const TONE_CLASS: Record<(typeof SECTION_META)[number]["tone"], string> = {
-  danger: "border-0 border-l-4 border-l-[color:var(--color-danger)] bg-[color:var(--color-surface)]",
-  warning: "border-0 border-l-4 border-l-[color:var(--color-warning)] bg-[color:var(--color-surface)]",
-  info: "border-0 bg-[color:var(--color-surface)]",
 };
 
 const GLOSSY_SURFACE =
   "bg-[color:var(--color-surface-elevated)] shadow-[var(--shadow-surface-gloss)]";
 
-const SETUP_STEPS: Array<{ key: string; label: string }> = [
-  { key: "basics", label: "Company basics" },
-  { key: "operating", label: "Operating entities" },
-  { key: "team", label: "Invite team" },
-  { key: "drivers", label: "Add drivers" },
-  { key: "fleet", label: "Add fleet" },
-  { key: "preferences", label: "Document rules" },
-  { key: "tracking", label: "Tracking setup" },
-  { key: "finance", label: "Finance defaults" },
+const SEVERITY_BADGE: Record<ActivitySeverity, string> = {
+  ALERT: "border-[color:var(--color-danger)] text-[color:var(--color-danger)]",
+  IMPORTANT: "border-[color:var(--color-warning)] text-[color:var(--color-warning)]",
+  INFO: "border-[color:var(--color-divider-strong)] text-[color:var(--color-text-muted)]",
+};
+
+const DOMAIN_LABEL: Record<ActivityDomain, string> = {
+  DISPATCH: "Dispatch",
+  BILLING: "Billing",
+  SAFETY: "Safety",
+  SYSTEM: "System",
+};
+
+const TIME_TABS: Array<{ key: ActivityTimeFilter; label: string }> = [
+  { key: "now", label: "Now" },
+  { key: "week", label: "This week" },
+  { key: "history", label: "History" },
 ];
 
-function TodayContent() {
+const DOMAIN_FILTERS: Array<{ key: ActivityDomainFilter; label: string }> = [
+  { key: "all", label: "All" },
+  { key: "dispatch", label: "Dispatch" },
+  { key: "billing", label: "Billing" },
+  { key: "safety", label: "Safety" },
+];
+
+const SEVERITY_FILTERS: Array<{ key: ActivitySeverity; label: string }> = [
+  { key: "ALERT", label: "Alert" },
+  { key: "IMPORTANT", label: "Important" },
+  { key: "INFO", label: "Info" },
+];
+
+function countLabel(count?: number) {
+  const value = count ?? 1;
+  return `${value} item${value === 1 ? "" : "s"}`;
+}
+
+function KpiCard({ label, value }: { label: string; value: number }) {
+  return (
+    <Card className="border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2">
+      <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-subtle)]">{label}</div>
+      <div className="text-lg font-semibold text-ink">{value}</div>
+    </Card>
+  );
+}
+
+function ActivityContent() {
   const router = useRouter();
   const { user } = useUser();
-  const [data, setData] = useState<TodayData | null>(null);
+  const [data, setData] = useState<ActivitySummaryData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"company" | "teams">("company");
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [detailsLoading, setDetailsLoading] = useState(false);
-  const [detailsError, setDetailsError] = useState<string | null>(null);
-  const [detailsData, setDetailsData] = useState<WarningDetails | null>(null);
-  const [detailsLoads, setDetailsLoads] = useState<WarningDetailLoad[]>([]);
-  const [detailsNextCursor, setDetailsNextCursor] = useState<string | null>(null);
-  const [detailsQuery, setDetailsQuery] = useState<{ type: string; teamId?: string | null } | null>(null);
-  const [showAllTeams, setShowAllTeams] = useState(false);
+  const [timeFilter, setTimeFilter] = useState<ActivityTimeFilter>("now");
+  const [domainFilter, setDomainFilter] = useState<ActivityDomainFilter>("all");
+  const [search, setSearch] = useState("");
+  const [severities, setSeverities] = useState<Set<ActivitySeverity>>(new Set(["ALERT", "IMPORTANT"]));
 
-  const loadToday = async () => {
+  const loadActivity = async () => {
     setLoading(true);
     try {
-      const payload = await apiFetch<TodayData>("/today");
+      const payload = await apiFetch<ActivitySummaryData>("/activity/summary");
       setData(payload);
       setError(null);
     } catch (err) {
@@ -138,16 +103,8 @@ function TodayContent() {
   };
 
   useEffect(() => {
-    loadToday();
+    loadActivity();
   }, []);
-
-  const canSeeTeamsView = Boolean(data?.teamsEnabled && (user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER"));
-
-  useEffect(() => {
-    if (!canSeeTeamsView) {
-      setViewMode("company");
-    }
-  }, [canSeeTeamsView]);
 
   useEffect(() => {
     if (!user || user.role !== "ADMIN") {
@@ -165,369 +122,199 @@ function TodayContent() {
       });
   }, [user]);
 
-  const totalItems = useMemo(() => {
-    if (!data) return 0;
-    return data.blocks.length + data.warnings.length + data.info.length;
-  }, [data]);
+  useEffect(() => {
+    if (domainFilter !== "all") return;
+    if (data?.defaultDomain) {
+      setDomainFilter(data.defaultDomain);
+      return;
+    }
+    setDomainFilter(roleDefaultDomain(user?.role));
+  }, [data?.defaultDomain, user?.role, domainFilter]);
 
-  const baseSubtitle = user?.role ? `${user.role.toLowerCase()} focus` : "Your attention stack";
-  const showTeamToggle = Boolean(data?.teamsEnabled && canSeeTeamsView);
-  const subtitle = showTeamToggle
-    ? viewMode === "teams"
-      ? "Team focus"
-      : "Company focus"
-    : data?.teamsEnabled && data.scope === "team"
-      ? "Your team focus"
-      : baseSubtitle;
+  const bucketItems = useMemo(() => selectActivityBucket(data, timeFilter), [data, timeFilter]);
+  const filteredItems = useMemo(
+    () =>
+      filterActivityItems({
+        items: bucketItems,
+        domain: domainFilter,
+        severities,
+        search,
+      }),
+    [bucketItems, domainFilter, severities, search]
+  );
+
+  const hasBlockers = useMemo(() => (data?.now ?? []).some((item) => item.severity === "ALERT"), [data?.now]);
   const showSetup = onboarding?.status === "NOT_ACTIVATED";
-  const completedSteps = new Set(onboarding?.completedSteps ?? []);
-  const remainingSteps = SETUP_STEPS.filter((step) => !completedSteps.has(step.key));
-  const setupPreview = remainingSteps.slice(0, 3);
-  const isDispatcherRole = user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
-  const teamTotals = useMemo(() => {
-    const teams = data?.teamBreakdown ?? [];
-    return teams
-      .map((team) => {
-        const total = WARNING_META.reduce((sum, warning) => sum + (team.warnings?.[warning.key] ?? 0), 0);
-        return { ...team, total };
-      })
-      .sort((a, b) => b.total - a.total);
-  }, [data]);
-  const visibleTeams = showAllTeams ? teamTotals : teamTotals.slice(0, 6);
-  const totalTeams = teamTotals.length;
-  const totalWarnings = teamTotals.reduce((sum, team) => sum + team.total, 0);
 
-  const resolveItemHref = (item: TodayItem) => {
-    if (!item.href) return null;
-    if (isDispatcherRole) {
-      if (item.href.startsWith("/trips")) {
-        return item.entityType === "trip" && item.entityId
-          ? `/dispatch?tab=trips&tripId=${item.entityId}`
-          : "/dispatch?tab=trips";
+  const toggleSeverity = (severity: ActivitySeverity) => {
+    setSeverities((prev) => {
+      const next = new Set(prev);
+      if (next.has(severity)) {
+        next.delete(severity);
+      } else {
+        next.add(severity);
       }
-      if (item.entityType === "trip" && item.entityId) {
-        return `/dispatch?tab=trips&tripId=${item.entityId}`;
-      }
-      if (item.entityType === "load" && item.entityId) {
-        return `/dispatch?loadId=${item.entityId}`;
-      }
-      if (item.href.startsWith("/loads")) {
-        return "/dispatch?tab=trips";
-      }
-    }
-    return item.href;
+      return next.size === 0 ? new Set(["ALERT"]) : next;
+    });
   };
 
-  const handleFixNow = async (item: TodayItem) => {
-    if (item.ruleId) {
-      apiFetch("/learning/attention-outcome", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ruleId: item.ruleId,
-          severity: item.severity,
-          entityType: item.entityType ?? null,
-          outcome: "FIXED",
-        }),
-      }).catch(() => null);
-    }
-    const href = resolveItemHref(item);
-    if (href) {
-      router.push(href);
-    }
-  };
+  const subtitle = user?.role ? `${user.role.toLowerCase()} focus` : "Role-aware action stack";
 
-  const fetchWarningDetails = async (params: { type: string; teamId?: string | null; cursor?: string | null; append?: boolean }) => {
-    const query = new URLSearchParams();
-    query.set("type", params.type);
-    query.set("limit", "25");
-    if (params.teamId) query.set("teamId", params.teamId);
-    if (params.cursor) query.set("cursor", params.cursor);
-    const payload = await apiFetch<WarningDetails>(`/today/warnings/details?${query.toString()}`);
-    setDetailsData(payload);
-    setDetailsNextCursor(payload.pageInfo?.nextCursor ?? null);
-    if (params.append) {
-      setDetailsLoads((prev) => [...prev, ...(payload.loads ?? [])]);
-    } else {
-      setDetailsLoads(payload.loads ?? []);
-    }
-  };
-
-  const openWarningDetails = async (type: string, teamId?: string | null) => {
-    setDetailsOpen(true);
-    setDetailsLoading(true);
-    setDetailsError(null);
-    setDetailsQuery({ type, teamId });
-    try {
-      await fetchWarningDetails({ type, teamId });
-    } catch (err) {
-      setDetailsError((err as Error).message);
-    } finally {
-      setDetailsLoading(false);
-    }
-  };
-
-  const loadMoreDetails = async () => {
-    if (!detailsQuery || !detailsNextCursor) return;
-    setDetailsLoading(true);
-    try {
-      await fetchWarningDetails({
-        type: detailsQuery.type,
-        teamId: detailsQuery.teamId ?? null,
-        cursor: detailsNextCursor,
-        append: true,
-      });
-    } catch (err) {
-      setDetailsError((err as Error).message);
-    } finally {
-      setDetailsLoading(false);
-    }
+  const kpis = data?.kpis ?? {
+    openAlerts: 0,
+    openExceptions: 0,
+    dueToday: 0,
+    dueThisWeek: 0,
+    missingPod: 0,
+    unassignedLoads: 0,
+    atRiskStops: 0,
   };
 
   return (
-    <div className="w-full space-y-6">
-      <div className={`rounded-[var(--radius-card)] border-0 px-6 py-4 ${GLOSSY_SURFACE}`}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="w-full space-y-4">
+      <div className={`rounded-[var(--radius-card)] border-0 px-4 py-3 ${GLOSSY_SURFACE}`}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-muted)]">Today</div>
-            <div className="text-xl font-semibold text-ink">Priority stack</div>
-            <div className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</div>
+            <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--color-text-muted)]">Activity</div>
+            <div className="text-lg font-semibold text-ink">Priority stack</div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">{subtitle}</div>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {showTeamToggle ? (
-              <SegmentedControl
-                value={viewMode}
-                options={[
-                  { label: "Company", value: "company" },
-                  { label: "Teams", value: "teams" },
-                ]}
-                onChange={(value) => setViewMode(value as "company" | "teams")}
-              />
-            ) : null}
-            <Button variant="secondary" onClick={loadToday} disabled={loading}>
-              {loading ? "Refreshing…" : "Refresh"}
-            </Button>
-          </div>
+          <Button size="sm" variant="secondary" onClick={loadActivity} disabled={loading}>
+            {loading ? "Refreshing…" : "Refresh"}
+          </Button>
         </div>
       </div>
 
       <div className="border-t border-[color:var(--color-divider)]" />
 
       {error ? <ErrorBanner message={error} /> : null}
-
       {user?.role === "ADMIN" && onboardingError ? <ErrorBanner message={onboardingError} /> : null}
 
       {showSetup ? (
-        <Card className="space-y-3 border border-[color:var(--color-divider)] bg-white/90">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+        <Card className="space-y-2 border border-[color:var(--color-divider)] bg-white/90 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
               <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Setup actions</div>
-              <div className="text-lg font-semibold">Activate your workspace</div>
-              <div className="text-sm text-[color:var(--color-text-muted)]">
+              <div className="text-base font-semibold">Activate your workspace</div>
+              <div className="text-xs text-[color:var(--color-text-muted)]">
                 {onboarding?.percentComplete ?? 0}% complete · Finish setup to unlock full operations.
               </div>
             </div>
-            <Button onClick={() => router.push("/onboarding")}>Finish setup</Button>
-          </div>
-          <div className="grid gap-2 text-sm text-[color:var(--color-text-muted)]">
-            {setupPreview.length > 0 ? (
-              setupPreview.map((step) => (
-                <div key={step.key} className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2">
-                  <span>{step.label}</span>
-                  <Button size="sm" variant="secondary" onClick={() => router.push("/onboarding")}>
-                    Continue
-                  </Button>
-                </div>
-              ))
-            ) : (
-              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white px-3 py-2">
-                Review your setup and activate the workspace.
-              </div>
-            )}
+            <Button size="sm" onClick={() => router.push("/onboarding")}>
+              Finish setup
+            </Button>
           </div>
         </Card>
       ) : null}
 
-      {!loading && data && totalItems === 0 ? (
-        <EmptyState title="All clear." description="No urgent actions detected right now." />
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <KpiCard label="Open alerts" value={kpis.openAlerts} />
+        <KpiCard label="Open exceptions" value={kpis.openExceptions} />
+        <KpiCard label="Due today" value={kpis.dueToday} />
+        <KpiCard label="Due this week" value={kpis.dueThisWeek} />
+        {user?.role === "BILLING" ? <KpiCard label="Missing POD" value={kpis.missingPod} /> : null}
+        {user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER" ? (
+          <>
+            <KpiCard label="Unassigned loads" value={kpis.unassignedLoads} />
+            <KpiCard label="At-risk stops" value={kpis.atRiskStops} />
+          </>
+        ) : null}
+      </div>
+
+      {!loading && (data?.now?.length ?? 0) > 0 && !hasBlockers ? (
+        <Card className="border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+          No blocking issues right now.
+        </Card>
       ) : null}
 
-      <div className="grid gap-7 lg:grid-cols-3">
-        {SECTION_META.map((section) => {
-          const items = data ? data[section.key] : [];
-          const isWarnings = section.key === "warnings";
-          const warningSubtitle = isWarnings && showTeamToggle ? (viewMode === "teams" ? "Team view" : "Company view") : section.subtitle;
-          return (
-            <div key={section.key} className="space-y-3">
-              <SectionHeader title={section.label} subtitle={warningSubtitle} />
-              {loading ? (
-                <Card className={`min-h-[130px] border-0 p-4 text-sm text-[color:var(--color-text-muted)] ${GLOSSY_SURFACE}`}>
-                  Loading…
-                </Card>
-              ) : isWarnings && showTeamToggle && viewMode === "teams" ? (
-                teamTotals.length === 0 ? (
-                  <Card className={`min-h-[130px] border-0 p-4 text-sm text-[color:var(--color-text-muted)] ${GLOSSY_SURFACE}`}>
-                    Nothing here right now.
-                  </Card>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="text-xs text-[color:var(--color-text-muted)]">
-                      {totalTeams} teams · {totalWarnings} warnings
-                    </div>
-                    <div className="space-y-2">
-                      {visibleTeams.map((team) => (
-                        <Card key={team.teamId} className={`space-y-3 border-0 p-4 ${GLOSSY_SURFACE}`}>
-                          <div className="text-sm font-semibold">{team.teamName}</div>
-                          <div className="flex flex-wrap gap-2">
-                            {WARNING_META.map((warning) => {
-                              const count = team.warnings?.[warning.key] ?? 0;
-                              return (
-                                <button
-                                  key={warning.key}
-                                  type="button"
-                                  disabled={count === 0}
-                                  className={`rounded-full border px-3 py-1 text-xs ${
-                                    count === 0
-                                      ? "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"
-                                      : "border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] text-ink"
-                                  }`}
-                                  onClick={() => openWarningDetails(warning.key, team.teamId)}
-                                >
-                                  {warning.label} · {count}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </Card>
-                      ))}
-                    </div>
-                    {totalTeams > 6 ? (
-                      <Button variant="secondary" onClick={() => setShowAllTeams((prev) => !prev)}>
-                        {showAllTeams ? "Show fewer teams" : "View all teams"}
-                      </Button>
-                    ) : null}
-                  </div>
-                )
-              ) : items.length === 0 ? (
-                <Card className={`min-h-[130px] border-0 p-4 text-sm text-[color:var(--color-text-muted)] ${GLOSSY_SURFACE}`}>
-                  Nothing here right now.
-                </Card>
-              ) : (
-                items.map((item, index) => (
-                  <Card
-                    key={`${item.title}-${index}`}
-                    className={`min-h-[130px] space-y-2 p-4 ${TONE_CLASS[section.tone]} ${GLOSSY_SURFACE}`}
-                  >
-                    <div className="text-sm font-medium text-ink">{item.title}</div>
-                    {item.detail ? <div className="text-xs text-[color:var(--color-text-muted)]">{item.detail}</div> : null}
-                    {item.href ? (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => {
-                          if (isWarnings && item.ruleId) {
-                            openWarningDetails(item.ruleId);
-                          } else {
-                            handleFixNow(item);
-                          }
-                        }}
-                      >
-                        Fix now
-                      </Button>
-                    ) : null}
-                  </Card>
-                ))
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {detailsOpen ? (
-        <div className="fixed inset-0 z-40">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/20"
-            onClick={() => setDetailsOpen(false)}
-            aria-label="Close details"
+      <Card className="space-y-3 border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {TIME_TABS.map((tab) => (
+            <Button
+              key={tab.key}
+              size="sm"
+              variant={timeFilter === tab.key ? "primary" : "secondary"}
+              onClick={() => setTimeFilter(tab.key)}
+            >
+              {tab.label}
+            </Button>
+          ))}
+        </div>
+        <div className="grid gap-2 lg:grid-cols-[1fr_auto_auto]">
+          <Input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search activity"
+            className="h-9"
           />
-          <div className="absolute right-0 top-0 h-full w-full max-w-md overflow-y-auto bg-white p-6 shadow-[var(--shadow-subtle)]">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Warnings</div>
-                <div className="text-lg font-semibold">
-                  {WARNING_META.find((warning) => warning.key === detailsData?.type)?.title ?? "Details"}
-                </div>
-                {detailsData?.team?.teamName ? (
-                  <div className="text-xs text-[color:var(--color-text-muted)]">Team {detailsData.team.teamName}</div>
-                ) : null}
-              </div>
-              <Button variant="secondary" onClick={() => setDetailsOpen(false)}>
-                Close
+          <div className="flex flex-wrap gap-1">
+            {DOMAIN_FILTERS.map((option) => (
+              <Button
+                key={option.key}
+                size="sm"
+                variant={domainFilter === option.key ? "primary" : "secondary"}
+                onClick={() => setDomainFilter(option.key)}
+              >
+                {option.label}
               </Button>
-            </div>
-            <div className="mt-4 space-y-3">
-              {detailsLoading ? (
-                <Card className="text-sm text-[color:var(--color-text-muted)]">Loading details…</Card>
-              ) : detailsError ? (
-                <ErrorBanner message={detailsError} />
-              ) : detailsLoads.length === 0 ? (
-                <Card className="text-sm text-[color:var(--color-text-muted)]">No matching loads.</Card>
-              ) : (
-                detailsLoads.map((load) => (
-                  <Card
-                    key={load.id}
-                    className="space-y-1 border border-[color:var(--color-divider)] pl-5 pr-4"
-                  >
-                    <div className="text-sm font-semibold">
-                      {load.tripNumber ? `${load.tripNumber} · ` : ""}
-                      {load.loadNumber ?? "Load"}
-                    </div>
-                    {load.customerName ? <div className="text-xs text-[color:var(--color-text-muted)]">{load.customerName}</div> : null}
-                    <div className="text-xs text-[color:var(--color-text-muted)]">{load.warningReason}</div>
-                    {load.stopSummary ? (
-                      <div className="text-xs text-[color:var(--color-text-muted)]">{load.stopSummary}</div>
-                    ) : null}
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 text-xs text-[color:var(--color-text-muted)]">
-                      <span>{load.assignedDriverName ? `Driver ${load.assignedDriverName}` : "Unassigned driver"}</span>
-                      {load.ageMinutes !== null && load.ageMinutes !== undefined ? (
-                        <span>{load.ageMinutes} min</span>
-                      ) : null}
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() =>
-                        router.push(
-                          isDispatcherRole
-                            ? load.tripId
-                              ? `/dispatch?tab=trips&tripId=${load.tripId}`
-                              : `/dispatch?loadId=${load.id}`
-                            : `/loads/${load.id}`
-                        )
-                      }
-                    >
-                      {isDispatcherRole ? (load.tripId ? "Open trip" : "Open load") : "Open load"}
-                    </Button>
-                  </Card>
-                ))
-              )}
-              {detailsNextCursor ? (
-                <Button variant="secondary" onClick={loadMoreDetails} disabled={detailsLoading}>
-                  Load more
-                </Button>
-              ) : null}
-            </div>
+            ))}
           </div>
+          <div className="flex flex-wrap gap-1">
+            {SEVERITY_FILTERS.map((option) => (
+              <Button
+                key={option.key}
+                size="sm"
+                variant={severities.has(option.key) ? "primary" : "secondary"}
+                onClick={() => toggleSeverity(option.key)}
+              >
+                {option.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {!loading && filteredItems.length === 0 ? (
+        <EmptyState title="Nothing needs attention right now." description="No activity items match the current filters." />
+      ) : null}
+
+      {filteredItems.length > 0 ? (
+        <div className="space-y-2">
+          {filteredItems.map((item) => (
+            <Card key={item.id} className={`border border-[color:var(--color-divider)] px-3 py-2.5 ${GLOSSY_SURFACE}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="space-y-0.5">
+                  <div className="text-sm font-semibold text-ink">{item.title}</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">
+                    {countLabel(item.count)} · {compactRelativeTime(item.timestamp)}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] ${SEVERITY_BADGE[item.severity]}`}
+                    >
+                      {item.severity}
+                    </span>
+                    <span className="text-[11px] uppercase tracking-[0.18em] text-[color:var(--color-text-muted)]">
+                      {DOMAIN_LABEL[item.domain]}
+                    </span>
+                  </div>
+                </div>
+                <Button size="sm" variant="secondary" onClick={() => router.push(item.cta.href)}>
+                  {item.cta.label}
+                </Button>
+              </div>
+            </Card>
+          ))}
         </div>
       ) : null}
     </div>
   );
 }
 
-export default function TodayPage() {
+export default function ActivityPage() {
   return (
-    <AppShell title="Today" subtitle="Priority stack" hideHeader>
-      <TodayContent />
+    <AppShell title="Activity" subtitle="Role-aware action queue" hideHeader>
+      <ActivityContent />
     </AppShell>
   );
 }

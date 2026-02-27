@@ -13,6 +13,7 @@ import { NoAccess } from "@/components/rbac/no-access";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
 import { API_BASE } from "@/lib/apiBase";
+import { formatDate as formatDate24 } from "@/lib/date-time";
 
 type FinanceReceivableRow = {
   loadId: string;
@@ -119,10 +120,12 @@ function formatCurrency(cents: number) {
 }
 
 function formatDate(value: string | null) {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleDateString();
+  return formatDate24(value, "-");
+}
+
+function csvEscape(value: string) {
+  if (!/[",\n]/.test(value)) return value;
+  return `"${value.replaceAll('"', '""')}"`;
 }
 
 function stageTone(stage: FinanceReceivableRow["billingStage"]) {
@@ -191,6 +194,7 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
   const [submittingManualPayment, setSubmittingManualPayment] = useState(false);
   const [paymentHistory, setPaymentHistory] = useState<Record<string, InvoicePaymentRecord[]>>({});
   const [loadingPaymentHistoryFor, setLoadingPaymentHistoryFor] = useState<string | null>(null);
+  const [exportingPreset, setExportingPreset] = useState<"ar" | "readiness" | "factoring" | null>(null);
 
   const selectedView = useMemo(() => SAVED_VIEWS.find((item) => item.key === view) ?? SAVED_VIEWS[0], [view]);
 
@@ -504,6 +508,112 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
     [canRecordPayment, fetchRows, openManualPayment]
   );
 
+  const exportPreset = useCallback(
+    async (preset: "ar" | "readiness" | "factoring") => {
+      if (!rows.length) {
+        setActionError("No receivables in the current view to export.");
+        return;
+      }
+      setExportingPreset(preset);
+      setActionError(null);
+      try {
+        const headersByPreset: Record<"ar" | "readiness" | "factoring", string[]> = {
+          ar: [
+            "Load #",
+            "Customer",
+            "Amount",
+            "Stage",
+            "Invoice #",
+            "Invoice Sent",
+            "Due Date",
+            "Aging",
+            "Days Outstanding",
+            "QBO Sync",
+          ],
+          readiness: [
+            "Load #",
+            "Customer",
+            "Ready",
+            "Blocker Owner",
+            "Blockers",
+            "Top Blocker",
+            "Next Action",
+            "Priority Score",
+            "Delivered At",
+          ],
+          factoring: [
+            "Load #",
+            "Customer",
+            "Amount",
+            "Factor Ready",
+            "Factor Ready Reasons",
+            "Last Submission Status",
+            "Last Submission At",
+            "Last Submission Error",
+          ],
+        };
+        const rowsByPreset: Record<"ar" | "readiness" | "factoring", string[][]> = {
+          ar: rows.map((row) => [
+            row.loadNumber,
+            row.customer ?? "",
+            formatCurrency(row.amountCents),
+            stageLabel(row.billingStage),
+            row.invoice.invoiceNumber ?? "",
+            formatDate(row.invoice.invoiceSentAt),
+            formatDate(row.invoice.dueDate),
+            row.collections.agingBucket,
+            row.collections.daysOutstanding === null ? "" : String(row.collections.daysOutstanding),
+            row.integrations.quickbooks.syncStatus,
+          ]),
+          readiness: rows.map((row) => [
+            row.loadNumber,
+            row.customer ?? "",
+            row.readinessSnapshot.isReady ? "READY" : "BLOCKED",
+            row.blockerOwner ?? "",
+            row.readinessSnapshot.blockers.map((blocker) => blocker.code).join(" | "),
+            row.topBlocker?.message ?? "",
+            actionLabel(row.nextBestAction || row.actions.primaryAction),
+            String(row.priorityScore ?? 0),
+            formatDate(row.deliveredAt),
+          ]),
+          factoring: rows.map((row) => [
+            row.loadNumber,
+            row.customer ?? "",
+            formatCurrency(row.amountCents),
+            row.factorReady === false ? "NO" : "YES",
+            (row.factorReadyReasonCodes ?? []).join(" | "),
+            row.factoring.lastSubmission?.status ?? "",
+            formatDate(row.factoring.lastSubmission?.createdAt ?? null),
+            row.factoring.lastSubmission?.errorMessage ?? "",
+          ]),
+        };
+        const headers = headersByPreset[preset];
+        const bodyRows = rowsByPreset[preset];
+        const lines = [headers.map(csvEscape).join(",")];
+        for (const line of bodyRows) {
+          lines.push(line.map((value) => csvEscape(value)).join(","));
+        }
+        const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+        const datePart = new Date().toISOString().slice(0, 10);
+        const filename = `receivables_${preset}_${selectedView.key}_${datePart}.csv`;
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+        setActionNote(`Exported ${bodyRows.length} receivable row(s) for ${preset.toUpperCase()}.`);
+      } catch (err) {
+        setActionError((err as Error).message || "Failed to export receivables.");
+      } finally {
+        setExportingPreset(null);
+      }
+    },
+    [rows, selectedView.key]
+  );
+
   if (loading) {
     return <EmptyState title="Checking access..." />;
   }
@@ -598,6 +708,30 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
             {rows.length > 0 && rows.every((row) => selectedIds.includes(row.loadId)) ? "Unselect page" : "Select page"}
           </Button>
           <div className="text-xs text-[color:var(--color-text-muted)]">{selectedIds.length} selected</div>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={exportingPreset !== null || rows.length === 0}
+            onClick={() => void exportPreset("ar")}
+          >
+            {exportingPreset === "ar" ? "Exporting..." : "Export AR"}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={exportingPreset !== null || rows.length === 0}
+            onClick={() => void exportPreset("readiness")}
+          >
+            {exportingPreset === "readiness" ? "Exporting..." : "Export readiness"}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={exportingPreset !== null || rows.length === 0}
+            onClick={() => void exportPreset("factoring")}
+          >
+            {exportingPreset === "factoring" ? "Exporting..." : "Export factoring"}
+          </Button>
           <Button
             size="sm"
             variant="secondary"
