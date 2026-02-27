@@ -2240,6 +2240,12 @@ async function transitionLoadStatus(params: {
   if (params.load.status === params.nextStatus) {
     return params.load;
   }
+  const kernelShadowBefore = STATE_KERNEL_SHADOW
+    ? await prisma.load.findUnique({
+      where: { id: params.load.id },
+      select: { status: true, billingStatus: true, podVerifiedAt: true },
+    })
+    : null;
   await assertLoadTripExecutionInvariant({
     orgId: params.orgId,
     loadId: params.load.id,
@@ -2331,6 +2337,20 @@ async function transitionLoadStatus(params: {
     trigger: params.nextStatus,
     dedupeSuffix: `${params.load.status}->${params.nextStatus}`,
   });
+  if (kernelShadowBefore) {
+    await maybeLogLoadKernelShadow({
+      orgId: params.orgId,
+      userId: params.userId,
+      loadId: params.load.id,
+      route: "transitionLoadStatus",
+      method: "INTERNAL",
+      before: {
+        status: kernelShadowBefore.status,
+        billingStatus: kernelShadowBefore.billingStatus,
+        podVerifiedAt: kernelShadowBefore.podVerifiedAt,
+      },
+    });
+  }
   return updated;
 }
 
