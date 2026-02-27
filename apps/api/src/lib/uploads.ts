@@ -134,13 +134,44 @@ export async function saveDocumentFile(file: Express.Multer.File, loadId: string
 }
 
 export async function saveLoadConfirmationFile(file: Express.Multer.File, orgId: string, docId: string) {
+  return saveLoadConfirmationBuffer({
+    buffer: file.buffer,
+    originalName: file.originalname || "load-confirmation",
+    orgId,
+    docId,
+  });
+}
+
+export async function saveLoadConfirmationBuffer(params: {
+  buffer: Buffer;
+  originalName: string;
+  orgId: string;
+  docId: string;
+}) {
   await ensureUploadDirs();
-  const original = file.originalname || "load-confirmation";
+  const original = params.originalName || "load-confirmation";
   const safeName = path.basename(original).replace(/[^a-zA-Z0-9._-]/g, "_");
-  const storageKey = path.posix.join("org", orgId, "load-confirmations", docId, safeName);
+  const storageKey = path.posix.join("org", params.orgId, "load-confirmations", params.docId, safeName);
   const target = resolveUploadPath(storageKey);
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, file.buffer);
+  await fs.writeFile(target, params.buffer);
+  return { filename: safeName, storageKey };
+}
+
+export async function saveInboundEmailAttachmentBuffer(params: {
+  buffer: Buffer;
+  originalName: string;
+  orgId?: string | null;
+  emailId: string;
+}) {
+  await ensureUploadDirs();
+  const original = params.originalName || "attachment";
+  const safeName = path.basename(original).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const orgSegment = params.orgId || "unrouted";
+  const storageKey = path.posix.join("org", orgSegment, "inbound-email", params.emailId, safeName);
+  const target = resolveUploadPath(storageKey);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, params.buffer);
   return { filename: safeName, storageKey };
 }
 
