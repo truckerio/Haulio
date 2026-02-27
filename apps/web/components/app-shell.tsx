@@ -97,6 +97,8 @@ const roleRoutes: Record<string, string[]> = {
   HEAD_DISPATCHER: ["/loads", "/dispatch", "/trips", "/teams", "/finance", "/profile"],
   DISPATCHER: ["/loads", "/dispatch", "/trips", "/finance", "/profile"],
   BILLING: ["/today", "/dashboard", "/loads", "/trips", "/finance", "/profile"],
+  SAFETY: ["/loads", "/trips", "/profile"],
+  SUPPORT: ["/loads", "/trips", "/profile"],
   DRIVER: ["/driver"],
 };
 

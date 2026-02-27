@@ -18,6 +18,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch, getApiBase } from "@/lib/api";
+import { getRoleCapabilities } from "@/lib/capabilities";
 import { BulkLoadImport } from "@/components/BulkLoadImport";
 import { ImportWizard } from "@/components/ImportWizard";
 import {
@@ -210,11 +211,9 @@ function LoadsPageContent() {
     loadNotes: "",
   });
 
-  const canImport =
-    user?.role === "ADMIN" || user?.role === "DISPATCHER" || user?.role === "HEAD_DISPATCHER";
-  const canSeeAllTeams = Boolean(
-    user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER" || user?.canSeeAllTeams
-  );
+  const roleCapabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
+  const canImport = roleCapabilities.canEditLoad || roleCapabilities.canDispatchExecution;
+  const canSeeAllTeams = Boolean(roleCapabilities.canSeeTeamsOps || user?.canSeeAllTeams);
   const archivedMode = activeChip === "archived";
 
   const buildParams = useCallback((options?: {
@@ -260,11 +259,17 @@ function LoadsPageContent() {
   const loadData = useCallback(async () => {
     const query = buildParams({ page: pageIndex + 1, limit: PAGE_SIZE, includeChip: true });
     const url = query ? `/loads?${query}` : "/loads";
-    const [loadsData, driversData] = await Promise.all([
-      apiFetch<{ loads: any[]; page: number; totalPages: number; total: number }>(url),
-      apiFetch<{ drivers: any[] }>("/assets/drivers"),
-    ]);
-    setDrivers(driversData.drivers);
+    const loadsData = await apiFetch<{ loads: any[]; page: number; totalPages: number; total: number }>(url);
+    if (roleCapabilities.canDispatchExecution || roleCapabilities.canBillActions) {
+      try {
+        const driversData = await apiFetch<{ drivers: any[] }>("/assets/drivers");
+        setDrivers(driversData.drivers);
+      } catch {
+        setDrivers([]);
+      }
+    } else {
+      setDrivers([]);
+    }
     setLoads(loadsData.loads);
     setTotalPages(loadsData.totalPages ?? 1);
     setTotalCount(loadsData.total ?? loadsData.loads.length);
@@ -274,7 +279,7 @@ function LoadsPageContent() {
     } catch {
       setOperatingEntities([]);
     }
-  }, [buildParams, pageIndex]);
+  }, [buildParams, pageIndex, user?.role]);
 
   useEffect(() => {
     loadData();

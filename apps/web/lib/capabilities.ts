@@ -1,4 +1,4 @@
-export type CanonicalRole = "ADMIN" | "DISPATCHER" | "HEAD_DISPATCHER" | "BILLING" | "DRIVER";
+export type CanonicalRole = "ADMIN" | "DISPATCHER" | "HEAD_DISPATCHER" | "BILLING" | "DRIVER" | "SAFETY" | "SUPPORT";
 export type OperatingMode = "CARRIER" | "BROKER" | "BOTH" | null | undefined;
 export type DispatchWorkspace = "trips" | "loads";
 
@@ -26,10 +26,19 @@ type RoleCapabilities = {
   canBillActions: boolean;
   canDeleteLoad: boolean;
   canCreateLoadNotes: boolean;
+  canViewSettlementPreview: boolean;
 };
 
 function asCanonicalRole(role?: string | null): CanonicalRole | null {
-  if (role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER" || role === "BILLING" || role === "DRIVER") {
+  if (
+    role === "ADMIN" ||
+    role === "DISPATCHER" ||
+    role === "HEAD_DISPATCHER" ||
+    role === "BILLING" ||
+    role === "DRIVER" ||
+    role === "SAFETY" ||
+    role === "SUPPORT"
+  ) {
     return role;
   }
   return null;
@@ -59,6 +68,7 @@ const EMPTY_CAPABILITIES: RoleCapabilities = {
   canBillActions: false,
   canDeleteLoad: false,
   canCreateLoadNotes: false,
+  canViewSettlementPreview: false,
 };
 
 export function getRoleCapabilities(role?: string | null): RoleCapabilities {
@@ -92,6 +102,7 @@ export function getRoleCapabilities(role?: string | null): RoleCapabilities {
       canBillActions: true,
       canDeleteLoad: true,
       canCreateLoadNotes: true,
+      canViewSettlementPreview: true,
     };
   }
 
@@ -120,6 +131,7 @@ export function getRoleCapabilities(role?: string | null): RoleCapabilities {
       canBillActions: false,
       canDeleteLoad: false,
       canCreateLoadNotes: true,
+      canViewSettlementPreview: true,
     };
   }
 
@@ -148,6 +160,65 @@ export function getRoleCapabilities(role?: string | null): RoleCapabilities {
       canBillActions: true,
       canDeleteLoad: false,
       canCreateLoadNotes: true,
+      canViewSettlementPreview: true,
+    };
+  }
+
+  if (canonicalRole === "SAFETY") {
+    return {
+      role: role ?? null,
+      canonicalRole,
+      canAccessDispatch: false,
+      canAccessTrips: true,
+      canAccessLoads: true,
+      canAccessFinance: false,
+      canAccessAdmin: false,
+      canAccessDriver: false,
+      canDispatchExecution: false,
+      canStartTracking: false,
+      canUseGlobalSearch: true,
+      canUseActivity: true,
+      canSeeTeamsOps: false,
+      canEditLoad: false,
+      canUploadLoadDocs: false,
+      canVerifyDocs: false,
+      canViewCharges: false,
+      canEditCharges: false,
+      canManageAccessorials: false,
+      canApproveAccessorials: false,
+      canBillActions: false,
+      canDeleteLoad: false,
+      canCreateLoadNotes: true,
+      canViewSettlementPreview: false,
+    };
+  }
+
+  if (canonicalRole === "SUPPORT") {
+    return {
+      role: role ?? null,
+      canonicalRole,
+      canAccessDispatch: false,
+      canAccessTrips: true,
+      canAccessLoads: true,
+      canAccessFinance: false,
+      canAccessAdmin: false,
+      canAccessDriver: false,
+      canDispatchExecution: false,
+      canStartTracking: false,
+      canUseGlobalSearch: true,
+      canUseActivity: true,
+      canSeeTeamsOps: false,
+      canEditLoad: false,
+      canUploadLoadDocs: false,
+      canVerifyDocs: false,
+      canViewCharges: false,
+      canEditCharges: false,
+      canManageAccessorials: false,
+      canApproveAccessorials: false,
+      canBillActions: false,
+      canDeleteLoad: false,
+      canCreateLoadNotes: true,
+      canViewSettlementPreview: false,
     };
   }
 
@@ -175,15 +246,18 @@ export function getRoleCapabilities(role?: string | null): RoleCapabilities {
     canBillActions: false,
     canDeleteLoad: false,
     canCreateLoadNotes: false,
+    canViewSettlementPreview: false,
   };
 }
 
 export function getRoleLandingPath(role?: string | null) {
   const canonicalRole = asCanonicalRole(role);
   if (canonicalRole === "ADMIN") return "/admin";
-  if (canonicalRole === "DISPATCHER" || canonicalRole === "HEAD_DISPATCHER") return "/dispatch";
+  if (canonicalRole === "DISPATCHER" || canonicalRole === "HEAD_DISPATCHER") return "/dispatch?workspace=trips";
   if (canonicalRole === "BILLING") return "/finance";
   if (canonicalRole === "DRIVER") return "/driver";
+  if (canonicalRole === "SAFETY") return "/loads";
+  if (canonicalRole === "SUPPORT") return "/loads";
   return "/today";
 }
 

@@ -1,3 +1,5 @@
+import { getRoleCapabilities } from "@/lib/capabilities";
+
 export type BlockerType =
   | "POD_MISSING"
   | "DOCS_REJECTED"
@@ -167,10 +169,11 @@ export function derivePrimaryAction(
   trackingBadge: TrackingBadge,
   role?: string | null
 ): PrimaryAction {
-  const canBilling = role === "ADMIN" || role === "BILLING";
-  const canDispatch = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER";
-  const canUpload = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER";
-  const canTrack = role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER" || role === "DRIVER";
+  const capabilities = getRoleCapabilities(role);
+  const canBilling = capabilities.canBillActions || capabilities.canVerifyDocs;
+  const canDispatch = capabilities.canDispatchExecution;
+  const canUpload = capabilities.canUploadLoadDocs;
+  const canTrack = capabilities.canStartTracking;
   const podLink = `/loads/${load.id}?tab=documents&docType=POD#pod`;
 
   if (blocker?.type === "POD_MISSING") {
