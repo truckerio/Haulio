@@ -272,10 +272,10 @@ pnpm --filter @truckerio/web run typecheck
 ### Implementation Checklist
 | Task | Owner | Start | Due | Status | Evidence |
 |---|---|---|---|---|---|
-| Flip selected endpoints from shadow to enforce |  |  |  | Not Started | env + deploy notes |
-| Add CI checks to block direct status writes outside kernel |  |  |  | Not Started | CI job link |
-| Add CI checks for capability drift (API vs Web maps) |  |  |  | Not Started | CI job link |
-| Publish smoke script and pass evidence by role |  |  |  | Not Started | `docs/STATE_KERNEL_ROLLOUT.md` |
+| Flip selected endpoints from shadow to enforce |  |  |  | In Progress | pilot enforce flags in prod-local (`STATE_KERNEL_ENFORCE=true`, scoped org list) + `apps/api/src/index.ts` enforce guards |
+| Add CI checks to block direct status writes outside kernel |  |  |  | Done | `scripts/ci/check-load-status-mutation-drift.mjs`, `pnpm ci:drift:status` |
+| Add CI checks for capability drift (API vs Web maps) |  |  |  | Done | `scripts/ci/check-role-capability-drift.mjs`, `pnpm ci:drift:roles` |
+| Publish smoke script and pass evidence by role |  |  |  | Done | `apps/api/scripts/smoke-role-matrix.ts`, `pnpm demo:smoke:roles`, `docs/PHASE1_PASS.md` |
 
 ### Enablement Waves
 | Wave | Scope | Shadow | Enforce | Rollback Path |
@@ -301,6 +301,7 @@ pnpm ci:drift
 ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> pnpm ci:kernel:pilot
 pnpm prod:local
 pnpm demo:smoke
+pnpm demo:smoke:roles
 ```
 
 ---

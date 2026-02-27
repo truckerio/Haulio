@@ -82,6 +82,7 @@ ORG_ID=<ORG_ID> pnpm demo:kernel:report
 ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> pnpm ci:kernel:pilot
 DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:phase3
 ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:kernel:phase3
+DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:roles
 ```
 
 Prod-local stack start:
@@ -203,3 +204,21 @@ Pass criteria:
 - `test:kernel` passes (state kernel + first-wave route contracts)
 - `demo:kernel:report` passes (no blocking kernel violations / enforce blocked rows)
 - `demo:smoke:phase3` passes (first-wave mutation smoke with per-step kernel audit checks)
+
+## 10) Role Matrix Smoke (Phase E)
+
+Role contract smoke command:
+
+```bash
+DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:roles
+```
+
+Pass criteria:
+- Script prints `smoke-role-matrix: PASS`.
+- Dispatcher and Head Dispatcher parity checks pass for:
+  - upload docs
+  - edit charges
+  - start tracking
+  - assign trip
+- Billing is denied for trip assignment and charge mutation.
+- Safety and Support remain read-only on loads and denied for mutations.

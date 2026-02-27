@@ -64,6 +64,7 @@ pnpm --filter @truckerio/api run test:authz
 pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit
 pnpm --filter @truckerio/web run test:capabilities
 pnpm --filter @truckerio/web run typecheck
+pnpm demo:smoke:roles
 ```
 
 ## Notes
