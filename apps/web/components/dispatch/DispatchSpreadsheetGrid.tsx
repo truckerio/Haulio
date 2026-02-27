@@ -185,7 +185,7 @@ const STATUS_OPTIONS: DispatchStatus[] = [
   "CANCELLED",
 ];
 
-const COLUMNS: DispatchGridColumn[] = [
+export const DISPATCH_GRID_COLUMNS: DispatchGridColumn[] = [
   { key: "select", label: "", width: 44, frozen: true, required: true, align: "center" },
   { key: "loadNumber", label: "Load #", width: 190, frozen: true, required: true, filterable: true, sortable: true },
   { key: "status", label: "Status", width: 132, frozen: true, required: true, editable: true, filterable: true, sortable: true },
@@ -205,8 +205,9 @@ const COLUMNS: DispatchGridColumn[] = [
   { key: "updatedAt", label: "Updated", width: 160, required: false, sortable: true },
 ];
 
-export const DISPATCH_REQUIRED_COLUMNS = COLUMNS.filter((column) => column.required).map((column) => column.key);
-export const DISPATCH_OPTIONAL_COLUMNS = COLUMNS.filter((column) => !column.required).map((column) => column.key);
+export const DISPATCH_REQUIRED_COLUMNS = DISPATCH_GRID_COLUMNS.filter((column) => column.required).map((column) => column.key);
+export const DISPATCH_OPTIONAL_COLUMNS = DISPATCH_GRID_COLUMNS.filter((column) => !column.required).map((column) => column.key);
+export const DISPATCH_FROZEN_COLUMNS = DISPATCH_GRID_COLUMNS.filter((column) => column.frozen).map((column) => column.key);
 
 const INITIAL_FOCUS = { rowIndex: 0, columnIndex: 1 };
 
@@ -556,7 +557,7 @@ function appointmentDateKey(value?: string | null) {
 }
 
 function columnLabel(columnKey: DispatchGridColumnKey) {
-  return COLUMNS.find((column) => column.key === columnKey)?.label ?? columnKey;
+  return DISPATCH_GRID_COLUMNS.find((column) => column.key === columnKey)?.label ?? columnKey;
 }
 
 function humanizeEnum(value: string) {
@@ -1041,7 +1042,7 @@ export function DispatchSpreadsheetGrid({
   const rowHeight = density === "compact" ? 50 : 62;
 
   const visibleColumns = useMemo(() => {
-    return COLUMNS.filter((column) => {
+    return DISPATCH_GRID_COLUMNS.filter((column) => {
       if (column.required) return true;
       return columnVisibility[column.key] !== false;
     });
@@ -1624,7 +1625,7 @@ export function DispatchSpreadsheetGrid({
   }, []);
 
   const exportableColumns = useMemo(
-    () => COLUMNS.filter((column) => column.key !== "select").map((column) => column.key),
+    () => DISPATCH_GRID_COLUMNS.filter((column) => column.key !== "select").map((column) => column.key),
     []
   );
 

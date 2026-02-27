@@ -43,7 +43,7 @@ Use this table as the top-level PM tracker.
 | A. Canonical state contract |  |  |  | In Progress | `docs/STATE_KERNEL_SPEC.md`, `docs/STATE_AUTHORITY_MATRIX.md`, `apps/api/src/lib/state-kernel/*` |
 | B. Capability contract + auth parity |  |  |  | In Progress | `apps/api/src/lib/capabilities.ts`, `apps/web/lib/capabilities.ts`, authz/capability tests |
 | C. State kernel shadow rollout |  |  |  | Done | `docs/STATE_KERNEL_ROLLOUT.md`, `apps/api/src/index.ts`, `apps/api/scripts/smoke-kernel-first-wave.ts`, `pnpm ci:kernel:phase3` |
-| D. Workbench UI hardening |  |  |  | In Progress | dispatch/trip/load surface commits + `apps/web/lib/navigation.ts` + `apps/web/lib/navigation.test.ts` |
+| D. Workbench UI hardening |  |  |  | In Progress | dispatch/trip/load surface commits + nav/dispatch UI contracts (`apps/web/lib/navigation.test.ts`, `apps/web/components/dispatch/dispatch-grid-contract.test.ts`, `apps/web/components/dispatch/timeline-utils.test.ts`) |
 | E. Enforcement + CI drift gates |  |  |  | In Progress | phase pass docs + ongoing drift cleanup |
 
 ---

@@ -21,6 +21,7 @@ import { isForbiddenError } from "@/lib/capabilities";
 import { formatDateTime as formatDateTime24 } from "@/lib/date-time";
 import { AddLegDrawer } from "@/components/dispatch/AddLegDrawer";
 import type { DispatchInspectorFocusSection } from "@/components/dispatch/DispatchSpreadsheetGrid";
+import { splitPinnedTimeline } from "@/components/dispatch/timeline-utils";
 
 export type WorkbenchAssignmentProps = {
   form: { driverId: string; truckId: string; trailerId: string };
@@ -335,14 +336,7 @@ export function WorkbenchRightPane({
     });
     return filtered;
   }, [timelineFilter, timelineItems]);
-  const pinnedNotes = useMemo(
-    () => visibleTimelineItems.filter((item) => item?.kind === "NOTE" && Boolean(item?.payload?.pinned)),
-    [visibleTimelineItems]
-  );
-  const timelineEvents = useMemo(
-    () => visibleTimelineItems.filter((item) => !(item?.kind === "NOTE" && Boolean(item?.payload?.pinned))),
-    [visibleTimelineItems]
-  );
+  const { pinnedNotes, timelineEvents } = useMemo(() => splitPinnedTimeline(visibleTimelineItems), [visibleTimelineItems]);
   const submitTimelineNote = useCallback(async () => {
     const trimmed = noteBody.trim();
     if (!timelineLoadId || !trimmed) return;
