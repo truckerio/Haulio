@@ -79,6 +79,7 @@ pnpm --filter @truckerio/api run test:kernel
 pnpm --filter @truckerio/api run test:authz
 pnpm --filter @truckerio/api exec node --import tsx src/modules/dispatch/queue-view.test.ts
 ORG_ID=<ORG_ID> pnpm demo:kernel:report
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> pnpm ci:kernel:pilot
 ```
 
 Prod-local stack start:

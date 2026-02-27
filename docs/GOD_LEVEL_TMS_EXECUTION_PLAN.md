@@ -294,6 +294,7 @@ pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit
 pnpm --filter @truckerio/web run test
 pnpm --filter @truckerio/web run typecheck
 pnpm ci:drift
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> pnpm ci:kernel:pilot
 pnpm prod:local
 pnpm demo:smoke
 ```

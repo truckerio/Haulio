@@ -47,6 +47,7 @@
     "qa:all": "bash -c 'pnpm qa:setup && pnpm qa:tests && pnpm qa:smoke; pnpm qa:report'",
     "ci:drift:roles": "node scripts/ci/check-role-capability-drift.mjs",
     "ci:drift:status": "node scripts/ci/check-load-status-mutation-drift.mjs",
-    "ci:drift": "pnpm ci:drift:roles && pnpm ci:drift:status"
+    "ci:drift": "pnpm ci:drift:roles && pnpm ci:drift:status",
+    "ci:kernel:pilot": "pnpm --filter @truckerio/api run test:kernel && pnpm demo:kernel:report"
   }
 }
