@@ -9,8 +9,7 @@ export type TodayScopeResult = {
 
 export function getTodayScope(params: { teamsEnabled: boolean; role: Role; canSeeAllTeams: boolean }): TodayScopeResult {
   const { teamsEnabled, role, canSeeAllTeams } = params;
-  const isHeadDispatcher =
-    teamsEnabled && (role === Role.HEAD_DISPATCHER || (role === Role.DISPATCHER && canSeeAllTeams));
+  const isHeadDispatcher = teamsEnabled && (role === Role.HEAD_DISPATCHER || (role === Role.DISPATCHER && canSeeAllTeams));
   const teamScoped = teamsEnabled && role === Role.DISPATCHER && !canSeeAllTeams;
   const includeTeamBreakdown = teamsEnabled && (role === Role.ADMIN || isHeadDispatcher);
   return {

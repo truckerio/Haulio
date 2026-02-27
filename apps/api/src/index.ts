@@ -108,11 +108,7 @@ import type {
 import { createSession, setSessionCookie, clearSessionCookie, requireAuth, destroySession } from "./lib/auth";
 import { createCsrfToken, setCsrfCookie, requireCsrf } from "./lib/csrf";
 import { requireRole } from "./lib/rbac";
-import {
-  DISPATCH_EXECUTION_OR_BILLING_ROLES,
-  DISPATCH_EXECUTION_ROLES,
-  DISPATCH_TRACKING_ROLES,
-} from "./lib/dispatch-role-parity";
+import { DISPATCH_TRACKING_ROLES } from "./lib/dispatch-role-parity";
 import { isEmailConfigured, sendOperationalEmail, sendPasswordResetEmail } from "./lib/email";
 import {
   upload,
@@ -131,7 +127,7 @@ import { completeTask, calculateStorageCharge, ensureTask, buildTaskKey, getTask
 import { logLoadFieldAudit, logStopTimeAudit } from "./lib/load-audit";
 import { generateInvoicePdf } from "./lib/invoice";
 import { generatePacketZip } from "./lib/packet";
-import { hasPermission, requirePermission } from "./lib/permissions";
+import { hasPermission, requireCapability, requirePermission } from "./lib/permissions";
 import { requireOrgEntity } from "./lib/tenant";
 import { requireOperationalOrg } from "./lib/onboarding";
 import { fetchSamsaraVehicleLocation, fetchSamsaraVehicles, formatSamsaraError, validateSamsaraToken } from "./lib/samsara";
@@ -3097,8 +3093,6 @@ const formatRoleLabel = (role: Role) => {
       return "Head Dispatcher";
     case Role.DISPATCHER:
       return "Dispatcher";
-    case Role.OPS_MANAGER:
-      return "Ops Manager";
     case Role.BILLING:
       return "Billing";
     case Role.SAFETY:
@@ -3649,7 +3643,7 @@ app.post("/auth/mfa/disable", requireAuth, requireCsrf, mfaLimiter, async (req, 
   res.json({ ok: true });
 });
 
-app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
+app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
   try {
     const [org, userRecord] = await Promise.all([
       prisma.organization.findFirst({
@@ -3686,13 +3680,13 @@ app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPAT
   }
 });
 
-app.get("/auth/csrf", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), (req, res) => {
+app.get("/auth/csrf", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), (req, res) => {
   const csrfToken = createCsrfToken();
   setCsrfCookie(res, csrfToken);
   res.json({ csrfToken });
 });
 
-app.post("/auth/logout", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), requireCsrf, async (req, res) => {
+app.post("/auth/logout", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), requireCsrf, async (req, res) => {
   const token = req.cookies?.session;
   if (token) {
     await destroySession(token);
@@ -3824,7 +3818,7 @@ function mapTaskInboxItem(task: TaskInboxRecord, now: Date) {
   };
 }
 
-app.get("/tasks/inbox", requireAuth, requireRole("ADMIN", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"), async (req, res) => {
+app.get("/tasks/inbox", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT"), async (req, res) => {
   const tabParam = typeof req.query.tab === "string" ? req.query.tab : "mine";
   const tab = tabParam === "role" ? "role" : "mine";
   const page = clamp(parseIntParam(req.query.page, 1), 1, 500);
@@ -3919,7 +3913,7 @@ app.get("/tasks/assignees", requireAuth, requirePermission(Permission.TASK_ASSIG
 app.post("/tasks/:id/assign", requireAuth, requireCsrf, requirePermission(Permission.TASK_ASSIGN), async (req, res) => {
   const schema = z.object({
     assignedToId: z.string().nullable().optional(),
-    assignedRole: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]).nullable().optional(),
+    assignedRole: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]).nullable().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -3961,7 +3955,7 @@ app.post("/tasks/:id/assign", requireAuth, requireCsrf, requirePermission(Permis
   res.json({ task: updated });
 });
 
-app.post("/tasks/:id/complete", requireAuth, requireRole("ADMIN", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"), requireCsrf, async (req, res) => {
+app.post("/tasks/:id/complete", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT"), requireCsrf, async (req, res) => {
   const existing = await prisma.task.findFirst({
     where: { id: req.params.id, orgId: req.user!.orgId },
   });
@@ -3998,7 +3992,6 @@ async function buildRoleIssueSummary(params: {
     role === "ADMIN" ||
     role === "DISPATCHER" ||
     role === "HEAD_DISPATCHER" ||
-    role === "OPS_MANAGER" ||
     role === "BILLING" ||
     role === "SAFETY" ||
     role === "SUPPORT";
@@ -4225,7 +4218,7 @@ app.get("/today", requireAuth, async (req, res) => {
   const addWarning = (item: Omit<TodayItem, "severity">) => warnings.push({ severity: "warning", ...item });
   const addInfo = (item: Omit<TodayItem, "severity">) => info.push({ severity: "info", ...item });
 
-  if (role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER" || role === "OPS_MANAGER") {
+  if (role === "ADMIN" || role === "DISPATCHER" || role === "HEAD_DISPATCHER") {
     const [settings, unassignedCount, unassignedSample, rateConCount, rateConSample, activeAssignments, transitLoads] =
       await Promise.all([
         prisma.orgSettings.findFirst({ where: { orgId }, select: { requireRateConBeforeDispatch: true } }),
@@ -5058,7 +5051,7 @@ app.get("/admin/attention-tuning", requireAuth, requireRole("ADMIN"), async (req
   res.json({ suggestions });
 });
 
-app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
+app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"), async (req, res) => {
   try {
     const archived = parseBooleanParam(typeof req.query.archived === "string" ? req.query.archived : undefined);
     const { where } = buildLoadFilters(req, { archived });
@@ -6048,7 +6041,7 @@ app.get("/loads/export", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLIN
   }
 });
 
-app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
+app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"), async (req, res) => {
   const now = new Date();
   const visibleNoteTypes = (Object.values(NoteType) as NoteType[]).filter((noteType) =>
     canRoleViewNoteType({ role: req.user!.role as Role, noteType })
@@ -6439,7 +6432,7 @@ app.post("/loads/:id/delete", requireAuth, requireCsrf, requireRole("ADMIN"), as
   res.json({ loadId: load.id, deletedAt });
 });
 
-app.get("/loads/:id/charges", requireAuth, requireRole(...DISPATCH_EXECUTION_OR_BILLING_ROLES), async (req, res) => {
+app.get("/loads/:id/charges", requireAuth, requireCapability("viewCharges"), async (req, res) => {
   const load = await prisma.load.findFirst({
     where: { id: req.params.id, orgId: req.user!.orgId },
     select: { id: true },
@@ -6459,8 +6452,7 @@ app.post(
   "/loads/:id/charges",
   requireAuth,
   requireCsrf,
-  requireRole(...DISPATCH_EXECUTION_ROLES),
-  requirePermission(Permission.LOAD_EDIT),
+  requireCapability("editCharges"),
   async (req, res) => {
     const schema = z.object({
       type: z.nativeEnum(LoadChargeType),
@@ -6522,8 +6514,7 @@ app.patch(
   "/loads/:id/charges/:chargeId",
   requireAuth,
   requireCsrf,
-  requireRole(...DISPATCH_EXECUTION_ROLES),
-  requirePermission(Permission.LOAD_EDIT),
+  requireCapability("editCharges"),
   async (req, res) => {
     const schema = z.object({
       type: z.nativeEnum(LoadChargeType).optional(),
@@ -6592,8 +6583,7 @@ app.delete(
   "/loads/:id/charges/:chargeId",
   requireAuth,
   requireCsrf,
-  requireRole(...DISPATCH_EXECUTION_ROLES),
-  requirePermission(Permission.LOAD_EDIT),
+  requireCapability("editCharges"),
   async (req, res) => {
     const [load, charge] = await Promise.all([
       prisma.load.findFirst({ where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null }, select: { id: true } }),
@@ -7082,7 +7072,7 @@ app.get("/loads/:id/dispatch-detail", requireAuth, requirePermission(Permission.
 app.get(
   "/timeline",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "OPS_MANAGER", "SAFETY", "SUPPORT"),
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const schema = z.object({
       entityType: z.nativeEnum(NoteEntityType),
@@ -7127,7 +7117,7 @@ app.get(
 app.get(
   "/loads/:id/timeline",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING"),
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const load = await prisma.load.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId },
@@ -7791,7 +7781,7 @@ app.post("/legs/:id/status", requireAuth, requireCsrf, requirePermission(Permiss
 app.get(
   "/trips",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
     const statusRaw = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
@@ -7843,7 +7833,7 @@ app.get(
 app.get(
   "/trips/:id",
   requireAuth,
-  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const trip = await prisma.trip.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId },
@@ -7869,9 +7859,103 @@ app.get(
 );
 
 app.get(
-  "/trips/:id/cargo-plan",
+  "/trips/:id/settlement-preview",
   requireAuth,
   requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"),
+  async (req, res) => {
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: {
+        id: true,
+        loads: {
+          select: {
+            loadId: true,
+            load: {
+              select: {
+                miles: true,
+                paidMiles: true,
+                paidMilesSource: true,
+                palletCount: true,
+                weightLbs: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+
+    const loadIds = trip.loads.map((item) => item.loadId).filter((value): value is string => Boolean(value));
+    const [accessorials, payableLines] = await Promise.all([
+      loadIds.length
+        ? prisma.accessorial.findMany({
+            where: { orgId: req.user!.orgId, loadId: { in: loadIds } },
+            select: { amount: true },
+          })
+        : Promise.resolve([]),
+      loadIds.length
+        ? prisma.payableLineItem.findMany({
+            where: { orgId: req.user!.orgId, loadId: { in: loadIds } },
+            select: { type: true, amountCents: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const plannedMiles = trip.loads.reduce((total, row) => total + (Number(row.load.miles ?? 0) || 0), 0);
+    const paidMilesRows = trip.loads.filter((row) => row.load.paidMiles !== null && row.load.paidMiles !== undefined);
+    const paidMiles =
+      paidMilesRows.length > 0
+        ? paidMilesRows.reduce((total, row) => total + (Number(row.load.paidMiles ?? 0) || 0), 0)
+        : null;
+    const milesVariance = paidMiles === null ? null : paidMiles - plannedMiles;
+    const milesSources = Array.from(
+      new Set(
+        trip.loads
+          .map((row) => row.load.paidMilesSource)
+          .filter((value): value is PayableMilesSource => value !== null)
+      )
+    );
+    const milesSource = milesSources.length === 1 ? milesSources[0] : milesSources.length > 1 ? "MIXED" : null;
+
+    const totalPallets = trip.loads.reduce((total, row) => total + (row.load.palletCount ?? 0), 0);
+    const totalWeightLbs = trip.loads.reduce((total, row) => total + (row.load.weightLbs ?? 0), 0);
+
+    const accessorialTotalCents = accessorials.reduce((total, row) => total + Math.round((Number(row.amount) || 0) * 100), 0);
+    const earningsCents = payableLines
+      .filter((line) => line.type === "EARNING")
+      .reduce((total, line) => total + (line.amountCents ?? 0), 0);
+    const reimbursementsCents = payableLines
+      .filter((line) => line.type === "REIMBURSEMENT")
+      .reduce((total, line) => total + (line.amountCents ?? 0), 0);
+    const deductionsTotalCents = payableLines
+      .filter((line) => line.type === "DEDUCTION")
+      .reduce((total, line) => total + Math.abs(line.amountCents ?? 0), 0);
+    const netPayPreviewCents = payableLines.length > 0 ? earningsCents + reimbursementsCents - deductionsTotalCents : null;
+
+    res.json({
+      preview: {
+        tripId: trip.id,
+        plannedMiles,
+        paidMiles,
+        milesVariance,
+        milesSource,
+        totalPallets,
+        totalWeightLbs,
+        accessorialTotalCents,
+        deductionsTotalCents,
+        netPayPreviewCents,
+      },
+    });
+  }
+);
+
+app.get(
+  "/trips/:id/cargo-plan",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const trip = await prisma.trip.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId },
@@ -10344,7 +10428,7 @@ app.post(
 app.get(
   "/search",
   requireAuth,
-  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"),
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
   async (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
     if (!query) {
@@ -10851,7 +10935,7 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
       orgId: req.user!.orgId,
       isActive: true,
       id: { not: req.user!.id },
-      role: { in: [Role.HEAD_DISPATCHER, Role.OPS_MANAGER, Role.DISPATCHER, Role.ADMIN] },
+      role: { in: [Role.HEAD_DISPATCHER, Role.DISPATCHER, Role.ADMIN] },
       phone: { not: null },
     },
     select: { id: true, name: true, role: true, phone: true, createdAt: true },
@@ -10861,7 +10945,6 @@ app.get("/driver/current", requireAuth, requireRole("DRIVER"), async (req, res) 
   const priorityByRole: Partial<Record<Role, number>> = {
     ADMIN: 3,
     HEAD_DISPATCHER: 1,
-    OPS_MANAGER: 2,
     DISPATCHER: 2,
   };
   dispatcherContacts.sort(
@@ -10907,7 +10990,7 @@ app.get("/driver/settings", requireAuth, requireRole("DRIVER"), async (req, res)
   });
 });
 
-app.get("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
+app.get("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
   const user = await prisma.user.findFirst({
     where: { id: req.user!.id, orgId: req.user!.orgId },
   });
@@ -10928,7 +11011,7 @@ app.get("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPAT
   });
 });
 
-app.get("/me/appearance", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
+app.get("/me/appearance", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), async (req, res) => {
   const user = await prisma.user.findFirst({
     where: { id: req.user!.id, orgId: req.user!.orgId },
     select: APPEARANCE_SELECT,
@@ -10939,7 +11022,7 @@ app.get("/me/appearance", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "
 app.put(
   "/me/appearance",
   requireAuth,
-  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"),
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"),
   requireCsrf,
   async (req, res) => {
     const parsed = appearancePayloadSchema.safeParse(req.body);
@@ -10997,7 +11080,7 @@ app.put(
   }
 );
 
-app.patch("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), requireCsrf, async (req, res) => {
+app.patch("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"), requireCsrf, async (req, res) => {
   const schema = z.object({
     name: z.string().trim().min(1).max(120).optional(),
     phone: z.string().trim().max(32).optional().nullable(),
@@ -11022,7 +11105,7 @@ app.patch("/profile", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISP
 app.post(
   "/profile/photo",
   requireAuth,
-  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"),
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"),
   requireCsrf,
   upload.single("file"),
   async (req, res) => {
@@ -11477,17 +11560,13 @@ app.post("/driver/undo", requireAuth, requireCsrf, requireRole("DRIVER"), async 
 app.post(
   "/tracking/load/:loadId/start",
   requireAuth,
-  requireRole(...DISPATCH_TRACKING_ROLES),
+  requireCapability("startTracking"),
   requireCsrf,
   async (req, res) => {
   const schema = z.object({ providerType: z.enum(["PHONE"]).optional() });
   const parsed = schema.safeParse(req.body ?? {});
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload" });
-    return;
-  }
-  if (!DISPATCH_TRACKING_ROLES.includes(req.user!.role as (typeof DISPATCH_TRACKING_ROLES)[number])) {
-    res.status(403).json({ error: "Forbidden" });
     return;
   }
   const load = await prisma.load.findFirst({
@@ -11555,13 +11634,9 @@ app.post(
 app.post(
   "/tracking/load/:loadId/stop",
   requireAuth,
-  requireRole(...DISPATCH_TRACKING_ROLES),
+  requireCapability("startTracking"),
   requireCsrf,
   async (req, res) => {
-  if (!DISPATCH_TRACKING_ROLES.includes(req.user!.role as (typeof DISPATCH_TRACKING_ROLES)[number])) {
-    res.status(403).json({ error: "Forbidden" });
-    return;
-  }
   const load = await prisma.load.findFirst({
     where: { id: req.params.loadId, orgId: req.user!.orgId },
   });
@@ -11617,13 +11692,9 @@ app.post(
 app.post(
   "/tracking/load/:loadId/ping",
   requireAuth,
-  requireRole(...DISPATCH_TRACKING_ROLES),
+  requireCapability("startTracking"),
   requireCsrf,
   async (req, res) => {
-  if (!DISPATCH_TRACKING_ROLES.includes(req.user!.role as (typeof DISPATCH_TRACKING_ROLES)[number])) {
-    res.status(403).json({ error: "Forbidden" });
-    return;
-  }
   const schema = z.object({
     lat: z.union([z.number(), z.string()]),
     lng: z.union([z.number(), z.string()]),
@@ -11825,7 +11896,7 @@ app.get("/tracking/load/:loadId/history", requireAuth, requireRole(...DISPATCH_T
 app.post(
   "/loads/:loadId/docs",
   requireAuth,
-  requireRole(...DISPATCH_EXECUTION_OR_BILLING_ROLES),
+  requireCapability("uploadDocs"),
   requireCsrf,
   upload.single("file"),
   async (req, res) => {
@@ -16370,7 +16441,7 @@ app.post("/admin/teams/assign", requireAuth, requireCsrf, requireRole("ADMIN"), 
   }
 });
 
-app.post("/teams/assign-loads", requireAuth, requireCsrf, requireRole("ADMIN", "HEAD_DISPATCHER", "OPS_MANAGER"), async (req, res) => {
+app.post("/teams/assign-loads", requireAuth, requireCsrf, requireRole("ADMIN", "HEAD_DISPATCHER"), async (req, res) => {
   if (!canAssignTeams(req.user!.role as Role)) {
     res.status(403).json({ error: "Forbidden" });
     return;
@@ -17567,7 +17638,7 @@ app.get("/admin/users", requireAuth, requireRole("ADMIN"), async (req, res) => {
 
 app.patch("/admin/members/:memberId/role", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
-    role: z.enum(["DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"]),
+    role: z.enum(["DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"]),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -18254,8 +18325,8 @@ app.post("/imports/preview", requireAuth, async (req, res) => {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         errors.push("Invalid email");
       }
-      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"].includes(role)) {
-        errors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, OPS_MANAGER, BILLING, SAFETY, or SUPPORT");
+      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"].includes(role)) {
+        errors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, BILLING, SAFETY, or SUPPORT");
       }
       return { rowNumber, data: { email, role, name, phone, timezone }, warnings, errors };
     }
@@ -18559,8 +18630,8 @@ app.post("/imports/commit", requireAuth, async (req, res) => {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         rowErrors.push("Invalid email");
       }
-      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT"].includes(role)) {
-        rowErrors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, OPS_MANAGER, BILLING, SAFETY, or SUPPORT");
+      if (!["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"].includes(role)) {
+        rowErrors.push("Role must be ADMIN, DISPATCHER, HEAD_DISPATCHER, BILLING, SAFETY, or SUPPORT");
       }
       if (rowErrors.length > 0) {
         errors.push({ rowNumber, errors: rowErrors });
@@ -18806,7 +18877,7 @@ async function createInvite(params: { orgId: string; email: string; role: Role; 
 app.post("/admin/invites", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
-    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]),
+    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -19358,7 +19429,7 @@ app.post("/admin/users", requireAuth, requireCsrf, requireRole("ADMIN"), async (
   const schema = z.object({
     email: z.string().email(),
     name: z.string().optional(),
-    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "OPS_MANAGER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]),
+    role: z.enum(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT", "DRIVER"]),
     phone: z.string().optional(),
     timezone: z.string().optional(),
   });

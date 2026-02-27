@@ -59,7 +59,9 @@ export async function getUserTeamScope(user: AuthRequest["user"]): Promise<TeamS
   });
 
   const canSeeAllTeams =
-    dbUser?.role === Role.ADMIN || dbUser?.role === Role.HEAD_DISPATCHER || Boolean(dbUser?.canSeeAllTeams);
+    dbUser?.role === Role.ADMIN ||
+    dbUser?.role === Role.HEAD_DISPATCHER ||
+    Boolean(dbUser?.canSeeAllTeams);
   if (canSeeAllTeams) {
     return { canSeeAllTeams: true, teamIds: [], defaultTeamId: defaultTeam.id };
   }
