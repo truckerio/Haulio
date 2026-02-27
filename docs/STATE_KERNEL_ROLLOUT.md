@@ -80,6 +80,8 @@ pnpm --filter @truckerio/api run test:authz
 pnpm --filter @truckerio/api exec node --import tsx src/modules/dispatch/queue-view.test.ts
 ORG_ID=<ORG_ID> pnpm demo:kernel:report
 ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> pnpm ci:kernel:pilot
+DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:phase3
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:kernel:phase3
 ```
 
 Prod-local stack start:
@@ -188,3 +190,16 @@ If instability appears:
 1. Set `STATE_KERNEL_ENFORCE=false`.
 2. Keep `STATE_KERNEL_SHADOW=true` and `STATE_KERNEL_DIVERGENCE_LOG=true` for continued diagnostics.
 3. Restart `api` and re-run parity smoke checks.
+
+## 9) Phase C Completion Gate
+
+Run this one command for pilot completion:
+
+```bash
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:kernel:phase3
+```
+
+Pass criteria:
+- `test:kernel` passes (state kernel + first-wave route contracts)
+- `demo:kernel:report` passes (no blocking kernel violations / enforce blocked rows)
+- `demo:smoke:phase3` passes (first-wave mutation smoke with per-step kernel audit checks)

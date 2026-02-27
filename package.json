@@ -37,6 +37,7 @@
     "company:reset": "pnpm --filter @truckerio/api exec tsx scripts/company-reset.ts",
     "demo:smoke": "pnpm --filter @truckerio/api exec tsx scripts/smoke-happy-path.ts && pnpm --filter @truckerio/api exec tsx scripts/smoke-failure-paths.ts && pnpm --filter @truckerio/api exec tsx scripts/tenant-isolation.ts",
     "demo:smoke:phase2": "pnpm --filter @truckerio/api exec tsx scripts/smoke-phase2-trip-finance.ts",
+    "demo:smoke:phase3": "pnpm --filter @truckerio/api exec tsx scripts/smoke-kernel-first-wave.ts",
     "demo:kernel:report": "pnpm --filter @truckerio/api exec tsx scripts/kernel-divergence-report.ts",
     "setupcode:create": "pnpm --filter @truckerio/api exec tsx scripts/setupcode-create.ts",
     "prisma:generate": "pnpm --filter @truckerio/db exec prisma generate",
@@ -48,6 +49,7 @@
     "ci:drift:roles": "node scripts/ci/check-role-capability-drift.mjs",
     "ci:drift:status": "node scripts/ci/check-load-status-mutation-drift.mjs",
     "ci:drift": "pnpm ci:drift:roles && pnpm ci:drift:status",
-    "ci:kernel:pilot": "pnpm --filter @truckerio/api run test:kernel && pnpm demo:kernel:report"
+    "ci:kernel:pilot": "pnpm --filter @truckerio/api run test:kernel && pnpm demo:kernel:report",
+    "ci:kernel:phase3": "pnpm ci:kernel:pilot && pnpm demo:smoke:phase3"
   }
 }

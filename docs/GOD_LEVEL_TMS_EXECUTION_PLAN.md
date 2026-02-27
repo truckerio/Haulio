@@ -42,7 +42,7 @@ Use this table as the top-level PM tracker.
 |---|---|---|---|---|---|
 | A. Canonical state contract |  |  |  | In Progress | `docs/STATE_KERNEL_SPEC.md`, `docs/STATE_AUTHORITY_MATRIX.md`, `apps/api/src/lib/state-kernel/*` |
 | B. Capability contract + auth parity |  |  |  | In Progress | `apps/api/src/lib/capabilities.ts`, `apps/web/lib/capabilities.ts`, authz/capability tests |
-| C. State kernel shadow rollout |  |  |  | In Progress | `docs/STATE_KERNEL_ROLLOUT.md`, shadow hooks in `apps/api/src/index.ts` |
+| C. State kernel shadow rollout |  |  |  | Done | `docs/STATE_KERNEL_ROLLOUT.md`, `apps/api/src/index.ts`, `apps/api/scripts/smoke-kernel-first-wave.ts`, `pnpm ci:kernel:phase3` |
 | D. Workbench UI hardening |  |  |  | In Progress | dispatch/trip/load surface commits + restored workbench components |
 | E. Enforcement + CI drift gates |  |  |  | In Progress | phase pass docs + ongoing drift cleanup |
 
@@ -156,10 +156,10 @@ pnpm --filter @truckerio/web run typecheck
 ### Implementation Checklist
 | Task | Owner | Start | Due | Status | Evidence |
 |---|---|---|---|---|---|
-| Add shadow evaluator on targeted mutation endpoints |  |  |  | In Progress | route hooks in `apps/api/src/index.ts` |
-| Log divergence payloads (`legacyAfter` vs `kernelAfter`) |  |  |  | In Progress | `STATE_KERNEL_DIVERGENCE` meta contract fields |
-| Add endpoint-level transition regression tests |  |  |  | In Progress | `apps/api/src/lib/state-kernel/first-wave-routes.test.ts` + `pnpm --filter @truckerio/api run test:kernel` |
-| Run shadow in prod-local and validate zero critical divergences |  |  |  | In Progress | `docs/STATE_KERNEL_ROLLOUT.md` runbook |
+| Add shadow evaluator on targeted mutation endpoints |  |  |  | Done | route hooks in `apps/api/src/index.ts` for charges/docs/tracking/stops/trips + status transitions |
+| Log divergence payloads (`legacyAfter` vs `kernelAfter`) |  |  |  | Done | `STATE_KERNEL_DIVERGENCE` meta now includes `kernelPatch`, `violationCodes`, `hasBlockingKernelViolations` |
+| Add endpoint-level transition regression tests |  |  |  | Done | `apps/api/src/lib/state-kernel/first-wave-routes.test.ts` + `pnpm --filter @truckerio/api run test:kernel` |
+| Run shadow in prod-local and validate zero critical divergences |  |  |  | Done | `pnpm demo:kernel:report` PASS for `cmluiq46j0000c8vh3s1fzz5p` (Wrath Logistics), February 27, 2026 |
 
 ### Divergence Log Contract
 Minimum fields in audit meta:
@@ -171,6 +171,8 @@ Minimum fields in audit meta:
 - Shadow mode enabled for first-wave endpoints.
 - Divergence rate is tracked and triaged.
 - No high-severity divergence left open.
+
+Gate C Status: PASS (pilot org `cmluiq46j0000c8vh3s1fzz5p`, February 27, 2026)
 
 ---
 
