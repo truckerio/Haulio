@@ -7,10 +7,42 @@ const API_BASE = process.env.API_BASE || process.env.NEXT_PUBLIC_API_BASE || "ht
 
 type Auth = { cookie: string; csrf: string };
 
+const COMPLETED_ONBOARDING_STEPS = [
+  "basics",
+  "operating",
+  "team",
+  "drivers",
+  "fleet",
+  "preferences",
+  "tracking",
+  "finance",
+] as const;
+
 async function authFor(userId: string): Promise<Auth> {
   const session = await createSession({ userId });
   const csrf = createCsrfToken();
   return { cookie: `session=${session.token}; csrf=${csrf}`, csrf };
+}
+
+async function ensureOperationalOrg(orgId: string) {
+  await prisma.onboardingState.upsert({
+    where: { orgId },
+    create: {
+      orgId,
+      status: "OPERATIONAL",
+      completedSteps: [...COMPLETED_ONBOARDING_STEPS],
+      percentComplete: 100,
+      currentStep: COMPLETED_ONBOARDING_STEPS.length,
+      completedAt: new Date(),
+    },
+    update: {
+      status: "OPERATIONAL",
+      completedSteps: [...COMPLETED_ONBOARDING_STEPS],
+      percentComplete: 100,
+      currentStep: COMPLETED_ONBOARDING_STEPS.length,
+      completedAt: new Date(),
+    },
+  });
 }
 
 async function request<T>(path: string, options: RequestInit, auth: Auth) {
@@ -36,6 +68,7 @@ async function request<T>(path: string, options: RequestInit, auth: Auth) {
 async function main() {
   const orgName = `Smoke V1 ${Date.now()}`;
   const org = await prisma.organization.create({ data: { name: orgName } });
+  await ensureOperationalOrg(org.id);
 
   await prisma.orgSettings.create({
     data: {
@@ -176,6 +209,7 @@ async function main() {
 
   const draftPayload = {
     loadNumber: `LC-${Date.now()}`,
+    customerName: "Draft Customer",
     shipperReferenceNumber: "SHIP-REF-9",
     consigneeReferenceNumber: "CONS-REF-9",
     palletCount: 12,
@@ -188,6 +222,8 @@ async function main() {
         city: "Austin",
         state: "TX",
         zip: "78701",
+        apptStart: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        apptEnd: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       },
       {
         type: "DELIVERY",
@@ -196,6 +232,8 @@ async function main() {
         city: "Houston",
         state: "TX",
         zip: "77001",
+        apptStart: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
+        apptEnd: new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString(),
       },
     ],
   };

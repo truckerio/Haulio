@@ -9,6 +9,17 @@ const API_BASE = process.env.API_BASE || process.env.NEXT_PUBLIC_API_BASE || "ht
 
 type Auth = { cookie: string; csrf: string };
 
+const COMPLETED_ONBOARDING_STEPS = [
+  "basics",
+  "operating",
+  "team",
+  "drivers",
+  "fleet",
+  "preferences",
+  "tracking",
+  "finance",
+] as const;
+
 async function ensureOperatingEntity(orgId: string, name: string, remitToAddress?: string) {
   const existing = await prisma.operatingEntity.findFirst({ where: { orgId, isDefault: true } });
   if (existing) return existing;
@@ -21,6 +32,27 @@ async function ensureOperatingEntity(orgId: string, name: string, remitToAddress
       remitToName: name,
       remitToAddressLine1: remitToAddress ?? null,
       isDefault: true,
+    },
+  });
+}
+
+async function ensureOperationalOrg(orgId: string) {
+  await prisma.onboardingState.upsert({
+    where: { orgId },
+    create: {
+      orgId,
+      status: "OPERATIONAL",
+      completedSteps: [...COMPLETED_ONBOARDING_STEPS],
+      percentComplete: 100,
+      currentStep: COMPLETED_ONBOARDING_STEPS.length,
+      completedAt: new Date(),
+    },
+    update: {
+      status: "OPERATIONAL",
+      completedSteps: [...COMPLETED_ONBOARDING_STEPS],
+      percentComplete: 100,
+      currentStep: COMPLETED_ONBOARDING_STEPS.length,
+      completedAt: new Date(),
     },
   });
 }
@@ -58,6 +90,7 @@ async function testRejectRequiresReason() {
   const orgName = "Smoke Failure Org";
   const org = (await prisma.organization.findFirst({ where: { name: orgName } })) ??
     (await prisma.organization.create({ data: { name: orgName } }));
+  await ensureOperationalOrg(org.id);
   await prisma.orgSettings.upsert({
     where: { orgId: org.id },
     update: {},
@@ -135,6 +168,7 @@ async function testInvoiceConcurrency() {
   const orgName = "Smoke Concurrency Org";
   const org = (await prisma.organization.findFirst({ where: { name: orgName } })) ??
     (await prisma.organization.create({ data: { name: orgName } }));
+  await ensureOperationalOrg(org.id);
   const runSuffix = String(Date.now()).slice(-6);
   const invoicePrefix = `CON-${runSuffix}-`;
   await prisma.orgSettings.upsert({
@@ -172,7 +206,19 @@ async function testInvoiceConcurrency() {
     update: { role: "BILLING", name: "Concurrency Billing", isActive: true },
     create: { orgId: org.id, email: "billing@concurrency.test", role: "BILLING", name: "Concurrency Billing", passwordHash: "x" },
   });
+  const dispatcher = await prisma.user.upsert({
+    where: { orgId_email: { orgId: org.id, email: "dispatch@concurrency.test" } },
+    update: { role: "DISPATCHER", name: "Concurrency Dispatch", isActive: true },
+    create: {
+      orgId: org.id,
+      email: "dispatch@concurrency.test",
+      role: "DISPATCHER",
+      name: "Concurrency Dispatch",
+      passwordHash: "x",
+    },
+  });
   const auth = await authFor(billing.id);
+  const dispatcherAuth = await authFor(dispatcher.id);
 
   const loads = await Promise.all(
     Array.from({ length: 5 }).map((_, index) =>
@@ -196,17 +242,31 @@ async function testInvoiceConcurrency() {
     )
   );
 
-  const results = await Promise.all(
+  await Promise.all(
+    loads.map((load) =>
+      request<{ trip: { id: string } }>(
+        "/trips",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ loadNumbers: [load.loadNumber] }),
+        },
+        dispatcherAuth
+      )
+    )
+  );
+
+  const invoiceNumbers = await Promise.all(
     loads.map((load) =>
       request<{ invoice: any }>(`/billing/invoices/${load.id}/generate`, { method: "POST" }, auth)
         .then((res) => res.payload.invoice.invoiceNumber as string)
     )
   );
-  const unique = new Set(results);
-  if (unique.size !== results.length) {
-    throw new Error(`Invoice numbers collided: ${results.join(", ")}`);
+  const unique = new Set(invoiceNumbers);
+  if (unique.size !== invoiceNumbers.length) {
+    throw new Error(`Invoice numbers collided: ${invoiceNumbers.join(", ")}`);
   }
-  const numeric = results.map((value) => Number(value.replace(invoicePrefix, ""))).sort((a, b) => a - b);
+  const numeric = invoiceNumbers.map((value) => Number(value.replace(invoicePrefix, ""))).sort((a, b) => a - b);
   for (let i = 1; i < numeric.length; i += 1) {
     if (numeric[i] !== numeric[i - 1] + 1) {
       throw new Error(`Invoice numbers not monotonic: ${numeric.join(", ")}`);
@@ -218,6 +278,7 @@ async function testTaskDedupe() {
   const orgName = "Smoke Dedupe Org";
   const org = (await prisma.organization.findFirst({ where: { name: orgName } })) ??
     (await prisma.organization.create({ data: { name: orgName } }));
+  await ensureOperationalOrg(org.id);
   await prisma.orgSettings.upsert({
     where: { orgId: org.id },
     update: { invoicePrefix: "DD-" },
@@ -253,7 +314,19 @@ async function testTaskDedupe() {
     update: { role: "BILLING", name: "Dedupe Billing", isActive: true },
     create: { orgId: org.id, email: "billing@dedupe.test", role: "BILLING", name: "Dedupe Billing", passwordHash: "x" },
   });
+  const dispatcher = await prisma.user.upsert({
+    where: { orgId_email: { orgId: org.id, email: "dispatch@dedupe.test" } },
+    update: { role: "DISPATCHER", name: "Dedupe Dispatch", isActive: true },
+    create: {
+      orgId: org.id,
+      email: "dispatch@dedupe.test",
+      role: "DISPATCHER",
+      name: "Dedupe Dispatch",
+      passwordHash: "x",
+    },
+  });
   const auth = await authFor(billing.id);
+  const dispatcherAuth = await authFor(dispatcher.id);
 
   const load = await prisma.load.create({
     data: {
@@ -271,6 +344,16 @@ async function testTaskDedupe() {
       },
     },
   });
+
+  await request<{ trip: { id: string } }>(
+    "/trips",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ loadNumbers: [load.loadNumber] }),
+    },
+    dispatcherAuth
+  );
 
   await request(`/billing/invoices/${load.id}/generate`, { method: "POST" }, auth, 400);
   await request(`/billing/invoices/${load.id}/generate`, { method: "POST" }, auth, 400);

@@ -10,10 +10,42 @@ const API_BASE = process.env.API_BASE || process.env.NEXT_PUBLIC_API_BASE || "ht
 
 type Auth = { cookie: string; csrf: string };
 
+const COMPLETED_ONBOARDING_STEPS = [
+  "basics",
+  "operating",
+  "team",
+  "drivers",
+  "fleet",
+  "preferences",
+  "tracking",
+  "finance",
+] as const;
+
 async function authFor(userId: string): Promise<Auth> {
   const session = await createSession({ userId });
   const csrf = createCsrfToken();
   return { cookie: `session=${session.token}; csrf=${csrf}`, csrf };
+}
+
+async function ensureOperationalOrg(orgId: string) {
+  await prisma.onboardingState.upsert({
+    where: { orgId },
+    create: {
+      orgId,
+      status: "OPERATIONAL",
+      completedSteps: [...COMPLETED_ONBOARDING_STEPS],
+      percentComplete: 100,
+      currentStep: COMPLETED_ONBOARDING_STEPS.length,
+      completedAt: new Date(),
+    },
+    update: {
+      status: "OPERATIONAL",
+      completedSteps: [...COMPLETED_ONBOARDING_STEPS],
+      percentComplete: 100,
+      currentStep: COMPLETED_ONBOARDING_STEPS.length,
+      completedAt: new Date(),
+    },
+  });
 }
 
 async function request(pathname: string, options: RequestInit, auth: Auth) {
@@ -36,6 +68,8 @@ async function request(pathname: string, options: RequestInit, auth: Auth) {
 async function main() {
   const orgA = await prisma.organization.create({ data: { name: "Tenant Org A" } });
   const orgB = await prisma.organization.create({ data: { name: "Tenant Org B" } });
+  await ensureOperationalOrg(orgA.id);
+  await ensureOperationalOrg(orgB.id);
 
   await prisma.orgSettings.create({
     data: {

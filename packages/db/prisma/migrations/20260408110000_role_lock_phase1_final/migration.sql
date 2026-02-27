@@ -62,7 +62,7 @@ ALTER TABLE "OrgSettings"
   USING (
     CASE
       WHEN "overrideRoles" IS NULL THEN ARRAY[]::"Role_new"[]
-      ELSE ARRAY(SELECT unnest("overrideRoles")::text::"Role_new")
+      ELSE "overrideRoles"::text[]::"Role_new"[]
     END
   );
 

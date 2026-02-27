@@ -15,17 +15,35 @@ async function main() {
     data: { orgId: orgB.id, email, passwordHash, role: "ADMIN", name: "Ops B" },
   });
 
+  const operatingEntityA = await prisma.operatingEntity.create({
+    data: {
+      orgId: orgA.id,
+      name: "Smoke Org A Carrier",
+      type: "CARRIER",
+      isDefault: true,
+    },
+  });
+  const operatingEntityB = await prisma.operatingEntity.create({
+    data: {
+      orgId: orgB.id,
+      name: "Smoke Org B Carrier",
+      type: "CARRIER",
+      isDefault: true,
+    },
+  });
+
   const loadNumber = "SMOKE-100";
   await prisma.load.create({
     data: {
-      orgId: orgA.id,
+      org: { connect: { id: orgA.id } },
+      operatingEntity: { connect: { id: operatingEntityA.id } },
       loadNumber,
       customerName: "Smoke Customer",
       status: "PLANNED",
       stops: {
         create: [
           {
-            orgId: orgA.id,
+            org: { connect: { id: orgA.id } },
             type: "PICKUP",
             name: "Pickup",
             address: "1 Smoke St",
@@ -35,7 +53,7 @@ async function main() {
             sequence: 1,
           },
           {
-            orgId: orgA.id,
+            org: { connect: { id: orgA.id } },
             type: "DELIVERY",
             name: "Delivery",
             address: "2 Smoke St",
@@ -50,14 +68,15 @@ async function main() {
   });
   await prisma.load.create({
     data: {
-      orgId: orgB.id,
+      org: { connect: { id: orgB.id } },
+      operatingEntity: { connect: { id: operatingEntityB.id } },
       loadNumber,
       customerName: "Smoke Customer",
       status: "PLANNED",
       stops: {
         create: [
           {
-            orgId: orgB.id,
+            org: { connect: { id: orgB.id } },
             type: "PICKUP",
             name: "Pickup",
             address: "1 Smoke St",
@@ -67,7 +86,7 @@ async function main() {
             sequence: 1,
           },
           {
-            orgId: orgB.id,
+            org: { connect: { id: orgB.id } },
             type: "DELIVERY",
             name: "Delivery",
             address: "2 Smoke St",
@@ -84,14 +103,15 @@ async function main() {
   try {
     await prisma.load.create({
       data: {
-        orgId: orgA.id,
+        org: { connect: { id: orgA.id } },
+        operatingEntity: { connect: { id: operatingEntityA.id } },
         loadNumber,
         customerName: "Duplicate",
         status: "PLANNED",
         stops: {
           create: [
             {
-              orgId: orgA.id,
+              org: { connect: { id: orgA.id } },
               type: "PICKUP",
               name: "Pickup",
               address: "1 Smoke St",
@@ -101,7 +121,7 @@ async function main() {
               sequence: 1,
             },
             {
-              orgId: orgA.id,
+              org: { connect: { id: orgA.id } },
               type: "DELIVERY",
               name: "Delivery",
               address: "2 Smoke St",
@@ -166,7 +186,8 @@ async function main() {
 
   const loadForInvoice = await prisma.load.create({
     data: {
-      orgId: orgA.id,
+      org: { connect: { id: orgA.id } },
+      operatingEntity: { connect: { id: operatingEntityA.id } },
       loadNumber: "SMOKE-INV-1",
       customerName: "Invoice Customer",
       status: "READY_TO_INVOICE",
@@ -174,7 +195,7 @@ async function main() {
       stops: {
         create: [
           {
-            orgId: orgA.id,
+            org: { connect: { id: orgA.id } },
             type: "PICKUP",
             name: "Pickup",
             address: "1 Smoke St",
@@ -184,7 +205,7 @@ async function main() {
             sequence: 1,
           },
           {
-            orgId: orgA.id,
+            org: { connect: { id: orgA.id } },
             type: "DELIVERY",
             name: "Delivery",
             address: "2 Smoke St",
