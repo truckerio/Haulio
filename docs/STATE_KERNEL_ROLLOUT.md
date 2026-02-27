@@ -31,8 +31,17 @@ Shadow comparison is wired in:
 - `DELETE /loads/:id/charges/:chargeId`
 - `POST /loads/:loadId/docs`
 - `POST /driver/docs`
+- `POST /docs/:id/verify`
+- `POST /docs/:id/reject`
+- `POST /billing/readiness/:loadId/mark-invoiced`
 - `POST /tracking/load/:loadId/start`
 - `POST /tracking/load/:loadId/stop`
+- `POST /loads/:loadId/stops/:stopId/arrive`
+- `POST /loads/:loadId/stops/:stopId/depart`
+- `POST /driver/stops/:stopId/arrive`
+- `POST /driver/stops/:stopId/depart`
+- `POST /trips/:id/assign`
+- `POST /trips/:id/status`
 - `transitionLoadStatus` internal execution transitions
 
 ## 4) Enablement Sequence

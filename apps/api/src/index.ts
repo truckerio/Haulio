@@ -622,6 +622,7 @@ type LegacyLoadKernelSnapshot = {
 async function maybeLogLoadKernelShadow(params: {
   orgId: string;
   userId: string;
+  userRole?: string | null;
   loadId: string;
   route: string;
   method: string;
@@ -676,6 +677,14 @@ async function maybeLogLoadKernelShadow(params: {
     meta: {
       route: params.route,
       method: params.method,
+      entityType: "Load",
+      entityId: params.loadId,
+      userRole: params.userRole ?? null,
+      orgId: params.orgId,
+      timestamp: new Date().toISOString(),
+      legacyBefore: params.before,
+      legacyAfter: comparison.normalizedLegacyAfter,
+      kernelAfter: comparison.kernelAfter,
       diffKeys: comparison.diffKeys,
     },
   });
@@ -7973,6 +7982,14 @@ app.get(
       res.status(404).json({ error: "Trip not found" });
       return;
     }
+    const tripLoadIds = trip.loads.map((entry) => entry.loadId);
+    const tripLoadBefore = tripLoadIds.length
+      ? await prisma.load.findMany({
+        where: { orgId: req.user!.orgId, id: { in: tripLoadIds } },
+        select: { id: true, status: true, billingStatus: true, podVerifiedAt: true },
+      })
+      : [];
+    const tripLoadBeforeMap = new Map(tripLoadBefore.map((load) => [load.id, load]));
     const noteIndicatorMap = await buildNoteIndicatorMap({
       orgId: req.user!.orgId,
       role: req.user!.role as Role,
@@ -8559,6 +8576,14 @@ app.post(
       res.status(404).json({ error: "Trip not found" });
       return;
     }
+    const tripLoadIds = trip.loads.map((entry) => entry.loadId);
+    const tripLoadBefore = tripLoadIds.length
+      ? await prisma.load.findMany({
+        where: { orgId: req.user!.orgId, id: { in: tripLoadIds } },
+        select: { id: true, status: true, billingStatus: true, podVerifiedAt: true },
+      })
+      : [];
+    const tripLoadBeforeMap = new Map(tripLoadBefore.map((load) => [load.id, load]));
 
     const hasDriver = Object.prototype.hasOwnProperty.call(parsed.data, "driverId");
     const hasTruck = Object.prototype.hasOwnProperty.call(parsed.data, "truckId");
@@ -8650,6 +8675,23 @@ app.post(
         trailerId: updated.trailerId,
       },
     });
+    for (const loadId of tripLoadIds) {
+      const before = tripLoadBeforeMap.get(loadId);
+      if (!before) continue;
+      await maybeLogLoadKernelShadow({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        userRole: req.user!.role,
+        loadId,
+        route: "/trips/:id/assign",
+        method: "POST",
+        before: {
+          status: before.status,
+          billingStatus: before.billingStatus,
+          podVerifiedAt: before.podVerifiedAt,
+        },
+      });
+    }
 
     await logAudit({
       orgId: req.user!.orgId,
@@ -8689,6 +8731,14 @@ app.post(
       res.status(404).json({ error: "Trip not found" });
       return;
     }
+    const tripLoadIds = trip.loads.map((entry) => entry.loadId);
+    const tripLoadBefore = tripLoadIds.length
+      ? await prisma.load.findMany({
+        where: { orgId: req.user!.orgId, id: { in: tripLoadIds } },
+        select: { id: true, status: true, billingStatus: true, podVerifiedAt: true },
+      })
+      : [];
+    const tripLoadBeforeMap = new Map(tripLoadBefore.map((load) => [load.id, load]));
     if (TRIP_DISPATCHED_STATUSES.includes(parsed.data.status) && !trip.driverId) {
       res.status(400).json({ error: "Trip requires a primary driver before dispatch status can advance" });
       return;
@@ -8729,6 +8779,23 @@ app.post(
         trailerId: updated.trailerId,
       },
     });
+    for (const loadId of tripLoadIds) {
+      const before = tripLoadBeforeMap.get(loadId);
+      if (!before) continue;
+      await maybeLogLoadKernelShadow({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        userRole: req.user!.role,
+        loadId,
+        route: "/trips/:id/status",
+        method: "POST",
+        before: {
+          status: before.status,
+          billingStatus: before.billingStatus,
+          podVerifiedAt: before.podVerifiedAt,
+        },
+      });
+    }
 
     await logAudit({
       orgId: req.user!.orgId,
@@ -10780,6 +10847,7 @@ async function handleArriveStop(params: {
   orgId: string;
   role: string;
   loadId?: string;
+  route: string;
 }) {
   const stop = await prisma.stop.findFirst({
     where: { id: params.stopId, orgId: params.orgId },
@@ -10844,6 +10912,19 @@ async function handleArriveStop(params: {
     entityId: stop.id,
     summary: `${stop.type} arrived at ${stop.name}`,
   });
+  await maybeLogLoadKernelShadow({
+    orgId: params.orgId,
+    userId: params.userId,
+    userRole: params.role,
+    loadId: stop.loadId,
+    route: params.route,
+    method: "POST",
+    before: {
+      status: stop.load.status,
+      billingStatus: stop.load.billingStatus,
+      podVerifiedAt: stop.load.podVerifiedAt,
+    },
+  });
   return updated;
 }
 
@@ -10853,6 +10934,7 @@ async function handleDepartStop(params: {
   orgId: string;
   role: Role;
   loadId?: string;
+  route: string;
 }) {
   const stop = await prisma.stop.findFirst({
     where: { id: params.stopId, orgId: params.orgId },
@@ -10942,6 +11024,19 @@ async function handleDepartStop(params: {
     entityId: stop.id,
     summary: `${stop.type} departed ${stop.name}`,
   });
+  await maybeLogLoadKernelShadow({
+    orgId: params.orgId,
+    userId: params.userId,
+    userRole: params.role,
+    loadId: stop.loadId,
+    route: params.route,
+    method: "POST",
+    before: {
+      status: stop.load.status,
+      billingStatus: stop.load.billingStatus,
+      podVerifiedAt: stop.load.podVerifiedAt,
+    },
+  });
   return updated;
 }
 
@@ -10958,6 +11053,7 @@ app.post(
         orgId: req.user!.orgId,
         role: req.user!.role,
         loadId: req.params.loadId,
+        route: "/loads/:loadId/stops/:stopId/arrive",
       });
       res.json({ stop });
     } catch (error) {
@@ -10979,6 +11075,7 @@ app.post(
         orgId: req.user!.orgId,
         role: req.user!.role as Role,
         loadId: req.params.loadId,
+        route: "/loads/:loadId/stops/:stopId/depart",
       });
       res.json({ stop });
     } catch (error) {
@@ -11449,6 +11546,7 @@ app.post("/driver/stops/:stopId/arrive", requireAuth, requireCsrf, requireRole("
       userId: req.user!.id,
       orgId: req.user!.orgId,
       role: req.user!.role,
+      route: "/driver/stops/:stopId/arrive",
     });
     res.json({ stop });
   } catch (error) {
@@ -11490,6 +11588,7 @@ app.post("/driver/stops/:stopId/depart", requireAuth, requireCsrf, requireRole("
       userId: req.user!.id,
       orgId: req.user!.orgId,
       role: req.user!.role as Role,
+      route: "/driver/stops/:stopId/depart",
     });
     res.json({ stop });
   } catch (error) {
