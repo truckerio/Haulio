@@ -36,6 +36,9 @@ services:
       # Prevent interactive corepack download prompts in container runs.
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       CI: "1"
+      STATE_KERNEL_SHADOW: ${STATE_KERNEL_SHADOW:-false}
+      STATE_KERNEL_ENFORCE: ${STATE_KERNEL_ENFORCE:-false}
+      STATE_KERNEL_DIVERGENCE_LOG: ${STATE_KERNEL_DIVERGENCE_LOG:-false}
     ports:
       - "4000:4000"
     volumes:
