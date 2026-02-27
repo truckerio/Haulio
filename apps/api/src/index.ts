@@ -244,6 +244,7 @@ import {
   isFinalizeIdempotent,
   payableLineFingerprint,
 } from "./lib/payables-engine";
+import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
 import { applyKernelTransition, buildKernelStateFromLegacyLoad, compareLoadKernelShadow } from "./lib/state-kernel";
 import path from "path";
 
@@ -8162,49 +8163,16 @@ app.get(
         : Promise.resolve([]),
     ]);
 
-    const plannedMiles = trip.loads.reduce((total, row) => total + (Number(row.load.miles ?? 0) || 0), 0);
-    const paidMilesRows = trip.loads.filter((row) => row.load.paidMiles !== null && row.load.paidMiles !== undefined);
-    const paidMiles =
-      paidMilesRows.length > 0
-        ? paidMilesRows.reduce((total, row) => total + (Number(row.load.paidMiles ?? 0) || 0), 0)
-        : null;
-    const milesVariance = paidMiles === null ? null : paidMiles - plannedMiles;
-    const milesSources = Array.from(
-      new Set(
-        trip.loads
-          .map((row) => row.load.paidMilesSource)
-          .filter((value): value is PayableMilesSource => value !== null)
-      )
-    );
-    const milesSource = milesSources.length === 1 ? milesSources[0] : milesSources.length > 1 ? "MIXED" : null;
-
-    const totalPallets = trip.loads.reduce((total, row) => total + (row.load.palletCount ?? 0), 0);
-    const totalWeightLbs = trip.loads.reduce((total, row) => total + (row.load.weightLbs ?? 0), 0);
-
-    const accessorialTotalCents = accessorials.reduce((total, row) => total + Math.round((Number(row.amount) || 0) * 100), 0);
-    const earningsCents = payableLines
-      .filter((line) => line.type === "EARNING")
-      .reduce((total, line) => total + (line.amountCents ?? 0), 0);
-    const reimbursementsCents = payableLines
-      .filter((line) => line.type === "REIMBURSEMENT")
-      .reduce((total, line) => total + (line.amountCents ?? 0), 0);
-    const deductionsTotalCents = payableLines
-      .filter((line) => line.type === "DEDUCTION")
-      .reduce((total, line) => total + Math.abs(line.amountCents ?? 0), 0);
-    const netPayPreviewCents = payableLines.length > 0 ? earningsCents + reimbursementsCents - deductionsTotalCents : null;
+    const preview = buildTripSettlementPreview({
+      loads: trip.loads.map((row) => row.load),
+      accessorialAmounts: accessorials.map((row) => row.amount),
+      payableLines,
+    });
 
     res.json({
       preview: {
         tripId: trip.id,
-        plannedMiles,
-        paidMiles,
-        milesVariance,
-        milesSource,
-        totalPallets,
-        totalWeightLbs,
-        accessorialTotalCents,
-        deductionsTotalCents,
-        netPayPreviewCents,
+        ...preview,
       },
     });
   }
