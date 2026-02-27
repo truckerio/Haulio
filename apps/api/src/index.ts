@@ -6612,7 +6612,7 @@ app.patch(
     const [load, charge] = await Promise.all([
       prisma.load.findFirst({
         where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
-        select: { id: true, customerId: true },
+        select: { id: true, customerId: true, status: true, billingStatus: true, podVerifiedAt: true },
       }),
       prisma.loadCharge.findFirst({ where: { id: req.params.chargeId, orgId: req.user!.orgId } }),
     ]);
@@ -6658,6 +6658,18 @@ app.patch(
         valueJson: { type: updated.type, amountCents: updated.amountCents },
       });
     }
+    await maybeLogLoadKernelShadow({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      loadId: load.id,
+      route: "/loads/:id/charges/:chargeId",
+      method: "PATCH",
+      before: {
+        status: load.status,
+        billingStatus: load.billingStatus,
+        podVerifiedAt: load.podVerifiedAt,
+      },
+    });
     res.json({ charge: updated });
   }
 );
@@ -6669,7 +6681,10 @@ app.delete(
   requireCapability("editCharges"),
   async (req, res) => {
     const [load, charge] = await Promise.all([
-      prisma.load.findFirst({ where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null }, select: { id: true } }),
+      prisma.load.findFirst({
+        where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+        select: { id: true, status: true, billingStatus: true, podVerifiedAt: true },
+      }),
       prisma.loadCharge.findFirst({ where: { id: req.params.chargeId, orgId: req.user!.orgId } }),
     ]);
     if (!load || !charge || charge.loadId !== load.id) {
@@ -6688,6 +6703,18 @@ app.delete(
         type: charge.type,
         description: charge.description,
         amountCents: charge.amountCents,
+      },
+    });
+    await maybeLogLoadKernelShadow({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      loadId: load.id,
+      route: "/loads/:id/charges/:chargeId",
+      method: "DELETE",
+      before: {
+        status: load.status,
+        billingStatus: load.billingStatus,
+        podVerifiedAt: load.podVerifiedAt,
       },
     });
     res.json({ ok: true });
@@ -11734,6 +11761,14 @@ app.post(
   async (req, res) => {
   const load = await prisma.load.findFirst({
     where: { id: req.params.loadId, orgId: req.user!.orgId },
+    select: {
+      id: true,
+      loadNumber: true,
+      assignedDriverId: true,
+      status: true,
+      billingStatus: true,
+      podVerifiedAt: true,
+    },
   });
   if (!load) {
     res.status(404).json({ error: "Load not found" });
@@ -11780,6 +11815,18 @@ app.post(
     entity: "LoadTrackingSession",
     entityId: updated.id,
     summary: `Stopped phone tracking for load ${load.loadNumber}`,
+  });
+  await maybeLogLoadKernelShadow({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    loadId: load.id,
+    route: "/tracking/load/:loadId/stop",
+    method: "POST",
+    before: {
+      status: load.status,
+      billingStatus: load.billingStatus,
+      podVerifiedAt: load.podVerifiedAt,
+    },
   });
   res.json({ session: updated });
 });
@@ -12155,7 +12202,15 @@ app.post(
     try {
       const load = await prisma.load.findFirst({
         where: { id: parsed.data.loadId, orgId: req.user!.orgId },
-        select: { id: true, loadNumber: true, status: true, assignedDriverId: true, deliveredAt: true },
+        select: {
+          id: true,
+          loadNumber: true,
+          status: true,
+          billingStatus: true,
+          podVerifiedAt: true,
+          assignedDriverId: true,
+          deliveredAt: true,
+        },
       });
       if (!load) {
         res.status(404).json({ error: "Load not found" });
@@ -12247,6 +12302,18 @@ app.post(
         source: "dispatch.docs",
         trigger: "driver_uploaded",
         dedupeSuffix: doc.id,
+      });
+      await maybeLogLoadKernelShadow({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        loadId: load.id,
+        route: "/driver/docs",
+        method: "POST",
+        before: {
+          status: load.status,
+          billingStatus: load.billingStatus,
+          podVerifiedAt: load.podVerifiedAt,
+        },
       });
       res.json({ doc });
     } catch (error) {
