@@ -244,6 +244,7 @@ import {
   isFinalizeIdempotent,
   payableLineFingerprint,
 } from "./lib/payables-engine";
+import { applyKernelTransition, buildKernelStateFromLegacyLoad, compareLoadKernelShadow } from "./lib/state-kernel";
 import path from "path";
 
 const app = express();
@@ -252,6 +253,8 @@ app.set("trust proxy", 1);
 const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 const DEV_ERRORS = process.env.NODE_ENV !== "production";
 const DEFAULT_TEAM_NAME = "Default";
+const STATE_KERNEL_SHADOW = process.env.STATE_KERNEL_SHADOW === "true";
+const STATE_KERNEL_DIVERGENCE_LOG = process.env.STATE_KERNEL_DIVERGENCE_LOG === "true";
 
 const APPEARANCE_DEFAULTS = {
   theme: AppearanceTheme.SYSTEM,
@@ -608,6 +611,74 @@ async function buildNoteIndicatorMap(params: {
     }
   }
   return map;
+}
+
+type LegacyLoadKernelSnapshot = {
+  status: LoadStatus;
+  billingStatus: BillingStatus;
+  podVerifiedAt: Date | null;
+};
+
+async function maybeLogLoadKernelShadow(params: {
+  orgId: string;
+  userId: string;
+  loadId: string;
+  route: string;
+  method: string;
+  before: LegacyLoadKernelSnapshot;
+}) {
+  if (!STATE_KERNEL_SHADOW) return;
+
+  const beforeState = buildKernelStateFromLegacyLoad({
+    status: params.before.status,
+    billingStatus: params.before.billingStatus,
+    podVerifiedAt: params.before.podVerifiedAt,
+  });
+  const kernelResult = applyKernelTransition({
+    authority: "LOAD",
+    current: beforeState,
+    next: {},
+    context: { allowUnsafe: true, reason: "shadow-check" },
+  });
+
+  const latest = await prisma.load.findFirst({
+    where: { id: params.loadId, orgId: params.orgId },
+    select: { status: true, billingStatus: true, podVerifiedAt: true },
+  });
+  if (!latest) return;
+
+  const comparison = compareLoadKernelShadow({
+    legacyAfter: {
+      status: latest.status,
+      billingStatus: latest.billingStatus,
+      podVerifiedAt: latest.podVerifiedAt,
+    },
+    kernelAfter: kernelResult.candidateState,
+  });
+  if (comparison.matches || !STATE_KERNEL_DIVERGENCE_LOG) return;
+
+  await logAudit({
+    orgId: params.orgId,
+    userId: params.userId,
+    action: "STATE_KERNEL_DIVERGENCE",
+    entity: "Load",
+    entityId: params.loadId,
+    summary: `Kernel shadow divergence on ${params.method} ${params.route}`,
+    before: {
+      legacy: params.before,
+      kernel: beforeState,
+    },
+    after: {
+      legacy: comparison.normalizedLegacyAfter,
+      kernel: comparison.kernelAfter,
+      diffKeys: comparison.diffKeys,
+    },
+    meta: {
+      route: params.route,
+      method: params.method,
+      diffKeys: comparison.diffKeys,
+    },
+  });
 }
 
 async function resolveNoteEntity(params: {
@@ -6466,7 +6537,7 @@ app.post(
     }
     const load = await prisma.load.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
-      select: { id: true, loadNumber: true, customerId: true },
+      select: { id: true, loadNumber: true, customerId: true, status: true, billingStatus: true, podVerifiedAt: true },
     });
     if (!load) {
       res.status(404).json({ error: "Load not found" });
@@ -6506,6 +6577,18 @@ app.post(
         valueJson: { type: charge.type, amountCents: charge.amountCents },
       });
     }
+    await maybeLogLoadKernelShadow({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      loadId: load.id,
+      route: "/loads/:id/charges",
+      method: "POST",
+      before: {
+        status: load.status,
+        billingStatus: load.billingStatus,
+        podVerifiedAt: load.podVerifiedAt,
+      },
+    });
     res.json({ charge });
   }
 );
@@ -11627,6 +11710,18 @@ app.post(
     entityId: session.id,
     summary: `Started phone tracking for load ${load.loadNumber}`,
   });
+  await maybeLogLoadKernelShadow({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    loadId: load.id,
+    route: "/tracking/load/:loadId/start",
+    method: "POST",
+    before: {
+      status: load.status,
+      billingStatus: load.billingStatus,
+      podVerifiedAt: load.podVerifiedAt,
+    },
+  });
 
   res.json({ session });
 });
@@ -11917,7 +12012,7 @@ app.post(
     try {
       const load = await prisma.load.findFirst({
         where: { id: req.params.loadId, orgId: req.user!.orgId },
-        select: { id: true, loadNumber: true, status: true, deliveredAt: true },
+        select: { id: true, loadNumber: true, status: true, billingStatus: true, podVerifiedAt: true, deliveredAt: true },
       });
       if (!load) {
         res.status(404).json({ error: "Load not found" });
@@ -12015,6 +12110,18 @@ app.post(
         source: "dispatch.docs",
         trigger: "uploaded",
         dedupeSuffix: doc.id,
+      });
+      await maybeLogLoadKernelShadow({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        loadId: load.id,
+        route: "/loads/:loadId/docs",
+        method: "POST",
+        before: {
+          status: load.status,
+          billingStatus: load.billingStatus,
+          podVerifiedAt: load.podVerifiedAt,
+        },
       });
       res.json({ doc });
     } catch (error) {

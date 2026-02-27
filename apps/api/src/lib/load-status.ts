@@ -1,21 +1,9 @@
 import { LoadStatus } from "@truckerio/db";
-
-const transitions: Record<LoadStatus, LoadStatus[]> = {
-  DRAFT: [LoadStatus.PLANNED, LoadStatus.CANCELLED],
-  PLANNED: [LoadStatus.ASSIGNED, LoadStatus.CANCELLED],
-  ASSIGNED: [LoadStatus.IN_TRANSIT, LoadStatus.PLANNED, LoadStatus.CANCELLED],
-  IN_TRANSIT: [LoadStatus.DELIVERED],
-  DELIVERED: [LoadStatus.POD_RECEIVED, LoadStatus.READY_TO_INVOICE],
-  POD_RECEIVED: [LoadStatus.READY_TO_INVOICE],
-  READY_TO_INVOICE: [LoadStatus.INVOICED],
-  INVOICED: [LoadStatus.PAID],
-  PAID: [],
-  CANCELLED: [],
-};
+import { LOAD_STATUS_TRANSITIONS } from "./state-kernel/transitions";
 
 export function canTransitionLoadStatus(current: LoadStatus, next: LoadStatus) {
   if (current === next) return true;
-  return transitions[current]?.includes(next) ?? false;
+  return LOAD_STATUS_TRANSITIONS[current]?.includes(next) ?? false;
 }
 
 export function assertLoadStatusTransition(params: {
