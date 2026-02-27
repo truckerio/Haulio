@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { BillingStatus, LoadStatus } from "@truckerio/db";
 import { applyKernelTransition } from "./apply-transition";
 import { evaluateKernelInvariants } from "./invariants";
-import { compareLoadKernelShadow } from "./shadow-compare";
+import { buildKernelPatchFromLegacyLoadSnapshots, compareLoadKernelShadow } from "./shadow-compare";
 import { buildKernelStateFromLegacyLoad, canTransitionLegacyLoadStatus, isExecutionTransitionAllowed } from "./transitions";
 import type { KernelState } from "./types";
 
@@ -120,5 +120,36 @@ const divergedShadow = compareLoadKernelShadow({
 assert.equal(divergedShadow.matches, false);
 assert.deepEqual(divergedShadow.diffKeys, ["execution"]);
 
-console.log("state-kernel tests passed");
+const kernelPatch = buildKernelPatchFromLegacyLoadSnapshots({
+  legacyBefore: {
+    status: LoadStatus.PLANNED,
+    billingStatus: BillingStatus.BLOCKED,
+    podVerifiedAt: null,
+  },
+  legacyAfter: {
+    status: LoadStatus.READY_TO_INVOICE,
+    billingStatus: BillingStatus.READY,
+    podVerifiedAt: new Date("2026-02-27T00:00:00Z"),
+  },
+});
+assert.deepEqual(kernelPatch, {
+  execution: "COMPLETE",
+  doc: "VERIFIED",
+  finance: "READY",
+});
 
+const noChangePatch = buildKernelPatchFromLegacyLoadSnapshots({
+  legacyBefore: {
+    status: LoadStatus.ASSIGNED,
+    billingStatus: BillingStatus.BLOCKED,
+    podVerifiedAt: null,
+  },
+  legacyAfter: {
+    status: LoadStatus.ASSIGNED,
+    billingStatus: BillingStatus.BLOCKED,
+    podVerifiedAt: null,
+  },
+});
+assert.deepEqual(noChangePatch, {});
+
+console.log("state-kernel tests passed");

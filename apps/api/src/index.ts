@@ -245,7 +245,12 @@ import {
   payableLineFingerprint,
 } from "./lib/payables-engine";
 import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
-import { applyKernelTransition, buildKernelStateFromLegacyLoad, compareLoadKernelShadow } from "./lib/state-kernel";
+import {
+  applyKernelTransition,
+  buildKernelPatchFromLegacyLoadSnapshots,
+  buildKernelStateFromLegacyLoad,
+  compareLoadKernelShadow,
+} from "./lib/state-kernel";
 import path from "path";
 
 const app = express();
@@ -641,6 +646,7 @@ async function maybeLogLoadKernelShadow(params: {
   route: string;
   method: string;
   before: LegacyLoadKernelSnapshot;
+  after?: LegacyLoadKernelSnapshot;
 }) {
   if (!STATE_KERNEL_SHADOW) return;
 
@@ -649,28 +655,39 @@ async function maybeLogLoadKernelShadow(params: {
     billingStatus: params.before.billingStatus,
     podVerifiedAt: params.before.podVerifiedAt,
   });
+  const legacyAfter =
+    params.after ??
+    (await prisma.load.findFirst({
+      where: { id: params.loadId, orgId: params.orgId },
+      select: { status: true, billingStatus: true, podVerifiedAt: true },
+    }));
+  if (!legacyAfter) return;
+  const kernelPatch = buildKernelPatchFromLegacyLoadSnapshots({
+    legacyBefore: params.before,
+    legacyAfter: {
+      status: legacyAfter.status,
+      billingStatus: legacyAfter.billingStatus,
+      podVerifiedAt: legacyAfter.podVerifiedAt,
+    },
+  });
   const kernelResult = applyKernelTransition({
     authority: "LOAD",
     current: beforeState,
-    next: {},
+    next: kernelPatch,
     context: { allowUnsafe: true, reason: "shadow-check" },
   });
 
-  const latest = await prisma.load.findFirst({
-    where: { id: params.loadId, orgId: params.orgId },
-    select: { status: true, billingStatus: true, podVerifiedAt: true },
-  });
-  if (!latest) return;
-
   const comparison = compareLoadKernelShadow({
     legacyAfter: {
-      status: latest.status,
-      billingStatus: latest.billingStatus,
-      podVerifiedAt: latest.podVerifiedAt,
+      status: legacyAfter.status,
+      billingStatus: legacyAfter.billingStatus,
+      podVerifiedAt: legacyAfter.podVerifiedAt,
     },
     kernelAfter: kernelResult.candidateState,
   });
-  if (comparison.matches || !STATE_KERNEL_DIVERGENCE_LOG) return;
+  const hasKernelViolations = kernelResult.violations.length > 0;
+  const hasBlockingKernelViolations = kernelResult.violations.some((entry) => entry.severity === "ERROR");
+  if ((comparison.matches && !hasKernelViolations) || !STATE_KERNEL_DIVERGENCE_LOG) return;
   const enforceActive = isKernelEnforceEnabledForOrg(params.orgId);
 
   await logAudit({
@@ -679,7 +696,9 @@ async function maybeLogLoadKernelShadow(params: {
     action: "STATE_KERNEL_DIVERGENCE",
     entity: "Load",
     entityId: params.loadId,
-    summary: `Kernel shadow divergence on ${params.method} ${params.route}`,
+    summary: hasKernelViolations
+      ? `Kernel shadow violation on ${params.method} ${params.route}`
+      : `Kernel shadow divergence on ${params.method} ${params.route}`,
     before: {
       legacy: params.before,
       kernel: beforeState,
@@ -688,6 +707,7 @@ async function maybeLogLoadKernelShadow(params: {
       legacy: comparison.normalizedLegacyAfter,
       kernel: comparison.kernelAfter,
       diffKeys: comparison.diffKeys,
+      violations: kernelResult.violations,
     },
     meta: {
       route: params.route,
@@ -701,11 +721,14 @@ async function maybeLogLoadKernelShadow(params: {
       legacyAfter: comparison.normalizedLegacyAfter,
       kernelAfter: comparison.kernelAfter,
       diffKeys: comparison.diffKeys,
+      kernelPatch,
+      violationCodes: kernelResult.violations.map((entry) => entry.code),
+      hasBlockingKernelViolations,
       enforceActive,
     },
   });
 
-  if (enforceActive) {
+  if (enforceActive && (!comparison.matches || hasBlockingKernelViolations)) {
     await logAudit({
       orgId: params.orgId,
       userId: params.userId,
@@ -717,6 +740,7 @@ async function maybeLogLoadKernelShadow(params: {
         route: params.route,
         method: params.method,
         diffKeys: comparison.diffKeys,
+        violationCodes: kernelResult.violations.map((entry) => entry.code),
         userRole: params.userRole ?? null,
         orgId: params.orgId,
         timestamp: new Date().toISOString(),
@@ -728,6 +752,7 @@ async function maybeLogLoadKernelShadow(params: {
       after: {
         legacy: comparison.normalizedLegacyAfter,
         kernel: comparison.kernelAfter,
+        violations: kernelResult.violations,
       },
     });
   }
@@ -2469,6 +2494,11 @@ async function transitionLoadStatus(params: {
         status: kernelShadowBefore.status,
         billingStatus: kernelShadowBefore.billingStatus,
         podVerifiedAt: kernelShadowBefore.podVerifiedAt,
+      },
+      after: {
+        status: updated.status,
+        billingStatus: updated.billingStatus,
+        podVerifiedAt: updated.podVerifiedAt,
       },
     });
   }

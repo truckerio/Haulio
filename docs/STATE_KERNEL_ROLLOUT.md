@@ -91,6 +91,12 @@ docker compose -p prodlocal \
 
 ## 6) Divergence Audit Queries
 
+Each `STATE_KERNEL_DIVERGENCE` row now includes:
+- `meta.kernelPatch` (derived transition diff from `legacyBefore -> legacyAfter`)
+- `meta.violationCodes` (kernel invariant/transition violations)
+- `meta.hasBlockingKernelViolations` (boolean)
+- `after.violations` (full violation payload)
+
 Latest divergence rows for an org:
 
 ```sql
@@ -100,7 +106,11 @@ SELECT
   summary,
   entity,
   "entityId",
-  meta
+  meta->>'route' AS route,
+  meta->>'method' AS method,
+  meta->'violationCodes' AS violation_codes,
+  meta->>'hasBlockingKernelViolations' AS has_blocking,
+  meta->'kernelPatch' AS kernel_patch
 FROM "AuditLog"
 WHERE "orgId" = '<ORG_ID>'
   AND action = 'STATE_KERNEL_DIVERGENCE'
@@ -120,6 +130,21 @@ WHERE "orgId" = '<ORG_ID>'
   AND action = 'STATE_KERNEL_DIVERGENCE'
 GROUP BY 1,2
 ORDER BY divergence_count DESC;
+```
+
+Blocking kernel violations by route:
+
+```sql
+SELECT
+  meta->>'route' AS route,
+  meta->>'method' AS method,
+  COUNT(*) AS blocking_violation_count
+FROM "AuditLog"
+WHERE "orgId" = '<ORG_ID>'
+  AND action = 'STATE_KERNEL_DIVERGENCE'
+  AND COALESCE((meta->>'hasBlockingKernelViolations')::boolean, false) = true
+GROUP BY 1,2
+ORDER BY blocking_violation_count DESC;
 ```
 
 Recent divergence detail (legacy vs kernel state):
