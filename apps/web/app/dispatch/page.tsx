@@ -608,10 +608,10 @@ function DispatchPageContent({
   const isQueueReadOnly = queueView !== "active";
   const canStartTracking = capabilities.canStartTracking && canDispatch;
   const canSeeAllTeams = Boolean(
-    user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER" || user?.canSeeAllTeams
+    capabilities.canAccessAdmin || capabilities.canSeeTeamsOps || user?.canSeeAllTeams
   );
-  const canAssignTeamsOps = Boolean(user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER");
-  const canOverride = user?.role === "ADMIN";
+  const canAssignTeamsOps = Boolean(capabilities.canAccessAdmin || capabilities.canSeeTeamsOps);
+  const canOverride = capabilities.canAccessAdmin;
   const userLastViewStorageKey = useMemo(
     () => (user?.id ? `dispatch:last-view:${user.id}` : null),
     [user?.id]
@@ -694,7 +694,7 @@ function DispatchPageContent({
   }, [activeViewId, userLastViewStorageKey]);
 
   useEffect(() => {
-    if (!user || user.role !== "ADMIN") return;
+    if (!user || !capabilities.canAccessAdmin) return;
     apiFetch<{ state: { status?: string } }>("/onboarding/state")
       .then((payload) => {
         if (payload.state?.status === "NOT_ACTIVATED") {
@@ -706,7 +706,7 @@ function DispatchPageContent({
       .catch(() => {
         // ignore onboarding checks for non-admins or unexpected errors
       });
-  }, [user]);
+  }, [user, capabilities.canAccessAdmin]);
 
   useEffect(() => {
     if (!hasAccess) return;

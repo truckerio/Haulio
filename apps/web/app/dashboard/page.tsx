@@ -13,6 +13,7 @@ import { apiFetch } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { FormField } from "@/components/ui/form-field";
 import { Select } from "@/components/ui/select";
+import { getRoleCapabilities } from "@/lib/capabilities";
 
 type Task = {
   id: string;
@@ -115,10 +116,9 @@ export default function DashboardPage() {
     try {
       const userData = await apiFetch<{ user: { id: string; role: string; permissions?: string[] } }>("/auth/me");
       setMe(userData.user);
+      const capabilities = getRoleCapabilities(userData.user.role);
       const allowAssign =
-        userData.user.role === "ADMIN" ||
-        userData.user.role === "DISPATCHER" ||
-        userData.user.role === "HEAD_DISPATCHER" ||
+        capabilities.canDispatchExecution ||
         userData.user.permissions?.includes("TASK_ASSIGN");
       setCanAssign(Boolean(allowAssign));
       if (allowAssign) {

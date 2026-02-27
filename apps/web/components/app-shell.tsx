@@ -137,9 +137,11 @@ function compactRelativeTime(value: string) {
 }
 
 function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean }) {
-  if (role === "DRIVER") return driverSections;
+  const roleCapabilities = getRoleCapabilities(role);
+  if (roleCapabilities.canonicalRole === "DRIVER") return driverSections;
   const allowed = roleRoutes[role ?? ""] ?? defaultRoutes;
-  const isDispatchRole = role === "DISPATCHER" || role === "HEAD_DISPATCHER";
+  const isDispatchRole =
+    roleCapabilities.canonicalRole === "DISPATCHER" || roleCapabilities.canonicalRole === "HEAD_DISPATCHER";
   const secondaryDispatchRoutes = new Set(["/today", "/dashboard"]);
   const sections = navSections
     .map((section) => ({
@@ -510,9 +512,9 @@ function AppShellInner({
   const searchRequestIdRef = useRef(0);
   const [teamsEnabled, setTeamsEnabled] = useState(() => teamsEnabledCache ?? false);
   const capabilities = getRoleCapabilities(user?.role);
-  const canSeeTeamsOps = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
+  const canSeeTeamsOps = capabilities.canSeeTeamsOps;
   const showTeamsOps = Boolean(
-    user && (user.role === "ADMIN" || (capabilities.canSeeTeamsOps && teamsEnabled))
+    user && (capabilities.canAccessAdmin || (capabilities.canSeeTeamsOps && teamsEnabled))
   );
   const canUseGlobalSearch = capabilities.canUseGlobalSearch;
   const canUseActivity = capabilities.canUseActivity;
@@ -959,7 +961,7 @@ function AppShellInner({
                 </button>
               </div>
             ) : null}
-            {user?.role === "ADMIN" &&
+            {capabilities.canAccessAdmin &&
             onboarding &&
             onboarding.status === "NOT_ACTIVATED" &&
             !pathname.startsWith("/onboarding") ? (

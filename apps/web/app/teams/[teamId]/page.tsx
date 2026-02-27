@@ -49,8 +49,8 @@ function TeamLoadsContent() {
   const params = useParams();
   const router = useRouter();
   const teamId = params?.teamId as string | undefined;
-  const { user, loading } = useUser();
-  const canAccess = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
+  const { user, loading, capabilities } = useUser();
+  const canAccess = Boolean(user && (capabilities.canAccessAdmin || capabilities.canSeeTeamsOps));
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamName, setTeamName] = useState<string>("");
   const [loads, setLoads] = useState<DispatchLoad[]>([]);

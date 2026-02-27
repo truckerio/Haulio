@@ -31,8 +31,8 @@ export default function TeamsOpsPage() {
 }
 
 function TeamsOpsContent() {
-  const { user, loading } = useUser();
-  const canAccess = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
+  const { user, loading, capabilities } = useUser();
+  const canAccess = Boolean(user && (capabilities.canAccessAdmin || capabilities.canSeeTeamsOps));
   const [teams, setTeams] = useState<Team[]>([]);
   const [counts, setCounts] = useState<Record<string, TeamCounts>>({});
   const [loadingTeams, setLoadingTeams] = useState(true);
@@ -116,7 +116,7 @@ function TeamsOpsContent() {
     };
   }, [canAccess, teams, teamsEnabled]);
 
-  const showManageLink = Boolean(user?.role === "ADMIN");
+  const showManageLink = capabilities.canAccessAdmin;
 
   const content = useMemo(() => {
     if (loading || loadingTeams) {

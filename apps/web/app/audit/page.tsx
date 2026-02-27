@@ -12,8 +12,8 @@ import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
 
 export default function AuditPage() {
-  const { user } = useUser();
-  const canAccess = Boolean(user && user.role === "ADMIN");
+  const { capabilities } = useUser();
+  const canAccess = capabilities.canAccessAdmin;
   const [audits, setAudits] = useState<any[]>([]);
   const [loadNumber, setLoadNumber] = useState("");
 
