@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { apiFetch } from "@/lib/api";
+import { getRoleLandingPath } from "@/lib/capabilities";
 
 export default function PostLoginPage() {
   const router = useRouter();
@@ -15,14 +16,7 @@ export default function PostLoginPage() {
       try {
         const data = await apiFetch<{ user: { role: string } }>("/auth/me");
         if (!mounted) return;
-        const role = data.user?.role;
-        if (role === "DRIVER") {
-          router.replace("/driver");
-        } else if (role === "DISPATCHER" || role === "HEAD_DISPATCHER") {
-          router.replace("/dispatch");
-        } else {
-          router.replace("/today");
-        }
+        router.replace(getRoleLandingPath(data.user?.role));
       } catch (err) {
         if (!mounted) return;
         setError((err as Error).message || "Unable to continue.");

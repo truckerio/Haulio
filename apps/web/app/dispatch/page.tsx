@@ -5,6 +5,7 @@ export const dynamic = "force-dynamic";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
+import { useUser } from "@/components/auth/user-context";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,9 +18,23 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { NoAccess } from "@/components/rbac/no-access";
 import type { AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
-import { DispatchBrowse } from "@/components/dispatch/DispatchBrowse";
+import {
+  DISPATCH_OPTIONAL_COLUMNS,
+  DISPATCH_REQUIRED_COLUMNS,
+  DispatchSpreadsheetGrid,
+  type DispatchGridColumnKey,
+  type DispatchGridDensity,
+  type DispatchGridFilterState,
+  type DispatchGridSortRule,
+  type DispatchInspectorFocusSection,
+  type DispatchGridRow,
+} from "@/components/dispatch/DispatchSpreadsheetGrid";
+import { DriverLanesPanel } from "@/components/dispatch/DriverLanesPanel";
+import { DispatchDocUploadDrawer } from "@/components/dispatch/DispatchDocUploadDrawer";
+import { TripsWorkspace } from "@/components/dispatch/TripsWorkspace";
 import { WorkbenchRightPane } from "@/components/dispatch/WorkbenchRightPane";
 import { apiFetch } from "@/lib/api";
+import { getDefaultDispatchWorkspace, getRoleCapabilities, type DispatchWorkspace } from "@/lib/capabilities";
 import { buildYardOsPlanningUrl } from "@/lib/yardos";
 import { LegsPanel } from "./legs-panel";
 
@@ -65,6 +80,7 @@ type DispatchItem = {
   id: string;
   loadNumber: string;
   status: string;
+  movementMode?: string | null;
   trip?: {
     id: string;
     tripNumber: string;
@@ -73,6 +89,8 @@ type DispatchItem = {
   customerName?: string | null;
   rate?: string | number | null;
   miles?: number | null;
+  paidMiles?: number | null;
+  updatedAt?: string | null;
   assignment?: {
     driver?: { id: string; name: string } | null;
     truck?: { id: string; unit: string } | null;
@@ -93,6 +111,36 @@ type DispatchItem = {
     sequence: number;
   } | null;
   tracking?: { state: "ON" | "OFF"; lastPingAt?: string | null };
+  docs?: {
+    hasPod?: boolean;
+    hasBol?: boolean;
+    hasRateCon?: boolean;
+  } | null;
+  notesIndicator?: "NONE" | "NORMAL" | "ALERT";
+  exceptions?: Array<{
+    id: string;
+    type: string;
+    severity: "WARNING" | "BLOCKER";
+    owner: "DISPATCH" | "DRIVER" | "BILLING" | "CUSTOMER" | "SYSTEM";
+    status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+    title: string;
+  }> | null;
+  issuesTop?: Array<{
+    type: string;
+    label: string;
+    severity: "BLOCKER" | "WARNING";
+    focusSection?: DispatchInspectorFocusSection | null;
+    actionHint: string;
+  }> | null;
+  issues?: Array<{
+    type: string;
+    label: string;
+    severity: "BLOCKER" | "WARNING";
+    focusSection?: DispatchInspectorFocusSection | null;
+    actionHint: string;
+  }> | null;
+  issuesText?: string | null;
+  issueCounts?: Record<string, number> | null;
   legSummary?: { count: number; activeStatus?: string | null };
   riskFlags?: {
     needsAssignment: boolean;
@@ -121,6 +169,200 @@ const defaultFilters = {
 
 type Filters = typeof defaultFilters;
 type QueueView = "active" | "recent" | "history";
+type WorkflowQueuePresetId =
+  | "needsAssignment"
+  | "lateRisk"
+  | "missingDocs"
+  | "billingPrep"
+  | "complianceIssues"
+  | "openExceptions"
+  | "anyIssues"
+  | "missingAppointment"
+  | "pendingApprovals";
+type PanelDock = "left" | "right" | "bottom";
+type BulkStatus =
+  | "PLANNED"
+  | "ASSIGNED"
+  | "IN_TRANSIT"
+  | "DELIVERED"
+  | "POD_RECEIVED"
+  | "READY_TO_INVOICE"
+  | "INVOICED"
+  | "PAID"
+  | "CANCELLED";
+
+type DispatchPanels = {
+  inspector: boolean;
+  tripInspector: boolean;
+  driverLanes: boolean;
+  exceptions: boolean;
+  exceptionsDock: Exclude<PanelDock, "bottom">;
+};
+
+type DispatchViewConfig = {
+  id: string;
+  name: string;
+  scope?: "PERSONAL" | "ADMIN_TEMPLATE";
+  role?: string | null;
+  isRoleDefault?: boolean;
+  userId?: string | null;
+  filters: Filters;
+  density: DispatchGridDensity;
+  columns: Partial<Record<DispatchGridColumnKey, boolean>>;
+  panels: DispatchPanels;
+  grid: {
+    filters: DispatchGridFilterState;
+    sortRules: DispatchGridSortRule[];
+  };
+};
+
+type DispatchExceptionItem = {
+  id: string;
+  loadId: string;
+  loadNumber?: string | null;
+  tripId?: string | null;
+  tripNumber?: string | null;
+  type: string;
+  severity: "WARNING" | "BLOCKER";
+  owner: "DISPATCH" | "DRIVER" | "BILLING" | "CUSTOMER" | "SYSTEM";
+  status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+  title: string;
+  detail?: string | null;
+  createdAt: string;
+};
+
+const DEFAULT_COLUMNS: Partial<Record<DispatchGridColumnKey, boolean>> = DISPATCH_OPTIONAL_COLUMNS.reduce(
+  (acc, key) => ({ ...acc, [key]: key === "tripNumber" }),
+  {}
+);
+
+const DEFAULT_PANELS: DispatchPanels = {
+  inspector: true,
+  tripInspector: false,
+  driverLanes: false,
+  exceptions: true,
+  exceptionsDock: "left",
+};
+
+const DEFAULT_GRID_STATE: DispatchViewConfig["grid"] = {
+  filters: {},
+  sortRules: [{ column: "pickupAppt", direction: "asc" }],
+};
+
+const SYSTEM_VIEW: DispatchViewConfig = {
+  id: "dispatch-core",
+  name: "Dispatch Core",
+  filters: defaultFilters,
+  density: "compact",
+  columns: DEFAULT_COLUMNS,
+  panels: DEFAULT_PANELS,
+  grid: DEFAULT_GRID_STATE,
+};
+
+const ISSUE_TYPE_LIST = [
+  "NEEDS_ASSIGNMENT",
+  "LATE_RISK",
+  "OVERDUE",
+  "MISSING_POD",
+  "MISSING_BOL",
+  "MISSING_RATECON",
+  "MISSING_APPOINTMENT",
+  "PENDING_APPROVALS",
+  "MISSING_BILL_TO",
+  "BILLING_PROFILE_INCOMPLETE",
+  "LOAD_NOT_DELIVERED",
+  "COMPLIANCE_EXPIRED",
+  "COMPLIANCE_EXPIRING",
+  "OPEN_EXCEPTION",
+] as const;
+
+const issueTypeSet = new Set<string>(ISSUE_TYPE_LIST);
+
+function buildIssueTypeFilter(types: readonly string[]): DispatchGridFilterState {
+  const includeValues = Array.from(new Set(types.filter((type) => issueTypeSet.has(type))));
+  return includeValues.length ? { issueTypes: { includeValues, excludeValues: [] } } : {};
+}
+
+const WORKFLOW_QUEUE_PRESETS: Array<{
+  id: WorkflowQueuePresetId;
+  label: string;
+  queueView: QueueView;
+  gridFilters: DispatchGridFilterState;
+}> = [
+  {
+    id: "needsAssignment",
+    label: "Needs Assignment",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter(["NEEDS_ASSIGNMENT"]),
+  },
+  {
+    id: "lateRisk",
+    label: "Late Risk",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter(["LATE_RISK", "OVERDUE", "MISSING_APPOINTMENT"]),
+  },
+  {
+    id: "missingDocs",
+    label: "Missing Docs",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter(["MISSING_POD", "MISSING_BOL", "MISSING_RATECON"]),
+  },
+  {
+    id: "billingPrep",
+    label: "Billing Prep",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter([
+      "MISSING_POD",
+      "MISSING_BOL",
+      "MISSING_RATECON",
+      "PENDING_APPROVALS",
+      "MISSING_BILL_TO",
+      "BILLING_PROFILE_INCOMPLETE",
+      "LOAD_NOT_DELIVERED",
+    ]),
+  },
+  {
+    id: "complianceIssues",
+    label: "Compliance Issues",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter(["COMPLIANCE_EXPIRED", "COMPLIANCE_EXPIRING"]),
+  },
+  {
+    id: "openExceptions",
+    label: "Open Exceptions",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter(["OPEN_EXCEPTION"]),
+  },
+  {
+    id: "anyIssues",
+    label: "Any Issues",
+    queueView: "active",
+    gridFilters: { risk: { includeValues: ["hasRisk"], excludeValues: [] } },
+  },
+  {
+    id: "missingAppointment",
+    label: "Missing Appointment",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter(["MISSING_APPOINTMENT"]),
+  },
+  {
+    id: "pendingApprovals",
+    label: "Pending Approvals",
+    queueView: "active",
+    gridFilters: buildIssueTypeFilter(["PENDING_APPROVALS"]),
+  },
+];
+
+const workflowQueuePresetMap = new Map(WORKFLOW_QUEUE_PRESETS.map((preset) => [preset.id, preset]));
+
+function formatExceptionAge(createdAt: string) {
+  const created = new Date(createdAt);
+  if (Number.isNaN(created.getTime())) return "Age unknown";
+  const diffMinutes = Math.max(0, Math.round((Date.now() - created.getTime()) / 60000));
+  if (diffMinutes < 60) return `${diffMinutes}m open`;
+  if (diffMinutes < 24 * 60) return `${Math.round(diffMinutes / 60)}h open`;
+  return `${Math.round(diffMinutes / (24 * 60))}d open`;
+}
 
 function countActiveDispatchFilters(filters: Filters) {
   let count = 0;
@@ -140,7 +382,70 @@ function countActiveDispatchFilters(filters: Filters) {
   return count;
 }
 
-function DispatchPageContent() {
+function issuePresetToGridFilters(issueType: string): DispatchGridFilterState {
+  if (issueTypeSet.has(issueType)) {
+    return buildIssueTypeFilter([issueType]);
+  }
+  switch (issueType) {
+    case "OPEN_EXCEPTION":
+      return { risk: { includeValues: ["hasOpenException"], excludeValues: [] } };
+    default:
+      return { risk: { includeValues: ["hasRisk"], excludeValues: [] } };
+  }
+}
+
+function normalizeViewColumns(
+  columns?: Partial<Record<DispatchGridColumnKey, boolean>>
+): Partial<Record<DispatchGridColumnKey, boolean>> {
+  const next: Partial<Record<DispatchGridColumnKey, boolean>> = { ...DEFAULT_COLUMNS, ...(columns ?? {}) };
+  for (const required of DISPATCH_REQUIRED_COLUMNS) {
+    next[required] = true;
+  }
+  return next;
+}
+
+function sanitizeView(view: DispatchViewConfig): DispatchViewConfig {
+  return {
+    ...view,
+    columns: normalizeViewColumns(view.columns),
+    panels: {
+      inspector: view.panels?.inspector ?? DEFAULT_PANELS.inspector,
+      tripInspector: view.panels?.tripInspector ?? DEFAULT_PANELS.tripInspector,
+      driverLanes: view.panels?.driverLanes ?? DEFAULT_PANELS.driverLanes,
+      exceptions: view.panels?.exceptions ?? DEFAULT_PANELS.exceptions,
+      exceptionsDock: view.panels?.exceptionsDock === "right" ? "right" : "left",
+    },
+    density: view.density === "comfortable" ? "comfortable" : "compact",
+    grid: {
+      filters: view.grid?.filters ?? DEFAULT_GRID_STATE.filters,
+      sortRules: Array.isArray(view.grid?.sortRules) && view.grid!.sortRules.length ? view.grid!.sortRules : DEFAULT_GRID_STATE.sortRules,
+    },
+  };
+}
+
+function hydrateDispatchViewFromApi(view: any): DispatchViewConfig {
+  return sanitizeView({
+    id: view.id,
+    name: view.name,
+    scope: view.scope ?? "PERSONAL",
+    role: view.role ?? null,
+    isRoleDefault: Boolean(view.isRoleDefault),
+    userId: view.userId ?? null,
+    filters: view.config?.filters ?? view.filters ?? defaultFilters,
+    density: view.config?.density ?? view.density ?? "compact",
+    columns: view.config?.columns ?? view.columns ?? DEFAULT_COLUMNS,
+    panels: view.config?.panels ?? view.panels ?? DEFAULT_PANELS,
+    grid: view.config?.grid ?? view.grid ?? DEFAULT_GRID_STATE,
+  });
+}
+
+function DispatchPageContent({
+  workspace,
+  onWorkspaceChange,
+}: {
+  workspace: DispatchWorkspace;
+  onWorkspaceChange: (next: DispatchWorkspace) => void;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -155,13 +460,34 @@ function DispatchPageContent() {
   );
   const [teams, setTeams] = useState<Array<{ id: string; name: string; active?: boolean }>>([]);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
-  const [browseLens, setBrowseLens] = useState<"board" | "list">("board");
+  const [gridDensity, setGridDensity] = useState<DispatchGridDensity>("compact");
+  const [columnVisibility, setColumnVisibility] =
+    useState<Partial<Record<DispatchGridColumnKey, boolean>>>(normalizeViewColumns(DEFAULT_COLUMNS));
+  const [gridFilters, setGridFilters] = useState<DispatchGridFilterState>(DEFAULT_GRID_STATE.filters);
+  const [gridSortRules, setGridSortRules] = useState<DispatchGridSortRule[]>(DEFAULT_GRID_STATE.sortRules);
+  const [panelLayout, setPanelLayout] = useState<DispatchPanels>(DEFAULT_PANELS);
+  const [personalViews, setPersonalViews] = useState<DispatchViewConfig[]>([]);
+  const [templateViews, setTemplateViews] = useState<DispatchViewConfig[]>([]);
+  const [canManageTemplates, setCanManageTemplates] = useState(false);
+  const [activeViewId, setActiveViewId] = useState<string>(SYSTEM_VIEW.id);
   const [showFilters, setShowFilters] = useState(false);
+  const [activeWorkflowQueueId, setActiveWorkflowQueueId] = useState<WorkflowQueuePresetId | "">("");
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
+  const [bulkStatus, setBulkStatus] = useState<BulkStatus>("ASSIGNED");
+  const [bulkMovementMode, setBulkMovementMode] = useState<"FTL" | "LTL" | "POOL_DISTRIBUTION">("FTL");
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkNote, setBulkNote] = useState<string | null>(null);
+  const [cellSavingKey, setCellSavingKey] = useState<string | null>(null);
+  const [laneAssigningKey, setLaneAssigningKey] = useState<string | null>(null);
   const [selectedLoadId, setSelectedLoadId] = useState<string | null>(null);
   const [selectedLoad, setSelectedLoad] = useState<any | null>(null);
+  const [inspectorFocusSection, setInspectorFocusSection] = useState<DispatchInspectorFocusSection | null>(null);
+  const [inspectorFocusNonce, setInspectorFocusNonce] = useState(0);
+  const [docUploadTarget, setDocUploadTarget] = useState<{ loadId: string; loadNumber?: string | null } | null>(null);
+  const [dispatchActionNote, setDispatchActionNote] = useState<string | null>(null);
   const [dispatchSettings, setDispatchSettings] = useState<any | null>(null);
   const [availability, setAvailability] = useState<AvailabilityData | null>(null);
   const [showUnavailable, setShowUnavailable] = useState(false);
@@ -180,10 +506,16 @@ function DispatchPageContent() {
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
+  const [dispatchExceptions, setDispatchExceptions] = useState<DispatchExceptionItem[]>([]);
+  const [exceptionsSummary, setExceptionsSummary] = useState<{ total: number; open: number; acknowledged: number; blockers: number } | null>(null);
+  const [tripInspector, setTripInspector] = useState<any | null>(null);
+  const [tripInspectorError, setTripInspectorError] = useState<string | null>(null);
+  const [tripInspectorLoading, setTripInspectorLoading] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
   const [showStopActions, setShowStopActions] = useState(false);
   const [blocked, setBlocked] = useState<{ message?: string; ctaHref?: string } | null>(null);
   const pendingLoadIdRef = useRef<string | null>(null);
+  const appliedIssuePresetRef = useRef<string | null>(null);
 
   const loadIdParam = searchParams.get("loadId");
   const queueView = useMemo<QueueView>(() => {
@@ -191,6 +523,7 @@ function DispatchPageContent() {
     if (value === "recent" || value === "history") return value;
     return "active";
   }, [searchParams]);
+  const issuePresetParam = searchParams.get("issuePreset");
 
   const updateLoadIdParam = useCallback(
     (loadId: string | null) => {
@@ -225,7 +558,10 @@ function DispatchPageContent() {
   const selectedLoadInView = Boolean(selectedLoadId && loads.some((load) => load.id === selectedLoadId));
 
   const selectLoad = useCallback(
-    (loadId: string) => {
+    (loadId: string, options?: { preserveFocus?: boolean }) => {
+      if (!options?.preserveFocus) {
+        setInspectorFocusSection(null);
+      }
       setSelectedLoadId(loadId);
       updateLoadIdParam(loadId);
     },
@@ -235,10 +571,29 @@ function DispatchPageContent() {
   const clearSelectedLoad = useCallback(() => {
     setSelectedLoadId(null);
     setSelectedLoad(null);
+    setInspectorFocusSection(null);
     setLegDrawerOpen(false);
     setLegAddedNote(false);
     updateLoadIdParam(null);
   }, [updateLoadIdParam]);
+
+  const openInspectorForLoad = useCallback(
+    (loadId: string, focusSection?: DispatchInspectorFocusSection) => {
+      setPanelLayout((prev) => ({ ...prev, inspector: true }));
+      setInspectorFocusSection(focusSection ?? null);
+      setInspectorFocusNonce((value) => value + 1);
+      selectLoad(loadId, { preserveFocus: true });
+    },
+    [selectLoad]
+  );
+
+  const openUploadPodForLoad = useCallback(
+    (loadId: string) => {
+      const row = loads.find((item) => item.id === loadId);
+      setDocUploadTarget({ loadId, loadNumber: row?.loadNumber ?? null });
+    },
+    [loads]
+  );
 
 
   const handleLegCreated = useCallback(() => {
@@ -247,17 +602,28 @@ function DispatchPageContent() {
     window.setTimeout(() => setLegAddedNote(false), 2000);
   }, []);
 
-  const hasDispatchRole = Boolean(
-    user && (user.role === "ADMIN" || user.role === "DISPATCHER" || user.role === "HEAD_DISPATCHER")
-  );
-  const canDispatch = hasDispatchRole;
+  const capabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
+  const hasDispatchRole = capabilities.canDispatchExecution;
+  const canDispatch = capabilities.canAccessDispatch;
   const isQueueReadOnly = queueView !== "active";
-  const canStartTracking = canDispatch;
+  const canStartTracking = capabilities.canStartTracking && canDispatch;
   const canSeeAllTeams = Boolean(
     user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER" || user?.canSeeAllTeams
   );
   const canAssignTeamsOps = Boolean(user?.role === "ADMIN" || user?.role === "HEAD_DISPATCHER");
   const canOverride = user?.role === "ADMIN";
+  const userLastViewStorageKey = useMemo(
+    () => (user?.id ? `dispatch:last-view:${user.id}` : null),
+    [user?.id]
+  );
+  const allViews = useMemo(
+    () => [...templateViews, ...personalViews],
+    [templateViews, personalViews]
+  );
+  const activeView = useMemo(() => {
+    if (activeViewId === SYSTEM_VIEW.id) return SYSTEM_VIEW;
+    return allViews.find((view) => view.id === activeViewId) ?? SYSTEM_VIEW;
+  }, [activeViewId, allViews]);
   const dispatchStage =
     selectedLoad?.status && ["DRAFT", "PLANNED", "ASSIGNED"].includes(selectedLoad.status);
   const rateConRequired = Boolean(dispatchSettings?.requireRateConBeforeDispatch && selectedLoad?.loadType === "BROKERED");
@@ -276,14 +642,56 @@ function DispatchPageContent() {
     apiFetch<{ user: any }>("/auth/me")
       .then((data) => {
         setUser(data.user);
-        const allowed =
-          data.user?.role === "ADMIN" ||
-          data.user?.role === "DISPATCHER" ||
-          data.user?.role === "HEAD_DISPATCHER";
-        setHasAccess(Boolean(allowed));
+        setHasAccess(getRoleCapabilities(data.user?.role).canAccessDispatch);
       })
       .catch(() => setHasAccess(false));
   }, []);
+
+  useEffect(() => {
+    if (!canDispatch || !user?.id) return;
+    let active = true;
+    apiFetch<{
+      personalViews: any[];
+      templates: any[];
+      roleDefaultTemplateId?: string | null;
+      canManageTemplates?: boolean;
+    }>("/dispatch/views")
+      .then((payload) => {
+        if (!active) return;
+        const mappedPersonal = (payload.personalViews ?? []).map(hydrateDispatchViewFromApi);
+        const mappedTemplates = (payload.templates ?? []).map(hydrateDispatchViewFromApi);
+        setPersonalViews(mappedPersonal);
+        setTemplateViews(mappedTemplates);
+        setCanManageTemplates(Boolean(payload.canManageTemplates));
+
+        const lastViewId = userLastViewStorageKey ? window.localStorage.getItem(userLastViewStorageKey) : null;
+        const all = [...mappedTemplates, ...mappedPersonal];
+        const byId = new Map(all.map((entry) => [entry.id, entry]));
+        const nextView =
+          (lastViewId && byId.get(lastViewId)) ||
+          ((payload.roleDefaultTemplateId && byId.get(payload.roleDefaultTemplateId)) ?? null);
+        if (!nextView) return;
+        setActiveViewId(nextView.id);
+        setFilters(nextView.filters);
+        setGridDensity(nextView.density);
+        setColumnVisibility(normalizeViewColumns(nextView.columns));
+        setPanelLayout(nextView.panels);
+      })
+      .catch(() => {
+        if (!active) return;
+        setPersonalViews([]);
+        setTemplateViews([]);
+        setCanManageTemplates(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [canDispatch, user?.id, userLastViewStorageKey]);
+
+  useEffect(() => {
+    if (!userLastViewStorageKey) return;
+    window.localStorage.setItem(userLastViewStorageKey, activeViewId);
+  }, [activeViewId, userLastViewStorageKey]);
 
   useEffect(() => {
     if (!user || user.role !== "ADMIN") return;
@@ -332,6 +740,19 @@ function DispatchPageContent() {
     const query = params.toString();
     router.replace(query ? `/dispatch?${query}` : "/dispatch");
   }, [filters.operatingEntityId, filters.teamId, hasAccess, router, canSeeAllTeams]);
+
+  useEffect(() => {
+    if (!issuePresetParam) {
+      appliedIssuePresetRef.current = null;
+      return;
+    }
+    setActiveWorkflowQueueId("");
+    if (appliedIssuePresetRef.current === issuePresetParam) return;
+    appliedIssuePresetRef.current = issuePresetParam;
+    setGridFilters(issuePresetToGridFilters(issuePresetParam));
+    setPageIndex(0);
+    setShowFilters(true);
+  }, [issuePresetParam]);
 
   useEffect(() => {
     if (!loadIdParam) {
@@ -430,6 +851,42 @@ function DispatchPageContent() {
     loadDispatchLoads(filters, pageIndex);
   }, [canDispatch, pageIndex, filters, loadDispatchLoads]);
 
+  const loadDispatchExceptions = useCallback(async () => {
+    if (!canDispatch) return;
+    try {
+      const data = await apiFetch<{
+        exceptions: DispatchExceptionItem[];
+        summary: { total: number; open: number; acknowledged: number; blockers: number };
+      }>("/dispatch/exceptions?status=ALL");
+      const unresolved = (data.exceptions ?? []).filter((item) => item.status !== "RESOLVED");
+      setDispatchExceptions(unresolved);
+      setExceptionsSummary(data.summary ?? null);
+    } catch {
+      setDispatchExceptions([]);
+      setExceptionsSummary(null);
+    }
+  }, [canDispatch]);
+
+  useEffect(() => {
+    if (!canDispatch) return;
+    loadDispatchExceptions();
+  }, [canDispatch, filters.teamId, loadDispatchExceptions]);
+
+  useEffect(() => {
+    setSelectedRows((prev) => {
+      if (prev.size === 0) return prev;
+      const availableIds = new Set(loads.map((load) => load.id));
+      const next = new Set(Array.from(prev).filter((id) => availableIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [loads]);
+
+  useEffect(() => {
+    if (!bulkNote) return;
+    const timer = window.setTimeout(() => setBulkNote(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [bulkNote]);
+
   useEffect(() => {
     if (selectedLoadId) return;
     setSelectedLoad(null);
@@ -452,6 +909,12 @@ function DispatchPageContent() {
     }
     setWorkbenchTeamId("");
   }, [selectedLoadId, filters.teamId, canSeeAllTeams]);
+
+  useEffect(() => {
+    if (!dispatchActionNote) return;
+    const timer = window.setTimeout(() => setDispatchActionNote(null), 1800);
+    return () => window.clearTimeout(timer);
+  }, [dispatchActionNote]);
 
   const refreshSelectedLoad = useCallback(async (loadId: string) => {
     if (!canDispatch) return;
@@ -588,6 +1051,12 @@ function DispatchPageContent() {
         return {
           ...item,
           status: updated.status ?? item.status,
+          movementMode: updated.movementMode ?? item.movementMode,
+          customerName: updated.customerName ?? item.customerName,
+          miles: updated.miles ?? item.miles,
+          paidMiles: updated.paidMiles ?? item.paidMiles,
+          rate: updated.rate ?? item.rate,
+          updatedAt: updated.createdAt ? new Date(updated.createdAt).toISOString() : item.updatedAt,
           trip: updatedTrip
             ? {
                 id: updatedTrip.id,
@@ -602,11 +1071,69 @@ function DispatchPageContent() {
           },
           operatingEntity: updated.operatingEntity ?? item.operatingEntity,
           nextStop: updated.stops?.find((stop: any) => !stop.arrivedAt || !stop.departedAt) ?? item.nextStop,
+          docs: updated.docs
+            ? {
+                hasPod: updated.docs.some((doc: any) => doc.type === "POD" && doc.status !== "REJECTED"),
+                hasBol: updated.docs.some((doc: any) => doc.type === "BOL" && doc.status !== "REJECTED"),
+                hasRateCon: updated.docs.some(
+                  (doc: any) =>
+                    (doc.type === "RATECON" || doc.type === "RATE_CONFIRMATION") && doc.status !== "REJECTED"
+                ),
+              }
+            : item.docs,
+          issuesTop: updated.issuesTop ?? item.issuesTop,
+          issuesText: updated.issuesText ?? item.issuesText,
+          issues: updated.issues ?? item.issues,
+          issueCounts: updated.issueCounts ?? item.issueCounts,
           riskFlags,
         };
       })
     );
   };
+
+  const applyUploadedDocToGrid = useCallback(
+    (params: { loadId: string; docType: "POD" | "BOL" | "RATECON" | "RATE_CONFIRMATION" }) => {
+      setLoads((prev) =>
+        prev.map((item) => {
+          if (item.id !== params.loadId) return item;
+          const nextDocs = {
+            hasPod: item.docs?.hasPod ?? false,
+            hasBol: item.docs?.hasBol ?? false,
+            hasRateCon: item.docs?.hasRateCon ?? false,
+          };
+          if (params.docType === "POD") nextDocs.hasPod = true;
+          if (params.docType === "BOL") nextDocs.hasBol = true;
+          if (params.docType === "RATECON" || params.docType === "RATE_CONFIRMATION") nextDocs.hasRateCon = true;
+          const removeIssueTypes = new Set<string>();
+          if (params.docType === "POD") removeIssueTypes.add("MISSING_POD");
+          if (params.docType === "BOL") removeIssueTypes.add("MISSING_BOL");
+          if (params.docType === "RATECON" || params.docType === "RATE_CONFIRMATION") removeIssueTypes.add("MISSING_RATECON");
+          const nextIssues = (item.issues ?? []).filter((issue) => !removeIssueTypes.has(issue.type));
+          const nextIssuesTop = (item.issuesTop ?? []).filter((issue) => !removeIssueTypes.has(issue.type));
+          const nextIssueCounts = { ...(item.issueCounts ?? {}) };
+          for (const issueType of removeIssueTypes) {
+            nextIssueCounts[issueType] = 0;
+          }
+          const nextIssuesText =
+            nextIssuesTop.length === 0
+              ? "No issues"
+              : nextIssues.length > 2
+                ? `${nextIssuesTop.map((issue) => issue.label).join(" · ")} · +${nextIssues.length - 2} more`
+                : nextIssuesTop.map((issue) => issue.label).join(" · ");
+          return {
+            ...item,
+            docs: nextDocs,
+            issues: nextIssues,
+            issuesTop: nextIssuesTop,
+            issuesText: nextIssuesText,
+            issueCounts: nextIssueCounts,
+          };
+        })
+      );
+      setDispatchActionNote("Saved");
+    },
+    []
+  );
 
   const buildConflictMessages = (driverId?: string, truckId?: string, trailerId?: string) => {
     const conflicts: string[] = [];
@@ -826,6 +1353,319 @@ function DispatchPageContent() {
     }
   };
 
+  const acknowledgeException = useCallback(
+    async (exceptionId: string) => {
+      await apiFetch(`/dispatch/exceptions/${exceptionId}/acknowledge`, { method: "POST" });
+      await loadDispatchExceptions();
+    },
+    [loadDispatchExceptions]
+  );
+
+  const resolveException = useCallback(
+    async (exceptionId: string) => {
+      const resolutionNote = window.prompt("Resolution note");
+      if (!resolutionNote?.trim()) return;
+      await apiFetch(`/dispatch/exceptions/${exceptionId}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolutionNote: resolutionNote.trim() }),
+      });
+      await loadDispatchExceptions();
+    },
+    [loadDispatchExceptions]
+  );
+
+  const reopenException = useCallback(
+    async (exceptionId: string) => {
+      await apiFetch(`/dispatch/exceptions/${exceptionId}/reopen`, { method: "POST" });
+      await loadDispatchExceptions();
+    },
+    [loadDispatchExceptions]
+  );
+
+  const applyView = useCallback((view: DispatchViewConfig) => {
+    const sanitized = sanitizeView(view);
+    setActiveViewId(sanitized.id);
+    setActiveWorkflowQueueId("");
+    setFilters(sanitized.filters);
+    setGridDensity(sanitized.density);
+    setColumnVisibility(normalizeViewColumns(sanitized.columns));
+    setGridFilters(sanitized.grid.filters ?? DEFAULT_GRID_STATE.filters);
+    setGridSortRules(sanitized.grid.sortRules ?? DEFAULT_GRID_STATE.sortRules);
+    setPanelLayout(sanitized.panels);
+    setPageIndex(0);
+  }, []);
+
+  const applyWorkflowQueuePreset = useCallback(
+    (presetId: WorkflowQueuePresetId) => {
+      const preset = workflowQueuePresetMap.get(presetId);
+      if (!preset) return;
+      setActiveViewId(SYSTEM_VIEW.id);
+      setActiveWorkflowQueueId(preset.id);
+      setGridFilters(structuredClone(preset.gridFilters));
+      setPageIndex(0);
+      setShowFilters(true);
+      if (queueView !== preset.queueView) {
+        updateQueueViewParam(preset.queueView);
+      }
+    },
+    [queueView, updateQueueViewParam]
+  );
+
+  const saveCurrentAsView = useCallback(async (scope: "PERSONAL" | "ADMIN_TEMPLATE" = "PERSONAL") => {
+    const name = window.prompt("Save view as");
+    if (!name?.trim()) return;
+    const response = await apiFetch<{ view: any }>("/dispatch/views", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: name.trim(),
+        scope,
+        role: scope === "ADMIN_TEMPLATE" ? user?.role ?? null : null,
+        isRoleDefault: false,
+        config: {
+          filters,
+          density: gridDensity,
+          columns: normalizeViewColumns(columnVisibility),
+          panels: panelLayout,
+          grid: {
+            filters: gridFilters,
+            sortRules: gridSortRules,
+          },
+        },
+      }),
+    });
+    const nextView = hydrateDispatchViewFromApi(response.view);
+    if (nextView.scope === "ADMIN_TEMPLATE") {
+      setTemplateViews((prev) => [nextView, ...prev.filter((view) => view.id !== nextView.id)]);
+    } else {
+      setPersonalViews((prev) => [nextView, ...prev.filter((view) => view.id !== nextView.id)]);
+    }
+    applyView(nextView);
+  }, [applyView, columnVisibility, filters, gridDensity, gridFilters, gridSortRules, panelLayout, user?.role]);
+
+  const updateCurrentView = useCallback(async () => {
+    if (activeViewId === SYSTEM_VIEW.id) {
+      await saveCurrentAsView();
+      return;
+    }
+    const current = allViews.find((view) => view.id === activeViewId);
+    if (!current) {
+      applyView(SYSTEM_VIEW);
+      return;
+    }
+    if (current.scope === "ADMIN_TEMPLATE" && !canManageTemplates) {
+      await saveCurrentAsView();
+      return;
+    }
+    const response = await apiFetch<{ view: any }>(`/dispatch/views/${activeViewId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        config: {
+          filters,
+          density: gridDensity,
+          columns: normalizeViewColumns(columnVisibility),
+          panels: panelLayout,
+          grid: {
+            filters: gridFilters,
+            sortRules: gridSortRules,
+          },
+        },
+      }),
+    });
+    const updatedView = hydrateDispatchViewFromApi(response.view);
+    if (updatedView.scope === "ADMIN_TEMPLATE") {
+      setTemplateViews((prev) => prev.map((view) => (view.id === updatedView.id ? updatedView : view)));
+    } else {
+      setPersonalViews((prev) => prev.map((view) => (view.id === updatedView.id ? updatedView : view)));
+    }
+    applyView(updatedView);
+  }, [
+    activeViewId,
+    allViews,
+    applyView,
+    canManageTemplates,
+    columnVisibility,
+    filters,
+    gridDensity,
+    gridFilters,
+    gridSortRules,
+    panelLayout,
+    saveCurrentAsView,
+  ]);
+
+  const deleteCurrentView = useCallback(async () => {
+    if (activeViewId === SYSTEM_VIEW.id) return;
+    const current = allViews.find((view) => view.id === activeViewId);
+    if (!current) {
+      applyView(SYSTEM_VIEW);
+      return;
+    }
+    if (current.scope === "ADMIN_TEMPLATE" && !canManageTemplates) return;
+    await apiFetch(`/dispatch/views/${activeViewId}`, { method: "DELETE" });
+    if (current.scope === "ADMIN_TEMPLATE") {
+      setTemplateViews((prev) => prev.filter((view) => view.id !== activeViewId));
+    } else {
+      setPersonalViews((prev) => prev.filter((view) => view.id !== activeViewId));
+    }
+    applyView(SYSTEM_VIEW);
+  }, [activeViewId, allViews, applyView, canManageTemplates]);
+
+  const handleInlineEdit = useCallback(
+    async (params: { loadId: string; field: "status" | "customerName" | "miles" | "rate"; value: string | number }) => {
+      const payload: Record<string, string | number> = {};
+      payload[params.field] = params.value;
+      setCellSavingKey(`${params.loadId}:${params.field === "customerName" ? "customer" : params.field}`);
+      try {
+        const response = await apiFetch<{ load: any }>(`/loads/${params.loadId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        setLoads((prev) =>
+          prev.map((item) => {
+            if (item.id !== params.loadId) return item;
+            return {
+              ...item,
+              customerName: response.load.customerName ?? item.customerName,
+              status: response.load.status ?? item.status,
+              miles: response.load.miles ?? item.miles,
+              paidMiles: response.load.paidMiles ?? item.paidMiles,
+              rate: response.load.rate ?? item.rate,
+              movementMode: response.load.movementMode ?? item.movementMode,
+            };
+          })
+        );
+        if (selectedLoadId === params.loadId) {
+          await refreshSelectedLoad(params.loadId);
+        }
+      } finally {
+        setCellSavingKey(null);
+      }
+    },
+    [refreshSelectedLoad, selectedLoadId]
+  );
+
+  const toggleRowSelection = useCallback((loadId: string, selected: boolean) => {
+    setSelectedRows((prev) => {
+      const next = new Set(prev);
+      if (selected) next.add(loadId);
+      else next.delete(loadId);
+      return next;
+    });
+  }, []);
+
+  const toggleAllRows = useCallback((selected: boolean, rowIds: string[]) => {
+    setSelectedRows(selected ? new Set(rowIds) : new Set());
+  }, []);
+
+  const handleDocUploaded = useCallback(
+    async (params: { loadId: string; docType: "POD" | "BOL" | "RATECON" | "RATE_CONFIRMATION" }) => {
+      applyUploadedDocToGrid(params);
+      if (selectedLoadId === params.loadId) {
+        const updated = await refreshSelectedLoad(params.loadId);
+        if (updated) {
+          patchLoadSummary(updated);
+        }
+      }
+    },
+    [applyUploadedDocToGrid, patchLoadSummary, refreshSelectedLoad, selectedLoadId]
+  );
+
+  const assignLoadFromLane = useCallback(
+    async (params: { loadId: string; driverId: string }) => {
+      if (isQueueReadOnly) return;
+      const row = loads.find((load) => load.id === params.loadId);
+      if (!row) return;
+      setLaneAssigningKey(`lane:${params.driverId}`);
+      try {
+        if (row.trip?.id) {
+          await apiFetch(`/trips/${row.trip.id}/assign`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              driverId: params.driverId,
+              truckId: row.assignment?.truck?.id ?? null,
+              trailerId: row.assignment?.trailer?.id ?? null,
+              status: "ASSIGNED",
+            }),
+          });
+        } else {
+          await apiFetch("/trips", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              loadNumbers: [row.loadNumber],
+              movementMode: row.movementMode ?? "FTL",
+              driverId: params.driverId,
+              status: "ASSIGNED",
+            }),
+          });
+        }
+        await loadDispatchLoads(filters, pageIndex);
+        if (selectedLoadId === row.id) {
+          await refreshSelectedLoad(row.id);
+        }
+      } finally {
+        setLaneAssigningKey(null);
+      }
+    },
+    [filters, isQueueReadOnly, loadDispatchLoads, loads, pageIndex, refreshSelectedLoad, selectedLoadId]
+  );
+
+  const runBulkStatusUpdate = useCallback(async () => {
+    const ids = Array.from(selectedRows);
+    if (!ids.length) return;
+    setBulkLoading(true);
+    try {
+      const results = await Promise.allSettled(
+        ids.map((loadId) =>
+          apiFetch(`/loads/${loadId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: bulkStatus }),
+          })
+        )
+      );
+      const failed = results.filter((result) => result.status === "rejected").length;
+      setBulkNote(
+        failed
+          ? `Updated ${ids.length - failed}/${ids.length} loads. ${failed} failed.`
+          : `Updated ${ids.length} loads to ${bulkStatus}.`
+      );
+      await loadDispatchLoads(filters, pageIndex);
+      setSelectedRows(new Set());
+    } finally {
+      setBulkLoading(false);
+    }
+  }, [bulkStatus, filters, loadDispatchLoads, pageIndex, selectedRows]);
+
+  const createTripFromSelection = useCallback(async () => {
+    const selected = loads.filter((load) => selectedRows.has(load.id));
+    if (!selected.length) return;
+    setBulkLoading(true);
+    try {
+      const payload = await apiFetch<{ trip: { id: string } }>("/trips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          loadNumbers: selected.map((load) => load.loadNumber),
+          movementMode: bulkMovementMode,
+          status: "PLANNED",
+        }),
+      });
+      setBulkNote(`Created trip with ${selected.length} loads.`);
+      setSelectedRows(new Set());
+      await loadDispatchLoads(filters, pageIndex);
+      if (payload.trip?.id) {
+        router.push(`/trips?tripId=${payload.trip.id}`);
+      }
+    } finally {
+      setBulkLoading(false);
+    }
+  }, [bulkMovementMode, filters, loadDispatchLoads, loads, pageIndex, router, selectedRows]);
+
   const availableDrivers = useMemo(() => availability?.availableDrivers ?? drivers, [availability, drivers]);
   const unavailableDrivers = useMemo(() => availability?.unavailableDrivers ?? [], [availability]);
   const availableTrucks = useMemo(() => availability?.availableTrucks ?? trucks, [availability, trucks]);
@@ -897,6 +1737,55 @@ function DispatchPageContent() {
     if (!selectedLoadId) return null;
     return sortedLoads.find((load) => load.id === selectedLoadId) ?? null;
   }, [sortedLoads, selectedLoadId]);
+
+  const gridRows = useMemo<DispatchGridRow[]>(
+    () =>
+      sortedLoads.map((load) => ({
+        ...load,
+      })),
+    [sortedLoads]
+  );
+  const selectedCount = selectedRows.size;
+  const loadById = useMemo(() => new Map(sortedLoads.map((load) => [load.id, load])), [sortedLoads]);
+  const exceptionRows = useMemo(
+    () =>
+      dispatchExceptions.map((item) => ({
+        ...item,
+        loadNumber: item.loadNumber ?? loadById.get(item.loadId)?.loadNumber ?? "Unknown load",
+      })),
+    [dispatchExceptions, loadById]
+  );
+
+  const selectedTripId =
+    selectedLoadSummary?.trip?.id ?? selectedLoad?.tripLoads?.[0]?.trip?.id ?? null;
+
+  useEffect(() => {
+    if (!panelLayout.tripInspector || !selectedTripId || !canDispatch) {
+      setTripInspector(null);
+      setTripInspectorError(null);
+      setTripInspectorLoading(false);
+      return;
+    }
+    let active = true;
+    setTripInspectorLoading(true);
+    apiFetch<{ trip: any }>(`/trips/${selectedTripId}`)
+      .then((data) => {
+        if (!active) return;
+        setTripInspector(data.trip ?? null);
+        setTripInspectorError(null);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setTripInspector(null);
+        setTripInspectorError((error as Error).message || "Unable to load trip inspector.");
+      })
+      .finally(() => {
+        if (active) setTripInspectorLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [canDispatch, panelLayout.tripInspector, selectedTripId]);
 
   const workbenchAssignment = {
     form: assignForm,
@@ -1035,6 +1924,8 @@ function DispatchPageContent() {
       legAddedNote={legAddedNote ? "✓ Added" : null}
       canStartTracking={canStartTracking}
       yardOsLaunch={yardOsLaunchHref ? { href: yardOsLaunchHref, onOpen: openYardOs } : undefined}
+      focusSection={inspectorFocusSection}
+      focusNonce={inspectorFocusNonce}
       teamAssignment={
         canAssignTeamsOps && teamsEnabled && !isQueueReadOnly
           ? {
@@ -1049,6 +1940,50 @@ function DispatchPageContent() {
       }
     />
   ) : undefined;
+  const tripInspectorPanel = panelLayout.tripInspector ? (
+    <Card>
+      <SectionHeader title="Trip Inspector" subtitle="Trip-level execution context" />
+      {tripInspectorLoading ? (
+        <div className="text-xs text-[color:var(--color-text-muted)]">Loading trip…</div>
+      ) : tripInspectorError ? (
+        <div className="text-xs text-[color:var(--color-warning)]">{tripInspectorError}</div>
+      ) : !tripInspector ? (
+        <div className="text-xs text-[color:var(--color-text-muted)]">Select a trip-linked load to inspect trip details.</div>
+      ) : (
+        <div className="space-y-2 text-xs">
+          <div className="font-semibold text-ink">{tripInspector.tripNumber}</div>
+          <div className="text-[color:var(--color-text-muted)]">
+            {tripInspector.movementMode} · {tripInspector.status}
+          </div>
+          <div className="text-[color:var(--color-text-muted)]">
+            Driver: {tripInspector.driver?.name ?? "Unassigned"} · Truck: {tripInspector.truck?.unit ?? "-"} · Trailer:{" "}
+            {tripInspector.trailer?.unit ?? "-"}
+          </div>
+          <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2">
+            <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Loads</div>
+            <div className="space-y-1">
+              {(tripInspector.loads ?? []).map((row: any) => (
+                <div key={row.id} className="flex items-center justify-between">
+                  <span>{row.load?.loadNumber ?? "Load"}</span>
+                  <span className="text-[color:var(--color-text-muted)]">{row.load?.status ?? "-"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  ) : null;
+  const showInspectorPanel = panelLayout.inspector && Boolean(selectedLoadId);
+  const showTripInspectorPanel = panelLayout.tripInspector;
+  const showExceptionsPanel = panelLayout.exceptions;
+  const showDriverLanesPanel = panelLayout.driverLanes;
+  const dispatchGridTemplateColumns = [
+    ...(showExceptionsPanel && panelLayout.exceptionsDock === "left" ? ["minmax(220px, 280px)"] : []),
+    "minmax(0, 1fr)",
+    ...(showInspectorPanel || showTripInspectorPanel ? ["minmax(360px, 440px)"] : []),
+    ...(showExceptionsPanel && panelLayout.exceptionsDock === "right" ? ["minmax(220px, 280px)"] : []),
+  ].join(" ");
 
   if (hasAccess === false) {
     return (
@@ -1091,10 +2026,18 @@ function DispatchPageContent() {
       <div className="sticky top-0 z-20 -mx-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-2 py-2 backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-ink">Live dispatch</div>
-            <div className="text-xs text-[color:var(--color-text-muted)]">Execution board</div>
+            <div className="text-sm font-semibold text-ink">Dispatch Spreadsheet</div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">Primary canvas · inspector + lanes are dockable panels</div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <SegmentedControl
+              value={workspace}
+              options={[
+                { label: "Trips", value: "trips" },
+                { label: "Loads", value: "loads" },
+              ]}
+              onChange={(value) => onWorkspaceChange(value as DispatchWorkspace)}
+            />
             <button
               type="button"
               aria-label={showFilters ? "Hide refine filters" : "Open refine filters"}
@@ -1119,12 +2062,21 @@ function DispatchPageContent() {
               ) : null}
             </button>
             <SegmentedControl
-              value={browseLens}
+              value={queueView}
               options={[
-                { label: "Board", value: "board" },
-                { label: "List", value: "list" },
+                { label: "Active", value: "active" },
+                { label: "Recent", value: "recent" },
+                { label: "History", value: "history" },
               ]}
-              onChange={(value) => setBrowseLens(value as "board" | "list")}
+              onChange={(value) => updateQueueViewParam(value as QueueView)}
+            />
+            <SegmentedControl
+              value={gridDensity}
+              options={[
+                { label: "Compact", value: "compact" },
+                { label: "Comfortable", value: "comfortable" },
+              ]}
+              onChange={(value) => setGridDensity(value as DispatchGridDensity)}
             />
             <Button variant="secondary" size="sm" onClick={() => loadDispatchLoads(filters, pageIndex)}>
               Refresh
@@ -1133,18 +2085,177 @@ function DispatchPageContent() {
         </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-        <SectionHeader title="Queue state" subtitle="Active, recent, or historical dispatch runs" />
-        <SegmentedControl
-          value={queueView}
-          options={[
-            { label: "Active", value: "active" },
-            { label: "Recent", value: "recent" },
-            { label: "History", value: "history" },
-          ]}
-          onChange={(value) => updateQueueViewParam(value as QueueView)}
-        />
+      <div className="mt-3 grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 lg:grid-cols-[minmax(220px,1fr)_auto_auto_auto_auto] lg:items-center">
+        <FormField label="View" htmlFor="dispatchViewSelect">
+          <Select
+            id="dispatchViewSelect"
+            value={activeViewId}
+            onChange={(event) => {
+              const nextId = event.target.value;
+              if (nextId === SYSTEM_VIEW.id) {
+                applyView(SYSTEM_VIEW);
+                return;
+              }
+              const view = allViews.find((entry) => entry.id === nextId);
+              if (view) applyView(view);
+            }}
+          >
+            <option value={SYSTEM_VIEW.id}>{SYSTEM_VIEW.name}</option>
+            {templateViews.map((view) => (
+              <option key={view.id} value={view.id}>
+                [Template] {view.name}
+              </option>
+            ))}
+            {personalViews.map((view) => (
+              <option key={view.id} value={view.id}>
+                [Mine] {view.name}
+              </option>
+            ))}
+          </Select>
+          <div className="mt-2 flex items-center gap-2">
+            <Select
+              aria-label="Workflow queue preset"
+              value={activeWorkflowQueueId}
+              onChange={(event) => {
+                const nextValue = event.target.value as WorkflowQueuePresetId | "";
+                if (!nextValue) {
+                  setActiveWorkflowQueueId("");
+                  return;
+                }
+                applyWorkflowQueuePreset(nextValue);
+              }}
+            >
+              <option value="">Workflow queue preset</option>
+              {WORKFLOW_QUEUE_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
+            </Select>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => void saveCurrentAsView("PERSONAL")}
+              disabled={!activeWorkflowQueueId}
+            >
+              Save
+            </Button>
+          </div>
+        </FormField>
+        <div className="flex gap-2">
+          <Button size="sm" variant="secondary" onClick={() => void saveCurrentAsView("PERSONAL")}>
+            Save as new
+          </Button>
+          {canManageTemplates ? (
+            <Button size="sm" variant="ghost" onClick={() => void saveCurrentAsView("ADMIN_TEMPLATE")}>
+              Save template
+            </Button>
+          ) : null}
+          <Button size="sm" variant="secondary" onClick={() => void updateCurrentView()}>
+            Save current
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => void deleteCurrentView()}
+            disabled={
+              activeViewId === SYSTEM_VIEW.id ||
+              (activeView.scope === "ADMIN_TEMPLATE" && !canManageTemplates)
+            }
+          >
+            Delete
+          </Button>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant={panelLayout.inspector ? "secondary" : "ghost"}
+            onClick={() => setPanelLayout((prev) => ({ ...prev, inspector: !prev.inspector }))}
+          >
+            Inspector
+          </Button>
+          <Button
+            size="sm"
+            variant={panelLayout.tripInspector ? "secondary" : "ghost"}
+            onClick={() => setPanelLayout((prev) => ({ ...prev, tripInspector: !prev.tripInspector }))}
+          >
+            Trip inspector
+          </Button>
+          <Button
+            size="sm"
+            variant={panelLayout.driverLanes ? "secondary" : "ghost"}
+            onClick={() => setPanelLayout((prev) => ({ ...prev, driverLanes: !prev.driverLanes }))}
+          >
+            Driver lanes
+          </Button>
+          <Button
+            size="sm"
+            variant={panelLayout.exceptions ? "secondary" : "ghost"}
+            onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: !prev.exceptions }))}
+          >
+            Exceptions
+          </Button>
+        </div>
+        <FormField label="Exceptions dock" htmlFor="exceptionsDock">
+          <Select
+            id="exceptionsDock"
+            value={panelLayout.exceptionsDock}
+            onChange={(event) =>
+              setPanelLayout((prev) => ({
+                ...prev,
+                exceptionsDock: event.target.value === "right" ? "right" : "left",
+              }))
+            }
+          >
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </Select>
+        </FormField>
+        <div className="text-xs text-[color:var(--color-text-muted)]">
+          Active view: {activeView.name}
+        </div>
       </div>
+
+      {selectedCount > 0 ? (
+        <div className="mt-3 flex flex-wrap items-end gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
+          <div className="text-sm font-medium text-ink">{selectedCount} selected</div>
+          <FormField label="Bulk status" htmlFor="bulkStatus">
+            <Select id="bulkStatus" value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value as BulkStatus)}>
+              <option value="PLANNED">PLANNED</option>
+              <option value="ASSIGNED">ASSIGNED</option>
+              <option value="IN_TRANSIT">IN_TRANSIT</option>
+              <option value="DELIVERED">DELIVERED</option>
+              <option value="POD_RECEIVED">POD_RECEIVED</option>
+              <option value="READY_TO_INVOICE">READY_TO_INVOICE</option>
+              <option value="INVOICED">INVOICED</option>
+              <option value="PAID">PAID</option>
+              <option value="CANCELLED">CANCELLED</option>
+            </Select>
+          </FormField>
+          <Button size="sm" onClick={() => void runBulkStatusUpdate()} disabled={bulkLoading || isQueueReadOnly}>
+            {bulkLoading ? "Applying..." : "Apply status"}
+          </Button>
+          <FormField label="Trip mode" htmlFor="bulkTripMode">
+            <Select
+              id="bulkTripMode"
+              value={bulkMovementMode}
+              onChange={(event) => setBulkMovementMode(event.target.value as "FTL" | "LTL" | "POOL_DISTRIBUTION")}
+            >
+              <option value="FTL">FTL</option>
+              <option value="LTL">LTL</option>
+              <option value="POOL_DISTRIBUTION">POOL_DISTRIBUTION</option>
+            </Select>
+          </FormField>
+          <Button size="sm" variant="secondary" onClick={() => void createTripFromSelection()} disabled={bulkLoading}>
+            {bulkLoading ? "Creating..." : "Create trip from selected"}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelectedRows(new Set())}>
+            Clear selection
+          </Button>
+          {bulkNote ? <div className="text-xs text-[color:var(--color-text-muted)]">{bulkNote}</div> : null}
+        </div>
+      ) : null}
 
       {showFilters ? (
         <div className="mt-3">
@@ -1269,6 +2380,29 @@ function DispatchPageContent() {
                 ) : null}
               </div>
             </details>
+            <details className="mt-3">
+              <summary className="cursor-pointer text-xs font-medium text-[color:var(--color-text-muted)]">Columns</summary>
+              <div className="mt-2 grid gap-2 md:grid-cols-3">
+                {DISPATCH_OPTIONAL_COLUMNS.map((column) => (
+                  <label key={column} className="flex items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
+                    <input
+                      type="checkbox"
+                      checked={columnVisibility[column] !== false}
+                      onChange={(event) =>
+                        setColumnVisibility((prev) => ({
+                          ...prev,
+                          [column]: event.target.checked,
+                        }))
+                      }
+                    />
+                    {column}
+                  </label>
+                ))}
+              </div>
+              <div className="mt-2 text-[11px] text-[color:var(--color-text-muted)]">
+                Required operational columns stay visible by system rule.
+              </div>
+            </details>
             <div className="mt-3 flex flex-wrap gap-2">
               <Button
                 size="sm"
@@ -1300,32 +2434,161 @@ function DispatchPageContent() {
           {dispatchError}
         </div>
       ) : null}
-      <div className="mt-4 border-t border-[color:var(--color-divider)] pt-4">
-        <SectionHeader title="Browse" subtitle="Board or list view of trip-linked loads" />
-      </div>
+      {dispatchActionNote ? <div className="mt-2 text-xs text-[color:var(--color-success)]">{dispatchActionNote}</div> : null}
+      <div className="mt-4" style={{ display: "grid", gap: "12px", gridTemplateColumns: dispatchGridTemplateColumns }}>
+        {showExceptionsPanel && panelLayout.exceptionsDock === "left" ? (
+          <RefinePanel className="max-h-[62vh] overflow-auto">
+            <SectionHeader
+              title="Exceptions"
+              subtitle={
+                exceptionsSummary
+                  ? `${exceptionsSummary.open} open · ${exceptionsSummary.acknowledged} acknowledged · ${exceptionsSummary.blockers} blockers`
+                  : "Open issues visible in queue"
+              }
+            />
+            <div className="mt-2 space-y-2">
+              {exceptionRows.length ? (
+                exceptionRows.map((row) => (
+                  <div
+                    key={row.id}
+                    className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-2 text-xs"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => openInspectorForLoad(row.loadId, "exceptions")}
+                      className="w-full text-left hover:text-[color:var(--color-text)]"
+                    >
+                      <div className="font-semibold text-ink">{row.loadNumber}</div>
+                      <div className="text-[color:var(--color-text-muted)]">{row.title}</div>
+                      <div className="text-[11px] uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">
+                        {row.status} · {row.severity} · {row.owner}
+                      </div>
+                      <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatExceptionAge(row.createdAt)}</div>
+                    </button>
+                    <div className="mt-2 flex gap-2">
+                      {row.status !== "ACKNOWLEDGED" ? (
+                        <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
+                          Ack
+                        </Button>
+                      ) : null}
+                      <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
+                        Resolve
+                      </Button>
+                      {row.status === "ACKNOWLEDGED" ? (
+                        <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
+                          Reopen
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-xs text-[color:var(--color-text-muted)]">No open exceptions.</div>
+              )}
+            </div>
+          </RefinePanel>
+        ) : null}
 
-      <div
-        className={`grid gap-4 ${
-          selectedLoadId ? "lg:grid-cols-[minmax(420px,590px)_minmax(0,1fr)]" : ""
-        }`}
-      >
-        <div className={selectedLoadId ? "min-h-0 max-h-[calc(100dvh-24rem)] overflow-y-auto" : ""}>
-          <DispatchBrowse
-            loads={sortedLoads}
+        <div className="space-y-3">
+          <DispatchSpreadsheetGrid
+            rows={gridRows}
+            filters={gridFilters}
+            sortRules={gridSortRules}
             selectedLoadId={selectedLoadId}
+            selectedRowIds={selectedRows}
+            columnVisibility={normalizeViewColumns(columnVisibility)}
+            density={gridDensity}
+            loadingCellKey={cellSavingKey}
+            readOnly={isQueueReadOnly}
             onSelectLoad={selectLoad}
-            lens={browseLens}
-            queueView={queueView}
+            onToggleRowSelection={toggleRowSelection}
+            onToggleAllRows={toggleAllRows}
+            onFiltersChange={(nextFilters) => {
+              setActiveWorkflowQueueId("");
+              setGridFilters(nextFilters);
+            }}
+            onSortRulesChange={setGridSortRules}
+            onInlineEdit={handleInlineEdit}
+            onQuickAssign={(loadId) => openInspectorForLoad(loadId, "assignment")}
+            onQuickOpenInspector={openInspectorForLoad}
+            onQuickUploadPod={openUploadPodForLoad}
+            workflowMacros={WORKFLOW_QUEUE_PRESETS.map((preset) => ({ id: preset.id, label: preset.label }))}
+            onApplyWorkflowMacro={(macroId) => applyWorkflowQueuePreset(macroId as WorkflowQueuePresetId)}
           />
+          {showDriverLanesPanel ? (
+            <DriverLanesPanel
+              drivers={availableDrivers}
+              loads={gridRows}
+              assigningLaneKey={laneAssigningKey}
+              onAssignLoadToDriver={assignLoadFromLane}
+            />
+          ) : null}
         </div>
-        {selectedLoadId ? (
-          <div className="min-h-0 max-h-[calc(100dvh-24rem)] overflow-y-auto">
-            {workbenchRightPane ?? (
-              <Card>
-                <EmptyState title="Loading load..." description="Fetching assignment and stop details." />
-              </Card>
-            )}
+
+        {showInspectorPanel || showTripInspectorPanel ? (
+          <div className="min-h-0 max-h-[calc(100dvh-24rem)] space-y-3 overflow-y-auto">
+            {showInspectorPanel
+              ? (workbenchRightPane ?? (
+                  <Card>
+                    <EmptyState title="Loading load..." description="Fetching assignment and stop details." />
+                  </Card>
+                ))
+              : null}
+            {showTripInspectorPanel ? tripInspectorPanel : null}
           </div>
+        ) : null}
+
+        {showExceptionsPanel && panelLayout.exceptionsDock === "right" ? (
+          <RefinePanel className="max-h-[62vh] overflow-auto">
+            <SectionHeader
+              title="Exceptions"
+              subtitle={
+                exceptionsSummary
+                  ? `${exceptionsSummary.open} open · ${exceptionsSummary.acknowledged} acknowledged · ${exceptionsSummary.blockers} blockers`
+                  : "Open issues visible in queue"
+              }
+            />
+            <div className="mt-2 space-y-2">
+              {exceptionRows.length ? (
+                exceptionRows.map((row) => (
+                  <div
+                    key={row.id}
+                    className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-2 text-xs"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => openInspectorForLoad(row.loadId, "exceptions")}
+                      className="w-full text-left hover:text-[color:var(--color-text)]"
+                    >
+                      <div className="font-semibold text-ink">{row.loadNumber}</div>
+                      <div className="text-[color:var(--color-text-muted)]">{row.title}</div>
+                      <div className="text-[11px] uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">
+                        {row.status} · {row.severity} · {row.owner}
+                      </div>
+                      <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatExceptionAge(row.createdAt)}</div>
+                    </button>
+                    <div className="mt-2 flex gap-2">
+                      {row.status !== "ACKNOWLEDGED" ? (
+                        <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
+                          Ack
+                        </Button>
+                      ) : null}
+                      <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
+                        Resolve
+                      </Button>
+                      {row.status === "ACKNOWLEDGED" ? (
+                        <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
+                          Reopen
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-xs text-[color:var(--color-text-muted)]">No open exceptions.</div>
+              )}
+            </div>
+          </RefinePanel>
         ) : null}
       </div>
 
@@ -1348,14 +2611,112 @@ function DispatchPageContent() {
         </div>
       </div>
 
+      <DispatchDocUploadDrawer
+        open={Boolean(docUploadTarget)}
+        loadId={docUploadTarget?.loadId ?? null}
+        loadNumber={docUploadTarget?.loadNumber ?? null}
+        onClose={() => setDocUploadTarget(null)}
+        onUploaded={(payload) => void handleDocUploaded({ loadId: payload.loadId, docType: payload.docType })}
+      />
+
     </AppShell>
   );
+}
+
+function DispatchTripsContent({
+  workspace,
+  onWorkspaceChange,
+}: {
+  workspace: DispatchWorkspace;
+  onWorkspaceChange: (next: DispatchWorkspace) => void;
+}) {
+  return (
+    <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+      <div className="sticky top-0 z-20 -mx-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-2 py-2 backdrop-blur">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-ink">Dispatch Trips Workspace</div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">
+              Trip execution is primary in carrier mode.
+            </div>
+          </div>
+          <SegmentedControl
+            value={workspace}
+            options={[
+              { label: "Trips", value: "trips" },
+              { label: "Loads", value: "loads" },
+            ]}
+            onChange={(value) => onWorkspaceChange(value as DispatchWorkspace)}
+          />
+        </div>
+      </div>
+      <TripsWorkspace />
+    </AppShell>
+  );
+}
+
+function DispatchWorkspaceRouter() {
+  const { user, org, loading } = useUser();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const workspaceParam = searchParams.get("workspace");
+  const workspace = workspaceParam === "trips" || workspaceParam === "loads" ? workspaceParam : null;
+
+  const setWorkspace = useCallback(
+    (next: DispatchWorkspace) => {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("workspace", next);
+      if (next === "trips") {
+        params.delete("loadId");
+      } else {
+        params.delete("tripId");
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+    },
+    [pathname, router, searchParams]
+  );
+
+  useEffect(() => {
+    if (loading || workspace) return;
+    setWorkspace(
+      getDefaultDispatchWorkspace({
+        role: user?.role,
+        operatingMode: (org?.operatingMode as "CARRIER" | "BROKER" | "BOTH" | null | undefined) ?? null,
+      })
+    );
+  }, [loading, org?.operatingMode, setWorkspace, user?.role, workspace]);
+
+  if (loading || !workspace) {
+    return (
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        <EmptyState title="Loading dispatch workspace..." description="Applying your role-based default view." />
+      </AppShell>
+    );
+  }
+
+  const capabilities = getRoleCapabilities(user?.role);
+  if (!capabilities.canAccessDispatch) {
+    return (
+      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
+        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
+      </AppShell>
+    );
+  }
+
+  if (workspace === "trips") {
+    return <DispatchTripsContent workspace={workspace} onWorkspaceChange={setWorkspace} />;
+  }
+
+  return <DispatchPageContent workspace={workspace} onWorkspaceChange={setWorkspace} />;
 }
 
 export default function DispatchPage() {
   return (
     <Suspense fallback={null}>
-      <DispatchPageContent />
+      <DispatchWorkspaceRouter />
     </Suspense>
   );
 }

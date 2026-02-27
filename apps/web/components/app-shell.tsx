@@ -1,14 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { StatusChip } from "@/components/ui/status-chip";
+import { ToastViewport } from "@/components/ui/toast-viewport";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
+import { getRoleCapabilities } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 
 type NavSection = {
@@ -31,11 +34,28 @@ type OnboardingState = {
   status?: "NOT_ACTIVATED" | "OPERATIONAL";
 };
 
+type ActivityItem = {
+  id: string;
+  title: string;
+  severity: "ALERT" | "IMPORTANT" | "INFO";
+  domain: "DISPATCH" | "BILLING" | "SAFETY" | "SYSTEM";
+  timestamp: string;
+  count?: number;
+  cta: { label: string; href: string };
+};
+
+type ActivitySummary = {
+  badgeCount: number;
+  generatedAt: string;
+  now: ActivityItem[];
+  week: ActivityItem[];
+};
+
 const navSections: NavSection[] = [
   {
     title: "Home",
     items: [
-      { href: "/today", label: "Today" },
+      { href: "/today", label: "Activity" },
       { href: "/dashboard", label: "Task Inbox" },
       { href: "/profile", label: "Profile" },
     ],
@@ -74,8 +94,8 @@ const roleRoutes: Record<string, string[]> = {
     "/admin",
     "/profile",
   ],
-  HEAD_DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/trips", "/teams", "/finance", "/profile"],
-  DISPATCHER: ["/today", "/dashboard", "/loads", "/dispatch", "/trips", "/finance", "/profile"],
+  HEAD_DISPATCHER: ["/loads", "/dispatch", "/trips", "/teams", "/finance", "/profile"],
+  DISPATCHER: ["/loads", "/dispatch", "/trips", "/finance", "/profile"],
   BILLING: ["/today", "/dashboard", "/loads", "/trips", "/finance", "/profile"],
   DRIVER: ["/driver"],
 };
@@ -95,7 +115,6 @@ const searchGroups: Array<{ type: SearchResult["type"]; label: string }> = [
 ];
 const NAV_SEARCH_INPUT_ID = "global-nav-search-input";
 
-const searchRoles = new Set(["ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING"]);
 const SIDEBAR_PINNED_KEY = "haulio:sidebar:pinned";
 const SIDEBAR_PEEK_OPEN_DELAY_MS = 380;
 const SIDEBAR_PEEK_CLOSE_DELAY_MS = 240;
@@ -103,13 +122,30 @@ let sidebarPinnedCache: boolean | null = null;
 let sidebarPeekOpenCache = false;
 let teamsEnabledCache: boolean | null = null;
 
+function compactRelativeTime(value: string) {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return "—";
+  const diffMs = Date.now() - timestamp.getTime();
+  const absMinutes = Math.max(1, Math.round(Math.abs(diffMs) / 60000));
+  if (absMinutes < 60) return `${absMinutes}m ago`;
+  const absHours = Math.round(absMinutes / 60);
+  if (absHours < 24) return `${absHours}h ago`;
+  const absDays = Math.round(absHours / 24);
+  return `${absDays}d ago`;
+}
+
 function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean }) {
   if (role === "DRIVER") return driverSections;
   const allowed = roleRoutes[role ?? ""] ?? defaultRoutes;
+  const isDispatchRole = role === "DISPATCHER" || role === "HEAD_DISPATCHER";
+  const secondaryDispatchRoutes = new Set(["/today", "/dashboard"]);
   const sections = navSections
     .map((section) => ({
       ...section,
       items: section.items.filter((item) => {
+        if (isDispatchRole && secondaryDispatchRoutes.has(item.href)) {
+          return false;
+        }
         if (item.href === "/teams") {
           return Boolean(options?.showTeamsOps);
         }
@@ -117,6 +153,12 @@ function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean })
       }),
     }))
     .filter((section) => section.items.length > 0);
+  if (isDispatchRole) {
+    const secondaryItems = navSections[0].items.filter((item) => secondaryDispatchRoutes.has(item.href));
+    if (secondaryItems.length > 0) {
+      sections.push({ title: "More", items: secondaryItems });
+    }
+  }
   return sections;
 }
 
@@ -435,6 +477,7 @@ function AppShellInner({
   children: ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [navOpen, setNavOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -458,11 +501,19 @@ function AppShellInner({
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [activitySummary, setActivitySummary] = useState<ActivitySummary | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [activityDrawerOpen, setActivityDrawerOpen] = useState(false);
   const searchRequestIdRef = useRef(0);
   const [teamsEnabled, setTeamsEnabled] = useState(() => teamsEnabledCache ?? false);
+  const capabilities = getRoleCapabilities(user?.role);
   const canSeeTeamsOps = Boolean(user && (user.role === "ADMIN" || user.role === "HEAD_DISPATCHER"));
-  const showTeamsOps = Boolean(user && (user.role === "ADMIN" || (user.role === "HEAD_DISPATCHER" && teamsEnabled)));
-  const canUseGlobalSearch = Boolean(user && searchRoles.has(user.role));
+  const showTeamsOps = Boolean(
+    user && (user.role === "ADMIN" || (capabilities.canSeeTeamsOps && teamsEnabled))
+  );
+  const canUseGlobalSearch = capabilities.canUseGlobalSearch;
+  const canUseActivity = capabilities.canUseActivity;
   const desktopSidebarExpanded = sidebarPinned || sidebarPeekOpen;
   const sections = useMemo(
     () => getVisibleSections(user?.role, { showTeamsOps }),
@@ -480,9 +531,13 @@ function AppShellInner({
       .map((group) => ({ ...group, items: groups.get(group.type) ?? [] }))
       .filter((group) => group.items.length > 0);
   }, [searchResults]);
+  const activityNow = useMemo(() => (activitySummary?.now ?? []).slice(0, 7), [activitySummary?.now]);
+  const activityWeek = useMemo(() => (activitySummary?.week ?? []).slice(0, 7), [activitySummary?.week]);
+  const activityBadgeCount = activitySummary?.badgeCount ?? 0;
 
   useEffect(() => {
     setNavOpen(false);
+    setActivityDrawerOpen(false);
   }, [pathname]);
 
   useEffect(() => {
@@ -630,6 +685,35 @@ function AppShellInner({
     return () => clearTimeout(timer);
   }, [searchTerm, canUseGlobalSearch]);
 
+  useEffect(() => {
+    if (!canUseActivity) {
+      setActivitySummary(null);
+      setActivityError(null);
+      setActivityLoading(false);
+      return;
+    }
+    let active = true;
+    setActivityLoading(true);
+    apiFetch<ActivitySummary>("/activity/summary")
+      .then((payload) => {
+        if (!active) return;
+        setActivitySummary(payload);
+        setActivityError(null);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setActivitySummary(null);
+        setActivityError((err as Error).message || "Activity unavailable");
+      })
+      .finally(() => {
+        if (!active) return;
+        setActivityLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [canUseActivity, pathname, user?.role]);
+
   const clearSidebarHoverTimers = () => {
     if (hoverOpenTimerRef.current) {
       window.clearTimeout(hoverOpenTimerRef.current);
@@ -708,15 +792,35 @@ function AppShellInner({
           <div className="text-sm font-semibold text-ink">Haulio</div>
           <div className="text-xs text-[color:var(--color-text-muted)]">{title}</div>
         </div>
-        <button
-          type="button"
-          aria-label="Open navigation"
-          aria-expanded={navOpen}
-          onClick={() => setNavOpen(true)}
-          className="rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
-        >
-          Menu
-        </button>
+        <div className="flex items-center gap-2">
+          {canUseActivity ? (
+            <button
+              type="button"
+              aria-label="Open activity"
+              onClick={() => setActivityDrawerOpen(true)}
+              className="relative rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-2 text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <path d="M15 17H9a2 2 0 0 1-2-2v-4a5 5 0 1 1 10 0v4a2 2 0 0 1-2 2Z" />
+                <path d="M10 20a2 2 0 0 0 4 0" />
+              </svg>
+              {activityBadgeCount > 0 ? (
+                <span className="absolute -right-1 -top-1 inline-flex min-h-4 min-w-4 items-center justify-center rounded-full bg-[color:var(--color-danger)] px-1 text-[10px] font-semibold text-white">
+                  {activityBadgeCount > 99 ? "99+" : activityBadgeCount}
+                </span>
+              ) : null}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="Open navigation"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen(true)}
+            className="rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+          >
+            Menu
+          </button>
+        </div>
       </header>
 
       {navOpen ? (
@@ -832,6 +936,27 @@ function AppShellInner({
           className="flex-1 min-h-0 min-w-0 overflow-y-auto lg:h-screen"
         >
           <div className="space-y-6 px-3 pb-8 pt-5 sm:px-4 sm:pb-10 sm:pt-6 lg:px-10 lg:pb-16 lg:pt-8">
+            {canUseActivity ? (
+              <div className="hidden lg:flex lg:justify-end">
+                <button
+                  type="button"
+                  aria-label="Open activity"
+                  onClick={() => setActivityDrawerOpen(true)}
+                  className="relative inline-flex items-center gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm text-[color:var(--color-text-muted)] shadow-[var(--shadow-subtle)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M15 17H9a2 2 0 0 1-2-2v-4a5 5 0 1 1 10 0v4a2 2 0 0 1-2 2Z" />
+                    <path d="M10 20a2 2 0 0 0 4 0" />
+                  </svg>
+                  <span>Activity</span>
+                  {activityBadgeCount > 0 ? (
+                    <span className="inline-flex min-h-5 min-w-5 items-center justify-center rounded-full bg-[color:var(--color-danger)] px-1.5 text-[10px] font-semibold text-white">
+                      {activityBadgeCount > 99 ? "99+" : activityBadgeCount}
+                    </span>
+                  ) : null}
+                </button>
+              </div>
+            ) : null}
             {user?.role === "ADMIN" &&
             onboarding &&
             onboarding.status === "NOT_ACTIVATED" &&
@@ -863,6 +988,111 @@ function AppShellInner({
           </div>
         </main>
       </div>
+      {activityDrawerOpen ? (
+        <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Activity">
+          <button
+            type="button"
+            aria-label="Close activity drawer"
+            className="absolute inset-0 bg-black/20"
+            onClick={() => setActivityDrawerOpen(false)}
+          />
+          <aside className="absolute right-0 top-0 h-full w-[min(28rem,96vw)] overflow-y-auto border-l border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] p-4 shadow-[var(--shadow-card)]">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-semibold text-ink">Activity</div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">Now and this week queues</div>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => setActivityDrawerOpen(false)}>
+                Close
+              </Button>
+            </div>
+            <div className="mt-4 space-y-4">
+              {activityLoading ? <div className="text-sm text-[color:var(--color-text-muted)]">Loading activity…</div> : null}
+              {activityError ? <div className="text-sm text-[color:var(--color-danger)]">{activityError}</div> : null}
+              {!activityLoading && !activityError ? (
+                <>
+                  <div className="space-y-2">
+                    <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-subtle)]">Now</div>
+                    {activityNow.length === 0 ? (
+                      <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+                        No active blockers.
+                      </div>
+                    ) : (
+                      activityNow.map((item) => (
+                        <Card key={item.id} className="space-y-1 border border-[color:var(--color-divider)] px-3 py-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium text-ink">{item.title}</div>
+                              <div className="text-xs text-[color:var(--color-text-muted)]">
+                                {(item.count ?? 1) > 1 ? `${item.count} items` : "1 item"} · {compactRelativeTime(item.timestamp)}
+                              </div>
+                            </div>
+                            <span className="rounded-full border border-[color:var(--color-divider)] px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-[color:var(--color-text-muted)]">
+                              {item.severity}
+                            </span>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => {
+                              setActivityDrawerOpen(false);
+                              router.push(item.cta.href);
+                            }}
+                          >
+                            {item.cta.label}
+                          </Button>
+                        </Card>
+                      ))
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-subtle)]">This week</div>
+                    {activityWeek.length === 0 ? (
+                      <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+                        No scheduled risk this week.
+                      </div>
+                    ) : (
+                      activityWeek.map((item) => (
+                        <Card key={item.id} className="space-y-1 border border-[color:var(--color-divider)] px-3 py-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium text-ink">{item.title}</div>
+                              <div className="text-xs text-[color:var(--color-text-muted)]">
+                                {(item.count ?? 1) > 1 ? `${item.count} items` : "1 item"} · {compactRelativeTime(item.timestamp)}
+                              </div>
+                            </div>
+                            <span className="rounded-full border border-[color:var(--color-divider)] px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-[color:var(--color-text-muted)]">
+                              {item.severity}
+                            </span>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => {
+                              setActivityDrawerOpen(false);
+                              router.push(item.cta.href);
+                            }}
+                          >
+                            {item.cta.label}
+                          </Button>
+                        </Card>
+                      ))
+                    )}
+                  </div>
+                  <div className="pt-1">
+                    <Link href="/today" onClick={() => setActivityDrawerOpen(false)}>
+                      <Button className="w-full" size="sm">
+                        View all activity
+                      </Button>
+                    </Link>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </aside>
+        </div>
+      ) : null}
+      <ToastViewport />
     </div>
   );
 }

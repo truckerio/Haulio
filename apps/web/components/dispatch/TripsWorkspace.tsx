@@ -13,6 +13,7 @@ import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Select } from "@/components/ui/select";
 import { StatusChip } from "@/components/ui/status-chip";
 import { apiFetch } from "@/lib/api";
+import { getRoleCapabilities } from "@/lib/capabilities";
 
 type TripStatus = "PLANNED" | "ASSIGNED" | "IN_TRANSIT" | "ARRIVED" | "COMPLETE" | "CANCELLED";
 type MovementMode = "FTL" | "LTL" | "POOL_DISTRIBUTION";
@@ -244,7 +245,7 @@ export function TripsWorkspace() {
     apiFetch<{ user: { role?: string } }>("/auth/me")
       .then((payload) => {
         const role = payload.user?.role ?? "";
-        setHasAccess(["ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"].includes(role));
+        setHasAccess(getRoleCapabilities(role).canAccessTrips);
       })
       .catch(() => setHasAccess(false));
   }, []);
@@ -738,6 +739,9 @@ export function TripsWorkspace() {
                     <div className="flex flex-wrap gap-2">
                       <Button onClick={saveAssignment} disabled={savingAssign}>
                         {savingAssign ? "Saving..." : "Save assignment"}
+                      </Button>
+                      <Button variant="secondary" onClick={() => router.push(`/trips/${selectedTripSummary.id}`)}>
+                        Open trip detail
                       </Button>
                       <Button
                         variant="secondary"

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FormField } from "@/components/ui/form-field";
 import { apiFetch, setCsrfToken } from "@/lib/api";
+import { getRoleLandingPath } from "@/lib/capabilities";
 
 type LoginStage = "login" | "mfa" | "mfa-setup";
 
@@ -35,12 +36,6 @@ function getSafeCallback(target: string | null) {
   if (!target) return null;
   if (!target.startsWith("/") || target.startsWith("//")) return null;
   return target;
-}
-
-function getRoleRedirect(role: string | undefined) {
-  if (role === "DRIVER") return "/driver";
-  if (role === "DISPATCHER" || role === "HEAD_DISPATCHER") return "/dispatch";
-  return "/today";
 }
 
 export default function LoginClient() {
@@ -146,7 +141,7 @@ export default function LoginClient() {
       if (data.csrfToken) {
         setCsrfToken(data.csrfToken);
       }
-      const destination = callbackUrl || getRoleRedirect(data.user?.role);
+      const destination = callbackUrl || getRoleLandingPath(data.user?.role);
       router.replace(destination);
     } catch (err) {
       setError((err as Error).message || "Unable to sign in.");
@@ -174,7 +169,7 @@ export default function LoginClient() {
       if (data.csrfToken) {
         setCsrfToken(data.csrfToken);
       }
-      const destination = callbackUrl || getRoleRedirect(data.user?.role);
+      const destination = callbackUrl || getRoleLandingPath(data.user?.role);
       router.replace(destination);
     } catch (err) {
       setError((err as Error).message || "Unable to verify MFA.");
@@ -217,7 +212,7 @@ export default function LoginClient() {
       if (data.csrfToken) {
         setCsrfToken(data.csrfToken);
       }
-      const destination = callbackUrl || getRoleRedirect(data.user?.role);
+      const destination = callbackUrl || getRoleLandingPath(data.user?.role);
       router.replace(destination);
     } catch (err) {
       setError((err as Error).message || "Unable to verify MFA.");

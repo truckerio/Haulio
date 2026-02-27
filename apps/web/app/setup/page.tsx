@@ -7,12 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { FormField } from "@/components/ui/form-field";
 import { apiFetch, setCsrfToken } from "@/lib/api";
-
-function getRoleRedirect(role?: string | null) {
-  if (role === "DRIVER") return "/driver";
-  if (role === "DISPATCHER" || role === "HEAD_DISPATCHER") return "/dispatch";
-  return "/today";
-}
+import { getRoleLandingPath } from "@/lib/capabilities";
 
 export default function SetupPage() {
   const router = useRouter();
@@ -96,7 +91,7 @@ export default function SetupPage() {
       if (data.csrfToken) {
         setCsrfToken(data.csrfToken);
       }
-      router.replace(getRoleRedirect(data.user?.role));
+      router.replace(getRoleLandingPath(data.user?.role));
     } catch (err) {
       setError((err as Error).message);
     } finally {
