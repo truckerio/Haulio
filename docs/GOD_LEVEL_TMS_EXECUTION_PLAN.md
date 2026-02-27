@@ -158,7 +158,7 @@ pnpm --filter @truckerio/web run typecheck
 |---|---|---|---|---|---|
 | Add shadow evaluator on targeted mutation endpoints |  |  |  | In Progress | route hooks in `apps/api/src/index.ts` |
 | Log divergence payloads (`legacyAfter` vs `kernelAfter`) |  |  |  | In Progress | `STATE_KERNEL_DIVERGENCE` meta contract fields |
-| Add endpoint-level transition regression tests |  |  |  | In Progress | kernel + authz + queue-view tests |
+| Add endpoint-level transition regression tests |  |  |  | In Progress | `apps/api/src/lib/state-kernel/first-wave-routes.test.ts` + `pnpm --filter @truckerio/api run test:kernel` |
 | Run shadow in prod-local and validate zero critical divergences |  |  |  | In Progress | `docs/STATE_KERNEL_ROLLOUT.md` runbook |
 
 ### Divergence Log Contract

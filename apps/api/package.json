@@ -14,7 +14,7 @@
     "test:billing": "node --import tsx src/lib/billing-readiness.test.ts",
     "test:finance": "node --import tsx src/lib/finance-policy.test.ts && node --import tsx src/lib/finance-receivables.test.ts && node --import tsx src/lib/trip-settlement-preview.test.ts",
     "test:dispatch": "tsx src/modules/dispatch/queue-view.test.ts && node --import tsx src/lib/state-kernel/state-kernel.test.ts",
-    "test:kernel": "node --import tsx src/lib/state-kernel/state-kernel.test.ts",
+    "test:kernel": "node --import tsx src/lib/state-kernel/state-kernel.test.ts && node --import tsx src/lib/state-kernel/first-wave-routes.test.ts",
     "test:notes": "node --import tsx src/lib/notes-v1.test.ts && node --import tsx src/lib/timeline.test.ts && node --import tsx src/modules/notes/immutability-contract.test.ts",
     "test:payables": "node --import tsx src/lib/payables-engine.test.ts",
     "test:today": "node --import tsx src/modules/today/scope.test.ts && node --import tsx src/modules/today/warnings.test.ts && node --import tsx src/modules/today/issue-summary.test.ts",
