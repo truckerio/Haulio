@@ -302,6 +302,8 @@ ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> pnpm ci:kernel:pilot
 pnpm prod:local
 pnpm demo:smoke
 pnpm demo:smoke:roles
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:enforce
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:kernel:phasee
 ```
 
 ---

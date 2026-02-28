@@ -83,6 +83,8 @@ ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> pnpm ci:kernel:pilot
 DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:phase3
 ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:kernel:phase3
 DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:roles
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:enforce
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:kernel:phasee
 ```
 
 Prod-local stack start:
@@ -222,3 +224,16 @@ Pass criteria:
   - assign trip
 - Billing is denied for trip assignment and charge mutation.
 - Safety and Support remain read-only on loads and denied for mutations.
+
+## 11) Enforce-Wave Smoke (Phase E)
+
+Enforcement smoke command:
+
+```bash
+ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:enforce
+```
+
+Pass criteria:
+- Script prints `smoke-kernel-enforce-wave: PASS`.
+- A controlled invalid trip->load mirror transition attempt is blocked (`4xx`/`5xx` response).
+- `STATE_KERNEL_ENFORCE_BLOCKED` audit row exists for route `/trips/:id/status`.
