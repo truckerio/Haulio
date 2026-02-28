@@ -272,7 +272,7 @@ pnpm --filter @truckerio/web run typecheck
 ### Implementation Checklist
 | Task | Owner | Start | Due | Status | Evidence |
 |---|---|---|---|---|---|
-| Flip selected endpoints from shadow to enforce |  |  |  | In Progress | pilot enforce flags in prod-local (`STATE_KERNEL_ENFORCE=true`, scoped org list) + `apps/api/src/index.ts` enforce guards |
+| Flip selected endpoints from shadow to enforce |  |  |  | In Progress | pilot enforce flags in prod-local (`STATE_KERNEL_ENFORCE=true`, scoped org list) + `apps/api/src/index.ts` enforce guards (`transitionLoadStatus` + trip mirror sync enforcement) |
 | Add CI checks to block direct status writes outside kernel |  |  |  | Done | `scripts/ci/check-load-status-mutation-drift.mjs`, `pnpm ci:drift:status` |
 | Add CI checks for capability drift (API vs Web maps) |  |  |  | Done | `scripts/ci/check-role-capability-drift.mjs`, `pnpm ci:drift:roles` |
 | Publish smoke script and pass evidence by role |  |  |  | Done | `apps/api/scripts/smoke-role-matrix.ts`, `pnpm demo:smoke:roles`, `docs/PHASE1_PASS.md` |

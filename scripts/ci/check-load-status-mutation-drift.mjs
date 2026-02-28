@@ -34,7 +34,8 @@ function lineFromOffset(text, offset) {
   return text.slice(0, offset).split("\n").length;
 }
 
-const updatePattern = /(prisma|tx)\.load\.(update|updateMany)\s*\(\s*\{/g;
+const updatePattern = /\b([A-Za-z_$][\w$]*)\.load\.(update|updateMany)\s*\(\s*\{/g;
+const ALLOWED_FUNCTIONS = new Set(["transitionLoadStatus", "applyTripAssignmentToLoads"]);
 const violations = [];
 
 for (const match of source.matchAll(updatePattern)) {
@@ -44,11 +45,11 @@ for (const match of source.matchAll(updatePattern)) {
     continue;
   }
   const fnName = nearestFunctionName(source, index);
-  if (fnName !== "transitionLoadStatus") {
+  if (!fnName || !ALLOWED_FUNCTIONS.has(fnName)) {
     violations.push({
       line: lineFromOffset(source, index),
       fnName: fnName ?? "unknown",
-      match: match[0],
+      match: `${match[1]}.load.${match[2]}`,
     });
   }
 }

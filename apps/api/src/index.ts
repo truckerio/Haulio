@@ -1860,14 +1860,20 @@ async function applyTripAssignmentToLoads(params: {
   trailerId?: string | null;
   tripStatus?: TripStatus | null;
   tx?: Prisma.TransactionClient;
+  actor?: { userId: string; role: Role };
+  source?: { route: string; method: string };
 }) {
   if (!params.loadIds.length) return;
   const db = params.tx ?? prisma;
+  const kernelEnforceActive = isKernelEnforceEnabledForOrg(params.orgId);
   const loads = await db.load.findMany({
     where: { orgId: params.orgId, id: { in: params.loadIds } },
     select: {
       id: true,
+      loadNumber: true,
       status: true,
+      billingStatus: true,
+      podVerifiedAt: true,
       assignedDriverId: true,
       truckId: true,
       trailerId: true,
@@ -1911,6 +1917,75 @@ async function applyTripAssignmentToLoads(params: {
     ) {
       continue;
     }
+    if (kernelEnforceActive && load.status !== next.status) {
+      const currentKernelState = buildKernelStateFromLegacyLoad({
+        status: load.status,
+        billingStatus: load.billingStatus,
+        podVerifiedAt: load.podVerifiedAt,
+      });
+      const kernelPatch = buildKernelPatchFromLegacyLoadSnapshots({
+        legacyBefore: {
+          status: load.status,
+          billingStatus: load.billingStatus,
+          podVerifiedAt: load.podVerifiedAt,
+        },
+        legacyAfter: {
+          status: next.status,
+          billingStatus: load.billingStatus,
+          podVerifiedAt: load.podVerifiedAt,
+        },
+      });
+      const enforceResult = applyKernelTransition({
+        authority: "LOAD",
+        current: currentKernelState,
+        next: kernelPatch,
+        context: {
+          actorId: params.actor?.userId ?? "system",
+          actorRole: params.actor?.role ?? Role.ADMIN,
+          reason: "trip-execution-mirror",
+          allowUnsafe: false,
+        },
+      });
+      if (!enforceResult.ok) {
+        const violation =
+          enforceResult.violations.find((entry) => entry.severity === "ERROR") ??
+          enforceResult.violations[0] ??
+          null;
+        if (params.actor?.userId) {
+          await logAudit({
+            orgId: params.orgId,
+            userId: params.actor.userId,
+            action: "STATE_KERNEL_ENFORCE_BLOCKED",
+            entity: "Load",
+            entityId: load.id,
+            summary: `Kernel enforcement blocked mirror transition ${load.status} -> ${next.status}`,
+            meta: {
+              route: params.source?.route ?? "syncTripExecutionToLoadMirrors",
+              method: params.source?.method ?? "INTERNAL",
+              violationCode: violation?.code ?? null,
+              violationMessage: violation?.message ?? null,
+              orgId: params.orgId,
+              userRole: params.actor.role,
+            },
+            before: {
+              legacy: {
+                status: load.status,
+                billingStatus: load.billingStatus,
+                podVerifiedAt: load.podVerifiedAt,
+              },
+              kernel: currentKernelState,
+            },
+            after: {
+              kernelCandidate: enforceResult.candidateState,
+              violations: enforceResult.violations,
+            },
+          });
+        }
+        throw new Error(
+          violation?.message ?? `Kernel enforcement blocked mirror transition ${load.status} -> ${next.status}`
+        );
+      }
+    }
     await db.load.update({
       where: { id: load.id },
       data: {
@@ -1930,6 +2005,8 @@ async function syncTripExecutionToLoadMirrors(params: {
   orgId: string;
   tripId: string;
   tx?: Prisma.TransactionClient;
+  actor?: { userId: string; role: Role };
+  source?: { route: string; method: string };
 }) {
   const db = params.tx ?? prisma;
   const trip = await db.trip.findFirst({
@@ -1954,6 +2031,8 @@ async function syncTripExecutionToLoadMirrors(params: {
     trailerId: trip.trailerId,
     tripStatus: trip.status,
     tx: db,
+    actor: params.actor,
+    source: params.source,
   });
   return trip;
 }
@@ -8391,6 +8470,8 @@ app.post(
     await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
       tripId: trip.id,
+      actor: { userId: req.user!.id, role: req.user!.role as Role },
+      source: { route: "/trips", method: "POST" },
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -8484,6 +8565,8 @@ app.post(
       await syncTripExecutionToLoadMirrors({
         orgId: req.user!.orgId,
         tripId: trip.id,
+        actor: { userId: req.user!.id, role: req.user!.role as Role },
+        source: { route: "/trips/:id/loads", method: "POST" },
       });
       if (trip.sourceManifestId) {
         await prisma.trailerManifestItem.createMany({
@@ -8609,11 +8692,15 @@ app.post(
         orgId: req.user!.orgId,
         tripId: trip.id,
         tx,
+        actor: { userId: req.user!.id, role: req.user!.role as Role },
+        source: { route: "/trips/:id/split-load", method: "POST" },
       });
       await syncTripExecutionToLoadMirrors({
         orgId: req.user!.orgId,
         tripId: splitTrip.id,
         tx,
+        actor: { userId: req.user!.id, role: req.user!.role as Role },
+        source: { route: "/trips/:id/split-load", method: "POST" },
       });
 
       const [updatedTrip, createdTrip] = await Promise.all([
@@ -8772,6 +8859,8 @@ app.post(
     await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
       tripId: trip.id,
+      actor: { userId: req.user!.id, role: req.user!.role as Role },
+      source: { route: "/trips/:id/assign", method: "POST" },
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -8876,6 +8965,8 @@ app.post(
     await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
       tripId: trip.id,
+      actor: { userId: req.user!.id, role: req.user!.role as Role },
+      source: { route: "/trips/:id/status", method: "POST" },
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -8982,6 +9073,8 @@ app.post(
     await syncTripExecutionToLoadMirrors({
       orgId: req.user!.orgId,
       tripId: trip.id,
+      actor: { userId: req.user!.id, role: req.user!.role as Role },
+      source: { route: "/manifests/:id/dispatch-as-trip", method: "POST" },
     });
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
@@ -13489,6 +13582,8 @@ app.post(
         await syncTripExecutionToLoadMirrors({
           orgId: req.user!.orgId,
           tripId: updatedTrip.id,
+          actor: { userId: req.user!.id, role: req.user!.role as Role },
+          source: { route: "/integrations/yardos/plan-apply", method: req.method },
         });
         await syncTripAssetStatuses({
           orgId: req.user!.orgId,
