@@ -32,7 +32,24 @@ async function request(path: string, options: RequestInit, auth: Auth) {
   if (options.method && options.method !== "GET") {
     headers.set("x-csrf-token", auth.csrf);
   }
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const url = `${API_BASE}${path}`;
+  let response: Response;
+  try {
+    response = await fetch(url, { ...options, headers });
+  } catch (error) {
+    const cause = (error as any)?.cause;
+    const detail =
+      cause && typeof cause === "object"
+        ? JSON.stringify({
+            code: cause.code ?? null,
+            errno: cause.errno ?? null,
+            syscall: cause.syscall ?? null,
+            address: cause.address ?? null,
+            port: cause.port ?? null,
+          })
+        : String(error);
+    throw new Error(`Fetch failed for ${options.method ?? "GET"} ${url}: ${detail}`);
+  }
   const text = await response.text();
   let payload: unknown = null;
   try {
