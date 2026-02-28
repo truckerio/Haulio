@@ -145,6 +145,44 @@ async function main() {
 
   const dispatcherAuth = await authFor(dispatcher.id);
 
+  const driverUser = await prisma.user.upsert({
+    where: { orgId_email: { orgId: org.id, email: `driver+ke-${runId}@test.local` } },
+    update: { role: "DRIVER", name: "Kernel Enforce Driver", isActive: true },
+    create: {
+      orgId: org.id,
+      email: `driver+ke-${runId}@test.local`,
+      role: "DRIVER",
+      name: "Kernel Enforce Driver",
+      passwordHash: "x",
+      isActive: true,
+    },
+  });
+  const driver = await prisma.driver.upsert({
+    where: { userId: driverUser.id },
+    update: { orgId: org.id, name: driverUser.name ?? "Kernel Enforce Driver", status: "AVAILABLE" },
+    create: { orgId: org.id, userId: driverUser.id, name: driverUser.name ?? "Kernel Enforce Driver", status: "AVAILABLE" },
+  });
+  const truck = await prisma.truck.upsert({
+    where: { orgId_unit: { orgId: org.id, unit: `KE-TRK-${runId}` } },
+    update: { status: "AVAILABLE" },
+    create: {
+      orgId: org.id,
+      unit: `KE-TRK-${runId}`,
+      vin: `1HGCM82633${String(runId).slice(-6)}`,
+      status: "AVAILABLE",
+    },
+  });
+  const trailer = await prisma.trailer.upsert({
+    where: { orgId_unit: { orgId: org.id, unit: `KE-TRL-${runId}` } },
+    update: { status: "AVAILABLE" },
+    create: {
+      orgId: org.id,
+      unit: `KE-TRL-${runId}`,
+      type: "DRY_VAN",
+      status: "AVAILABLE",
+    },
+  });
+
   const customerResp = await request(
     "/customers",
     {
@@ -219,6 +257,24 @@ async function main() {
   }
   const tripId = (tripResp.payload as any).trip.id as string;
 
+  const assignResp = await request(
+    `/trips/${tripId}/assign`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        driverId: driver.id,
+        truckId: truck.id,
+        trailerId: trailer.id,
+        status: "ASSIGNED",
+      }),
+    },
+    dispatcherAuth
+  );
+  if (assignResp.status < 200 || assignResp.status >= 300) {
+    throw new Error(`Failed to assign trip before enforce check: ${assignResp.status} ${JSON.stringify(assignResp.payload)}`);
+  }
+
   // Force load into a completion-class status so a trip mirror attempt to ASSIGNED becomes invalid.
   await prisma.load.update({
     where: { id: loadId },
@@ -231,7 +287,7 @@ async function main() {
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "ASSIGNED" }),
+      body: JSON.stringify({ status: "IN_TRANSIT" }),
     },
     dispatcherAuth
   );
