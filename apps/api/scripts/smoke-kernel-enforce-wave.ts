@@ -6,6 +6,7 @@ import { createCsrfToken } from "../src/lib/csrf";
 const API_BASE = process.env.API_BASE || process.env.NEXT_PUBLIC_API_BASE || "http://localhost:4000";
 const ORG_ID = process.env.ORG_ID || "";
 const ORG_NAME = process.env.ORG_NAME || "";
+const NETWORK_RETRY_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "UND_ERR_SOCKET", "EPIPE", "ETIMEDOUT"]);
 
 const COMPLETED_ONBOARDING_STEPS = [
   "basics",
@@ -20,6 +21,25 @@ const COMPLETED_ONBOARDING_STEPS = [
 
 type Auth = { cookie: string; csrf: string };
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForApiHealth() {
+  const healthUrl = `${API_BASE}/health`;
+  const maxAttempts = 20;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(healthUrl, { method: "GET" });
+      if (response.ok) return;
+    } catch {
+      // ignore and retry
+    }
+    await sleep(300 * attempt);
+  }
+  throw new Error(`API did not become healthy at ${healthUrl} after ${maxAttempts} attempts`);
+}
+
 async function authFor(userId: string): Promise<Auth> {
   const session = await createSession({ userId });
   const csrf = createCsrfToken();
@@ -33,31 +53,45 @@ async function request(path: string, options: RequestInit, auth: Auth) {
     headers.set("x-csrf-token", auth.csrf);
   }
   const url = `${API_BASE}${path}`;
-  let response: Response;
-  try {
-    response = await fetch(url, { ...options, headers });
-  } catch (error) {
-    const cause = (error as any)?.cause;
-    const detail =
-      cause && typeof cause === "object"
-        ? JSON.stringify({
-            code: cause.code ?? null,
-            errno: cause.errno ?? null,
-            syscall: cause.syscall ?? null,
-            address: cause.address ?? null,
-            port: cause.port ?? null,
-          })
-        : String(error);
-    throw new Error(`Fetch failed for ${options.method ?? "GET"} ${url}: ${detail}`);
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, { ...options, headers });
+    } catch (error) {
+      const cause = (error as any)?.cause;
+      const code = cause?.code ?? null;
+      const detail =
+        cause && typeof cause === "object"
+          ? JSON.stringify({
+              code: cause.code ?? null,
+              errno: cause.errno ?? null,
+              syscall: cause.syscall ?? null,
+              address: cause.address ?? null,
+              port: cause.port ?? null,
+            })
+          : String(error);
+      const retryable = Boolean(code && NETWORK_RETRY_CODES.has(String(code)));
+      if (retryable && attempt < maxAttempts) {
+        await sleep(200 * attempt);
+        continue;
+      }
+      throw new Error(`Fetch failed for ${options.method ?? "GET"} ${url}: ${detail}`);
+    }
+    const text = await response.text();
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = text;
+    }
+    if (response.status >= 500 && attempt < maxAttempts) {
+      await sleep(200 * attempt);
+      continue;
+    }
+    return { status: response.status, payload };
   }
-  const text = await response.text();
-  let payload: unknown = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = text;
-  }
-  return { status: response.status, payload };
+  throw new Error(`Request retries exhausted for ${options.method ?? "GET"} ${url}`);
 }
 
 async function ensureOperationalOrg(orgId: string) {
@@ -141,6 +175,7 @@ async function resolveOrg() {
 }
 
 async function main() {
+  await waitForApiHealth();
   const org = await resolveOrg();
   const runId = Date.now();
   await ensureOperationalOrg(org.id);
