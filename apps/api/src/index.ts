@@ -1981,9 +1981,12 @@ async function applyTripAssignmentToLoads(params: {
             },
           });
         }
-        throw new Error(
+        const error = new Error(
           violation?.message ?? `Kernel enforcement blocked mirror transition ${load.status} -> ${next.status}`
-        );
+        ) as Error & { code?: string; status?: number };
+        error.code = "STATE_KERNEL_ENFORCE_BLOCKED";
+        error.status = 409;
+        throw error;
       }
     }
     await db.load.update({
@@ -8821,47 +8824,64 @@ app.post(
       res.status(400).json({ error: "Trip requires a primary driver before dispatch status can advance" });
       return;
     }
-    const updated = await prisma.trip.update({
-      where: { id: trip.id },
-      data: {
-        driverId: hasDriver ? nextDriverId : undefined,
-        truckId: hasTruck ? nextTruckId : undefined,
-        trailerId: hasTrailer ? nextTrailerId : undefined,
-        status,
-        plannedDepartureAt:
-          parsed.data.plannedDepartureAt === undefined
-            ? undefined
-            : parsed.data.plannedDepartureAt
-              ? new Date(parsed.data.plannedDepartureAt)
-              : null,
-        plannedArrivalAt:
-          parsed.data.plannedArrivalAt === undefined
-            ? undefined
-            : parsed.data.plannedArrivalAt
-              ? new Date(parsed.data.plannedArrivalAt)
-              : null,
-        departedAt:
-          status === TripStatus.IN_TRANSIT
-            ? trip.departedAt ?? now
-            : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED
-              ? null
-              : undefined,
-        arrivedAt:
-          status === TripStatus.ARRIVED || status === TripStatus.COMPLETE
-            ? trip.arrivedAt ?? now
-            : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED || status === TripStatus.IN_TRANSIT
-              ? null
-              : undefined,
-      },
-      include: TRIP_INCLUDE,
-    });
+    let updated: Prisma.TripGetPayload<{ include: typeof TRIP_INCLUDE }>;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const nextTrip = await tx.trip.update({
+          where: { id: trip.id },
+          data: {
+            driverId: hasDriver ? nextDriverId : undefined,
+            truckId: hasTruck ? nextTruckId : undefined,
+            trailerId: hasTrailer ? nextTrailerId : undefined,
+            status,
+            plannedDepartureAt:
+              parsed.data.plannedDepartureAt === undefined
+                ? undefined
+                : parsed.data.plannedDepartureAt
+                  ? new Date(parsed.data.plannedDepartureAt)
+                  : null,
+            plannedArrivalAt:
+              parsed.data.plannedArrivalAt === undefined
+                ? undefined
+                : parsed.data.plannedArrivalAt
+                  ? new Date(parsed.data.plannedArrivalAt)
+                  : null,
+            departedAt:
+              status === TripStatus.IN_TRANSIT
+                ? trip.departedAt ?? now
+                : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED
+                  ? null
+                  : undefined,
+            arrivedAt:
+              status === TripStatus.ARRIVED || status === TripStatus.COMPLETE
+                ? trip.arrivedAt ?? now
+                : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED || status === TripStatus.IN_TRANSIT
+                  ? null
+                  : undefined,
+          },
+          include: TRIP_INCLUDE,
+        });
 
-    await syncTripExecutionToLoadMirrors({
-      orgId: req.user!.orgId,
-      tripId: trip.id,
-      actor: { userId: req.user!.id, role: req.user!.role as Role },
-      source: { route: "/trips/:id/assign", method: "POST" },
-    });
+        await syncTripExecutionToLoadMirrors({
+          orgId: req.user!.orgId,
+          tripId: trip.id,
+          tx,
+          actor: { userId: req.user!.id, role: req.user!.role as Role },
+          source: { route: "/trips/:id/assign", method: "POST" },
+        });
+        return nextTrip;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Trip assignment update failed";
+      const code = (error as { code?: string } | null)?.code;
+      if (code === "STATE_KERNEL_ENFORCE_BLOCKED") {
+        res.status(409).json({ code: "STATE_KERNEL_ENFORCE_BLOCKED", error: message });
+        return;
+      }
+      console.error("[trip-assign] mirror sync failed", error);
+      res.status(500).json({ error: "Trip assignment update failed" });
+      return;
+    }
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
       tripId: trip.id,
@@ -8942,32 +8962,48 @@ app.post(
       return;
     }
     const now = new Date();
-    const updated = await prisma.trip.update({
-      where: { id: trip.id },
-      data: {
-        status: parsed.data.status,
-        departedAt:
-          parsed.data.status === TripStatus.IN_TRANSIT
-            ? trip.departedAt ?? now
-            : parsed.data.status === TripStatus.PLANNED || parsed.data.status === TripStatus.ASSIGNED
-              ? null
-              : undefined,
-        arrivedAt:
-          parsed.data.status === TripStatus.ARRIVED || parsed.data.status === TripStatus.COMPLETE
-            ? trip.arrivedAt ?? now
-            : parsed.data.status === TripStatus.PLANNED || parsed.data.status === TripStatus.ASSIGNED
-              ? null
-              : undefined,
-      },
-      include: TRIP_INCLUDE,
-    });
-
-    await syncTripExecutionToLoadMirrors({
-      orgId: req.user!.orgId,
-      tripId: trip.id,
-      actor: { userId: req.user!.id, role: req.user!.role as Role },
-      source: { route: "/trips/:id/status", method: "POST" },
-    });
+    let updated: Prisma.TripGetPayload<{ include: typeof TRIP_INCLUDE }>;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const nextTrip = await tx.trip.update({
+          where: { id: trip.id },
+          data: {
+            status: parsed.data.status,
+            departedAt:
+              parsed.data.status === TripStatus.IN_TRANSIT
+                ? trip.departedAt ?? now
+                : parsed.data.status === TripStatus.PLANNED || parsed.data.status === TripStatus.ASSIGNED
+                  ? null
+                  : undefined,
+            arrivedAt:
+              parsed.data.status === TripStatus.ARRIVED || parsed.data.status === TripStatus.COMPLETE
+                ? trip.arrivedAt ?? now
+                : parsed.data.status === TripStatus.PLANNED || parsed.data.status === TripStatus.ASSIGNED
+                  ? null
+                  : undefined,
+          },
+          include: TRIP_INCLUDE,
+        });
+        await syncTripExecutionToLoadMirrors({
+          orgId: req.user!.orgId,
+          tripId: trip.id,
+          tx,
+          actor: { userId: req.user!.id, role: req.user!.role as Role },
+          source: { route: "/trips/:id/status", method: "POST" },
+        });
+        return nextTrip;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Trip status update failed";
+      const code = (error as { code?: string } | null)?.code;
+      if (code === "STATE_KERNEL_ENFORCE_BLOCKED") {
+        res.status(409).json({ code: "STATE_KERNEL_ENFORCE_BLOCKED", error: message });
+        return;
+      }
+      console.error("[trip-status] mirror sync failed", error);
+      res.status(500).json({ error: "Trip status update failed" });
+      return;
+    }
     await syncTripAssetStatuses({
       orgId: req.user!.orgId,
       tripId: trip.id,
