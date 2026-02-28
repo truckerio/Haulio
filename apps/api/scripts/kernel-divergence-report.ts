@@ -27,6 +27,11 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function isSyntheticSmokeActor(email: string): boolean {
+  const normalized = email.trim().toLowerCase();
+  return normalized.startsWith("dispatch+ke-") && normalized.endsWith("@test.local");
+}
+
 async function resolveOrgId() {
   const explicitOrgId = (process.env.ORG_ID ?? "").trim();
   if (explicitOrgId) return explicitOrgId;
@@ -62,16 +67,20 @@ async function main() {
       summary: true,
       meta: true,
       createdAt: true,
+      user: { select: { email: true } },
     },
     orderBy: { createdAt: "desc" },
   });
+
+  const filteredRows = rows.filter((row) => !isSyntheticSmokeActor(row.user.email));
+  const excludedSyntheticRows = rows.length - filteredRows.length;
 
   const byAction = new Map<string, number>();
   const byRoute = new Map<string, number>();
   let blockingKernelViolations = 0;
   let enforceBlocked = 0;
 
-  for (const row of rows) {
+  for (const row of filteredRows) {
     byAction.set(row.action, (byAction.get(row.action) ?? 0) + 1);
     if (row.action === "STATE_KERNEL_ENFORCE_BLOCKED") {
       enforceBlocked += 1;
@@ -92,7 +101,8 @@ async function main() {
     orgId,
     lookbackHours,
     since: since.toISOString(),
-    totalRows: rows.length,
+    totalRows: filteredRows.length,
+    excludedSyntheticRows,
     byAction: Object.fromEntries([...byAction.entries()].sort((a, b) => b[1] - a[1])),
     topRoutes: [...byRoute.entries()]
       .sort((a, b) => b[1] - a[1])
