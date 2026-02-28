@@ -275,10 +275,10 @@ async function main() {
     throw new Error(`Failed to assign trip before enforce check: ${assignResp.status} ${JSON.stringify(assignResp.payload)}`);
   }
 
-  // Force load into a completion-class status so a trip mirror attempt to ASSIGNED becomes invalid.
+  // Force load into DRAFT so trip mirror to IN_TRANSIT is an invalid kernel transition (DRAFT -> IN_TRANSIT).
   await prisma.load.update({
     where: { id: loadId },
-    data: { status: "INVOICED", billingStatus: "INVOICED", podVerifiedAt: new Date(), invoicedAt: new Date() },
+    data: { status: "DRAFT", billingStatus: "BLOCKED", podVerifiedAt: null, invoicedAt: null },
   });
 
   const since = new Date();
@@ -294,7 +294,7 @@ async function main() {
 
   if (statusResp.status < 400) {
     throw new Error(
-      `Expected enforced block when mirroring COMPLETE-class load back to ASSIGNED; got ${statusResp.status}`
+      `Expected enforced block when mirroring DRAFT load to IN_TRANSIT; got ${statusResp.status}`
     );
   }
 
