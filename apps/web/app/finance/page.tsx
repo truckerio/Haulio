@@ -50,15 +50,14 @@ function FinanceHeaderCard() {
             type="button"
             aria-label="Open activity"
             onClick={activity.openActivityDrawer}
-            className="relative inline-flex items-center gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm text-[color:var(--color-text-muted)] shadow-[var(--shadow-subtle)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+            className="relative inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] shadow-[var(--shadow-subtle)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
           >
-            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]" fill="none" stroke="currentColor" strokeWidth="1.8">
               <path d="M15 17H9a2 2 0 0 1-2-2v-4a5 5 0 1 1 10 0v4a2 2 0 0 1-2 2Z" />
               <path d="M10 20a2 2 0 0 0 4 0" />
             </svg>
-            <span>Activity</span>
             {activity.activityBadgeCount > 0 ? (
-              <span className="inline-flex min-h-5 min-w-5 items-center justify-center rounded-full bg-[color:var(--color-danger)] px-1.5 text-[10px] font-semibold text-white">
+              <span className="absolute -right-1 -top-1 inline-flex min-h-4 min-w-4 items-center justify-center rounded-full bg-[color:var(--color-danger)] px-1 text-[10px] font-semibold text-white">
                 {activity.activityBadgeCount > 99 ? "99+" : activity.activityBadgeCount}
               </span>
             ) : null}
