@@ -50,12 +50,12 @@ assert.ok(
   "spreadsheet panel must expose rows per page control"
 );
 assert.ok(
-  spreadsheetPanel.includes("Dense") && spreadsheetPanel.includes("Comfortable"),
-  "spreadsheet panel must expose dense/comfortable density controls"
+  spreadsheetPanel.includes('const rowPaddingClass = "px-2 py-1.5";'),
+  "spreadsheet panel must enforce dense row spacing"
 );
 assert.ok(
-  spreadsheetPanel.includes("DENSITY_STORAGE_KEY"),
-  "spreadsheet panel must persist density preference"
+  !spreadsheetPanel.includes("SegmentedControl"),
+  "spreadsheet panel must not expose density toggle controls"
 );
 assert.ok(
   spreadsheetPanel.includes("Quick view"),

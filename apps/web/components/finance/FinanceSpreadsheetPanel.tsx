@@ -6,7 +6,6 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
-import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SectionHeader } from "@/components/ui/section-header";
 import { StatusChip } from "@/components/ui/status-chip";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -44,9 +43,6 @@ type ReceivablesResponse = {
   items?: FinanceRow[];
   rows?: FinanceRow[];
 };
-
-type FinanceDensity = "dense" | "comfortable";
-const DENSITY_STORAGE_KEY = "haulio:finance:spreadsheet:density";
 
 function formatCurrency(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
@@ -91,7 +87,6 @@ export function FinanceSpreadsheetPanel() {
   const [rowsPerPage, setRowsPerPage] = useState(25);
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [density, setDensity] = useState<FinanceDensity>("dense");
 
   const loadRows = useCallback(async () => {
     if (!canAccess) return;
@@ -123,19 +118,6 @@ export function FinanceSpreadsheetPanel() {
   }, [canAccess, readiness, search, stage]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const storedDensity = window.localStorage.getItem(DENSITY_STORAGE_KEY);
-    if (storedDensity === "dense" || storedDensity === "comfortable") {
-      setDensity(storedDensity);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(DENSITY_STORAGE_KEY, density);
-  }, [density]);
-
-  useEffect(() => {
     loadRows();
   }, [loadRows]);
 
@@ -144,9 +126,9 @@ export function FinanceSpreadsheetPanel() {
   const pageStart = (normalizedPage - 1) * rowsPerPage;
   const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + rowsPerPage), [pageStart, rows, rowsPerPage]);
   const selected = useMemo(() => rows.find((row) => row.loadId === selectedId) ?? null, [rows, selectedId]);
-  const rowPaddingClass = density === "dense" ? "px-2 py-1.5" : "px-2.5 py-2.5";
-  const tableTextClass = density === "dense" ? "text-xs" : "text-sm";
-  const cardPaddingClass = density === "dense" ? "!p-3 sm:!p-4" : "!p-4 sm:!p-5";
+  const rowPaddingClass = "px-2 py-1.5";
+  const tableTextClass = "text-xs";
+  const cardPaddingClass = "!p-3 sm:!p-4";
 
   if (!canAccess || restrictedBy403) {
     return (
@@ -169,19 +151,9 @@ export function FinanceSpreadsheetPanel() {
           title="Spreadsheet filters"
           subtitle="Filters stay close to finance table controls for fast triage"
           action={
-            <div className="flex items-center gap-2">
-              <SegmentedControl
-                value={density}
-                options={[
-                  { label: "Dense", value: "dense" },
-                  { label: "Comfortable", value: "comfortable" },
-                ]}
-                onChange={(value) => setDensity(value === "comfortable" ? "comfortable" : "dense")}
-              />
-              <Button variant="secondary" size="sm" onClick={loadRows} disabled={loading}>
-                {loading ? "Refreshing..." : "Refresh"}
-              </Button>
-            </div>
+            <Button variant="secondary" size="sm" onClick={loadRows} disabled={loading}>
+              {loading ? "Refreshing..." : "Refresh"}
+            </Button>
           }
         />
         <div className="grid gap-2 md:grid-cols-4">

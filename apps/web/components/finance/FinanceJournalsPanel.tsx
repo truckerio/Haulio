@@ -282,9 +282,9 @@ export function FinanceJournalsPanel() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {error ? <ErrorBanner message={error} /> : null}
-      <Card className="space-y-3">
+      <Card className="space-y-2 !p-3 sm:!p-4">
         <SectionHeader
           title="Journal filters"
           subtitle="Read-only immutable finance entries"
@@ -299,7 +299,7 @@ export function FinanceJournalsPanel() {
             </div>
           }
         />
-        <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-2 md:grid-cols-4">
           <div>
             <div className="mb-1 text-xs text-[color:var(--color-text-muted)]">Entity type</div>
             <Select value={entityType} onChange={(e) => setEntityType(e.target.value)}>
@@ -327,13 +327,13 @@ export function FinanceJournalsPanel() {
         </div>
       </Card>
 
-      <Card className="space-y-3">
+      <Card className="space-y-2 !p-3 sm:!p-4">
         <SectionHeader title="Journal stream" subtitle="Newest first with line-level details" />
         {loading ? <EmptyState title="Loading journals..." /> : null}
         {!loading && entries.length === 0 ? <EmptyState title="No journal entries found." /> : null}
         {!loading && entries.length > 0 ? (
           <div className="grid gap-3 xl:grid-cols-[1.2fr_0.8fr]">
-            <div className="space-y-3">
+            <div className="space-y-2">
               {entries.map((entry) => {
                 const active = entry.id === selectedEntryId;
                 const anomalyCount = buildEntryAnomalies(entry, entries).length;
@@ -343,7 +343,7 @@ export function FinanceJournalsPanel() {
                     type="button"
                     aria-pressed={active}
                     onClick={() => setSelectedEntryId(entry.id)}
-                    className={`w-full rounded-[var(--radius-card)] border p-3 text-left transition ${
+                    className={`w-full rounded-[var(--radius-card)] border p-2.5 text-left transition ${
                       active
                         ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)]/20"
                         : "border-[color:var(--color-divider)]"
@@ -356,12 +356,12 @@ export function FinanceJournalsPanel() {
                       </div>
                       <span className="text-xs text-[color:var(--color-text-muted)]">{formatDateTime(entry.createdAt)}</span>
                     </div>
-                    <div className="mt-2 grid gap-2 text-xs text-[color:var(--color-text-muted)] md:grid-cols-3">
+                    <div className="mt-1.5 grid gap-2 text-xs text-[color:var(--color-text-muted)] md:grid-cols-3">
                       <div>Idempotency: <span className="font-mono">{entry.idempotencyKey}</span></div>
                       <div>Total debit: <span className="font-semibold text-ink">{formatMoney(entry.totalDebitCents)}</span></div>
                       <div>Total credit: <span className="font-semibold text-ink">{formatMoney(entry.totalCreditCents)}</span></div>
                     </div>
-                    <div className="mt-2 flex items-center gap-2">
+                    <div className="mt-1.5 flex items-center gap-2">
                       <StatusChip tone={anomalyCount > 0 ? "warning" : "success"} label={anomalyCount > 0 ? `${anomalyCount} flag(s)` : "healthy"} />
                       <span className="text-xs text-[color:var(--color-text-muted)]">{(entry.lines ?? []).length} lines</span>
                     </div>
@@ -370,7 +370,7 @@ export function FinanceJournalsPanel() {
               })}
             </div>
 
-            <Card className="space-y-3">
+            <Card className="space-y-2 !p-3 sm:!p-4">
               <SectionHeader title="Journal drilldown" subtitle="Line-level metadata and anomaly explanations" />
               {!selectedEntry ? <EmptyState title="Select a journal entry." /> : null}
               {selectedEntry ? (

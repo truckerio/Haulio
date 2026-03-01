@@ -623,7 +623,7 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
   }
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)] 2xl:grid-cols-[220px_minmax(0,1fr)_360px]">
+    <div className="grid gap-3 xl:grid-cols-[210px_minmax(0,1fr)] 2xl:grid-cols-[210px_minmax(0,1fr)_340px]">
       {error ? (
         <div className="xl:col-span-2 2xl:col-span-3">
           <ErrorBanner message={error} />
@@ -640,7 +640,7 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
         </div>
       ) : null}
 
-      <Card className="space-y-3">
+      <Card className="space-y-3 !p-3 sm:!p-4">
         <SectionHeader title="Saved views" subtitle="Server-side filters" />
         {focusReadiness ? (
           <div className="rounded-[var(--radius-control)] border border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] px-3 py-2 text-xs text-[color:var(--color-warning)]">
@@ -701,7 +701,7 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
         </div>
       </Card>
 
-      <Card className="space-y-3 overflow-hidden">
+      <Card className="space-y-3 overflow-hidden !p-3 sm:!p-4">
         <SectionHeader title="Receivables board" subtitle="Canonical billing workspace" />
         <div className="flex flex-wrap items-center gap-2 px-1">
           <Button size="sm" variant="secondary" onClick={toggleSelectAllPage}>
@@ -793,11 +793,11 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
             </div>
           </div>
         ) : null}
-        <div className="grid gap-3 md:hidden">
+        <div className="grid gap-2 md:hidden">
           {rows.map((row) => (
             <div
               key={row.loadId}
-              className={`cursor-pointer rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-3 ${
+              className={`cursor-pointer rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2.5 ${
                 selectedId === row.loadId ? "bg-[color:var(--color-bg-muted)]" : ""
               }`}
               onClick={() => setSelectedId(row.loadId)}
@@ -848,10 +848,10 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
           ))}
         </div>
         <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[820px] text-sm">
+          <table className="w-full min-w-[820px] text-xs">
             <thead>
               <tr className="border-b border-[color:var(--color-divider)] text-left text-xs uppercase tracking-[0.16em] text-[color:var(--color-text-muted)]">
-                <th className="px-3 py-2">
+                <th className="px-2 py-1.5">
                   <input
                     type="checkbox"
                     checked={rows.length > 0 && rows.every((row) => selectedIds.includes(row.loadId))}
@@ -861,15 +861,15 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
                     }}
                   />
                 </th>
-                <th className="px-3 py-2">Load</th>
-                <th className="px-3 py-2">Customer</th>
-                <th className="px-3 py-2">Amount</th>
-                <th className="px-3 py-2">Stage</th>
-                <th className="px-3 py-2">Readiness</th>
-                <th className="px-3 py-2">Invoice</th>
-                <th className="px-3 py-2">Aging</th>
-                <th className="px-3 py-2">QBO</th>
-                <th className="px-3 py-2">Action</th>
+                <th className="px-2 py-1.5">Load</th>
+                <th className="px-2 py-1.5">Customer</th>
+                <th className="px-2 py-1.5">Amount</th>
+                <th className="px-2 py-1.5">Stage</th>
+                <th className="px-2 py-1.5">Readiness</th>
+                <th className="px-2 py-1.5">Invoice</th>
+                <th className="px-2 py-1.5">Aging</th>
+                <th className="px-2 py-1.5">QBO</th>
+                <th className="px-2 py-1.5">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -881,7 +881,7 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
                   }`}
                   onClick={() => setSelectedId(row.loadId)}
                 >
-                  <td className="px-3 py-3">
+                  <td className="px-2 py-2">
                     <input
                       type="checkbox"
                       checked={selectedIds.includes(row.loadId)}
@@ -892,23 +892,23 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
                       onClick={(event) => event.stopPropagation()}
                     />
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-2 py-2">
                     <div className="font-semibold text-ink">{row.loadNumber}</div>
                     <div className="text-xs text-[color:var(--color-text-muted)]">Delivered {formatDate(row.deliveredAt)}</div>
                   </td>
-                  <td className="px-3 py-3">{row.customer ?? "-"}</td>
-                  <td className="px-3 py-3">{formatCurrency(row.amountCents)}</td>
-                  <td className="px-3 py-3">
+                  <td className="px-2 py-2">{row.customer ?? "-"}</td>
+                  <td className="px-2 py-2">{formatCurrency(row.amountCents)}</td>
+                  <td className="px-2 py-2">
                     <StatusChip tone={stageTone(row.billingStage)} label={stageLabel(row.billingStage)} />
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-2 py-2">
                     {row.readinessSnapshot.isReady ? (
                       <StatusChip tone="success" label="Ready" />
                     ) : (
                       <StatusChip tone="warning" label={`${row.readinessSnapshot.blockers.length} blocker(s)`} />
                     )}
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-2 py-2">
                     {row.invoice.invoiceNumber ? (
                       <div>
                         <div>{row.invoice.invoiceNumber}</div>
@@ -918,11 +918,11 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
                       "-"
                     )}
                   </td>
-                  <td className="px-3 py-3">{row.collections.agingBucket === "unknown" ? "-" : row.collections.agingBucket}</td>
-                  <td className="px-3 py-3">
+                  <td className="px-2 py-2">{row.collections.agingBucket === "unknown" ? "-" : row.collections.agingBucket}</td>
+                  <td className="px-2 py-2">
                     <StatusChip tone={syncTone(row.integrations.quickbooks.syncStatus)} label={row.integrations.quickbooks.syncStatus} />
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-2 py-2">
                     <Button
                       size="sm"
                       variant="secondary"
@@ -942,7 +942,7 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
         </div>
         {!loadingRows && rows.length === 0 ? <EmptyState title="No receivables in this view." /> : null}
         {hasMore ? (
-          <div className="px-3 pb-3">
+          <div className="px-2 pb-2">
             <Button variant="secondary" onClick={() => fetchRows({ append: true, cursor: nextCursor })} disabled={loadingRows}>
               {loadingRows ? "Loading..." : "Load more"}
             </Button>
@@ -950,7 +950,7 @@ export function ReceivablesPanel({ focusReadiness = false }: { focusReadiness?: 
         ) : null}
       </Card>
 
-      <Card className="space-y-3 xl:col-span-2 2xl:col-span-1">
+      <Card className="space-y-3 !p-3 sm:!p-4 xl:col-span-2 2xl:col-span-1">
         <SectionHeader title="Details" subtitle={selected ? selected.loadNumber : "Select a receivable"} />
         {!selected ? <EmptyState title="Pick a row to inspect blockers and actions." /> : null}
         {selected ? (
