@@ -16,6 +16,10 @@ assert.ok(
   "payable paid handler must build ledger journal"
 );
 assert.ok(
+  payableBlock.includes("persistFinanceJournalEntry("),
+  "payable paid handler must persist journal entries"
+);
+assert.ok(
   payableBlock.includes("resolveIdempotencyKey(req, `payable-run:${run.id}:paid`)"),
   "payable paid handler must derive idempotency key"
 );
@@ -33,6 +37,10 @@ assert.ok(
 assert.ok(
   settlementBlock.includes("buildSettlementPaidJournal({"),
   "settlement paid route must build ledger journal"
+);
+assert.ok(
+  settlementBlock.includes("persistFinanceJournalEntry("),
+  "settlement paid route must persist journal entries"
 );
 assert.ok(
   settlementBlock.includes("resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`)"),

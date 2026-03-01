@@ -20,3 +20,5 @@
   - Added pure transition tests under `apps/api/src/lib/settlement-state.test.ts`.
   - Added mock banking adapter payout receipts with idempotency key support on paid transitions.
   - Added immutable double-entry journal builders for payout transitions (`finance-ledger`).
+  - Added persistent finance journal store and route wiring for paid mutations (`finance-ledger-store`).
+  - Added finance journal schema migration for immutable entry/line persistence.

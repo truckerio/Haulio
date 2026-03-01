@@ -574,6 +574,29 @@ enum PayableHoldOwner {
   SYSTEM
 }
 
+enum FinanceJournalEntityType {
+  PAYABLE_RUN
+  SETTLEMENT
+}
+
+enum FinanceJournalEventType {
+  PAYABLE_RUN_PAID
+  SETTLEMENT_PAID
+}
+
+enum FinanceJournalLineSide {
+  DEBIT
+  CREDIT
+}
+
+enum FinanceLedgerAccount {
+  CASH_CLEARING
+  DRIVER_PAYABLE
+  SETTLEMENT_EXPENSE
+  AR_CLEARING
+  REVENUE
+}
+
 enum LoadNoteVisibility {
   NORMAL
   LOCKED
@@ -688,6 +711,8 @@ model Organization {
   financeOutboxEvents              FinanceOutboxEvent[]
   qboSyncJobs                      QboSyncJob[]
   invoicePayments                  InvoicePayment[]
+  financeJournalEntries            FinanceJournalEntry[]
+  financeJournalLines              FinanceJournalLine[]
   loadNotes                        Note[]
   dispatchViews                    DispatchView[]
   dispatchExceptions               DispatchException[]
@@ -823,6 +848,7 @@ model User {
   billingSubmissions              BillingSubmission[]        @relation("BillingSubmissionCreatedBy")
   invoicePaymentsCreated          InvoicePayment[]           @relation("InvoicePaymentCreatedBy")
   payableRunsCreated              PayableRun[]               @relation("PayableRunCreatedBy")
+  financeJournalEntriesCreated    FinanceJournalEntry[]      @relation("FinanceJournalCreatedBy")
   settlementPolicyVersionsCreated SettlementPolicyVersion[]  @relation("SettlementPolicyVersionCreatedBy")
   loadNotesCreated                Note[]                     @relation("LoadNoteCreatedBy")
   loadNotesUpdated                Note[]                     @relation("LoadNoteUpdatedBy")
@@ -2118,6 +2144,49 @@ model PayableLineItem {
   @@index([orgId, runId])
   @@index([runId, partyType, partyId])
   @@index([orgId, partyType, partyId])
+}
+
+model FinanceJournalEntry {
+  id                      String                   @id @default(cuid())
+  orgId                   String
+  entityType              FinanceJournalEntityType
+  entityId                String
+  eventType               FinanceJournalEventType
+  idempotencyKey          String
+  adapter                 String?
+  externalPayoutId        String?
+  externalPayoutReference String?
+  totalDebitCents         Int
+  totalCreditCents        Int
+  currency                String                   @default("USD")
+  metadata                Json?
+  createdById             String?
+  createdAt               DateTime                 @default(now())
+
+  org       Organization         @relation(fields: [orgId], references: [id])
+  createdBy User?                @relation("FinanceJournalCreatedBy", fields: [createdById], references: [id])
+  lines     FinanceJournalLine[]
+
+  @@unique([orgId, idempotencyKey])
+  @@index([orgId, eventType, createdAt])
+  @@index([orgId, entityType, entityId, createdAt])
+}
+
+model FinanceJournalLine {
+  id          String                 @id @default(cuid())
+  entryId     String
+  orgId       String
+  account     FinanceLedgerAccount
+  side        FinanceJournalLineSide
+  amountCents Int
+  memo        String?
+  createdAt   DateTime               @default(now())
+
+  entry FinanceJournalEntry @relation(fields: [entryId], references: [id])
+  org   Organization        @relation(fields: [orgId], references: [id])
+
+  @@index([entryId])
+  @@index([orgId, account, createdAt])
 }
 
 model SettlementPolicyVersion {

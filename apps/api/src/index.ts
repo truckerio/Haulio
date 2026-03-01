@@ -247,6 +247,7 @@ import {
 import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
 import { createPayoutReceipt } from "./lib/finance-banking-adapter";
 import { buildPayableRunPaidJournal, buildSettlementPaidJournal, journalToJson } from "./lib/finance-ledger";
+import { persistFinanceJournalEntry } from "./lib/finance-ledger-store";
 import {
   canFinalizeSettlement,
   canMarkSettlementPaid,
@@ -15826,6 +15827,12 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
     idempotencyKey: payout.idempotencyKey,
   });
   if (run.status === PayableRunStatus.PAID) {
+    await persistFinanceJournalEntry(prisma as any, {
+      journal,
+      createdById: req.user!.id,
+      payout,
+      metadata: { source: "payable-run-paid-idempotent" },
+    });
     res.json({ run, idempotent: true, payout, journal });
     return;
   }
@@ -15833,12 +15840,21 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
     res.status(400).json({ error: "Run must be finalized before marking paid" });
     return;
   }
-  const updated = await prisma.payableRun.update({
-    where: { id: run.id },
-    data: {
-      status: PayableRunStatus.PAID,
-      paidAt: run.paidAt ?? new Date(),
-    },
+  const updated = await prisma.$transaction(async (tx) => {
+    const nextRun = await tx.payableRun.update({
+      where: { id: run.id },
+      data: {
+        status: PayableRunStatus.PAID,
+        paidAt: run.paidAt ?? new Date(),
+      },
+    });
+    await persistFinanceJournalEntry(tx as any, {
+      journal,
+      createdById: req.user!.id,
+      payout,
+      metadata: { source: "payable-run-paid" },
+    });
+    return nextRun;
   });
   await logAudit({
     orgId: req.user!.orgId,
@@ -16253,6 +16269,12 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     idempotencyKey: payout.idempotencyKey,
   });
   if (isMarkSettlementPaidIdempotent(settlement.status)) {
+    await persistFinanceJournalEntry(prisma as any, {
+      journal,
+      createdById: req.user!.id,
+      payout,
+      metadata: { source: "settlement-paid-idempotent" },
+    });
     res.json({ settlement, idempotent: true, payout, journal });
     return;
   }
@@ -16265,9 +16287,18 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     res.status(400).json({ error: "Settlement has no items" });
     return;
   }
-  const updated = await prisma.settlement.update({
-    where: { id: settlement.id },
-    data: { status: SettlementStatus.PAID, paidAt: new Date() },
+  const updated = await prisma.$transaction(async (tx) => {
+    const nextSettlement = await tx.settlement.update({
+      where: { id: settlement.id },
+      data: { status: SettlementStatus.PAID, paidAt: new Date() },
+    });
+    await persistFinanceJournalEntry(tx as any, {
+      journal,
+      createdById: req.user!.id,
+      payout,
+      metadata: { source: "settlement-paid" },
+    });
+    return nextSettlement;
   });
   await createEvent({
     orgId: req.user!.orgId,

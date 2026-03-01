@@ -49,3 +49,5 @@ Delivered + POD approved → Ready to invoice → Invoice issued → Settlement 
   - Deterministic transition helpers added in `apps/api/src/lib/settlement-state.ts`.
   - Mock banking adapter receipts added for paid transitions (`FINANCE_BANKING_ADAPTER=mock`).
   - Immutable journal entry builders added for paid transitions (`apps/api/src/lib/finance-ledger.ts`).
+  - Journal persistence store added and wired to paid routes (`apps/api/src/lib/finance-ledger-store.ts`).
+  - Finance journal tables + enums migration added (`packages/db/prisma/migrations/20260409100000_finance_ledger_journal_tables`).
