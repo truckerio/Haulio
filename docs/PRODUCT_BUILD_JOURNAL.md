@@ -41,6 +41,7 @@
 - Phase 6 start (observability-first, read-only):
   - Added `GET /finance/journals` with capability guard and org scoping.
   - Added `/finance` Journals tab and read-only journal stream panel with filters.
+  - Added journal drilldown drawer with line-level details, metadata preview, and anomaly explanations.
   - Added `/finance` summary rail with wallet snapshot, latest payouts, and journal health flags.
   - Added immutable journal history contract test (`finance-journal-contract.test.ts`).
   - Added web finance journals contract test (`app/finance/finance-journals-contract.test.ts`).

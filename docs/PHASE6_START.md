@@ -16,6 +16,8 @@ Start Phase 6 with read-only finance observability surfaces, without changing di
   - Added `Journals` tab on `/finance`
   - New read-only `FinanceJournalsPanel` wired to `/finance/journals`
   - Capability-gated and fail-closed on 403 with `Restricted` label
+  - Added journal drilldown drawer for selected entries
+  - Drilldown includes line-level details, metadata preview, and anomaly explanations
 - Finance summary rail:
   - Added read-only `FinanceSummaryRail` on `/finance` across tabs
   - Shows wallet snapshot (`/finance/wallets`)

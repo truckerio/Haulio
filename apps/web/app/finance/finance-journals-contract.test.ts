@@ -29,5 +29,25 @@ assert.ok(
   journalsPanel.includes('label="Restricted"'),
   "journals panel must render restricted label when access is blocked"
 );
+assert.ok(
+  journalsPanel.includes("selectedEntryId"),
+  "journals panel must keep selected entry state for drilldown"
+);
+assert.ok(
+  journalsPanel.includes("Journal drilldown"),
+  "journals panel must include drilldown drawer section"
+);
+assert.ok(
+  journalsPanel.includes("Anomaly checks"),
+  "journals panel drilldown must include anomaly explanations"
+);
+assert.ok(
+  journalsPanel.includes("Metadata preview"),
+  "journals panel drilldown must include metadata preview"
+);
+assert.ok(
+  journalsPanel.includes("UNBALANCED_ENTRY") && journalsPanel.includes("DUPLICATE_IDEMPOTENCY_KEY"),
+  "journals panel drilldown must include deterministic anomaly codes"
+);
 
 console.log("finance journals contract tests passed");
