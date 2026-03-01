@@ -141,9 +141,9 @@ export function FinanceSpreadsheetPanel() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {error ? <ErrorBanner message={error} /> : null}
-      <Card className="space-y-3">
+      <Card className="space-y-2 !p-3 sm:!p-4">
         <SectionHeader
           title="Spreadsheet filters"
           subtitle="Filters stay close to finance table controls for fast triage"
@@ -153,7 +153,7 @@ export function FinanceSpreadsheetPanel() {
             </Button>
           }
         />
-        <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-2 md:grid-cols-4">
           <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search load/customer" />
           <Select value={stage} onChange={(e) => setStage(e.target.value)}>
             <option value="">All stages</option>
@@ -177,8 +177,8 @@ export function FinanceSpreadsheetPanel() {
         </div>
       </Card>
 
-      <div className="grid gap-3 xl:grid-cols-[1.35fr_0.65fr]">
-        <Card className="space-y-3">
+      <div className="grid gap-3 2xl:grid-cols-[1.4fr_0.6fr]">
+        <Card className="space-y-2 !p-3 sm:!p-4">
           <SectionHeader
             title="Finance spreadsheet"
             subtitle={`Showing ${visibleRows.length} of ${rows.length} rows · page ${normalizedPage}/${totalPages}`}
@@ -187,16 +187,16 @@ export function FinanceSpreadsheetPanel() {
           {!loading && rows.length === 0 ? <EmptyState title="No finance rows found." /> : null}
           {!loading && rows.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="min-w-[1180px] border-separate border-spacing-0 text-xs">
+              <table className="min-w-[900px] border-separate border-spacing-0 text-xs">
                 <thead className="sticky top-0 z-10 bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
                   <tr>
                     <th className="sticky left-0 z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-2 text-left">Load #</th>
                     <th className="sticky left-[150px] z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-2 text-left">Stage</th>
                     <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">Customer</th>
                     <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-right">Amount</th>
-                    <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">Delivered</th>
+                    <th className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 text-left lg:table-cell">Delivered</th>
                     <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">Blockers</th>
-                    <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">QBO</th>
+                    <th className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 text-left lg:table-cell">QBO</th>
                     <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">Next action</th>
                   </tr>
                 </thead>
@@ -218,7 +218,7 @@ export function FinanceSpreadsheetPanel() {
                         </td>
                         <td className="border-b border-[color:var(--color-divider)] px-2 py-2">{row.customer ?? "-"}</td>
                         <td className="border-b border-[color:var(--color-divider)] px-2 py-2 text-right font-semibold text-ink">{formatCurrency(row.amountCents)}</td>
-                        <td className="border-b border-[color:var(--color-divider)] px-2 py-2">{formatDateTime(row.deliveredAt)}</td>
+                        <td className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 lg:table-cell">{formatDateTime(row.deliveredAt)}</td>
                         <td className="border-b border-[color:var(--color-divider)] px-2 py-2">
                           {blockerCount > 0 ? (
                             <StatusChip tone="warning" label={`${blockerCount} blocker(s)`} />
@@ -226,7 +226,7 @@ export function FinanceSpreadsheetPanel() {
                             <StatusChip tone="success" label="Ready" />
                           )}
                         </td>
-                        <td className="border-b border-[color:var(--color-divider)] px-2 py-2">{row.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</td>
+                        <td className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 lg:table-cell">{row.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</td>
                         <td className="border-b border-[color:var(--color-divider)] px-2 py-2">{actionLabel(row.actions?.primaryAction ?? "VIEW")}</td>
                       </tr>
                     );
@@ -252,7 +252,7 @@ export function FinanceSpreadsheetPanel() {
           ) : null}
         </Card>
 
-        <Card className="space-y-3">
+        <Card className="space-y-2 !p-3 sm:!p-4">
           <SectionHeader title="Quick view" subtitle={selected ? `${selected.loadNumber} · ${stageLabel(selected.billingStage)}` : "Select a row"} />
           {!selected ? <EmptyState title="Pick a finance row to inspect details." /> : null}
           {selected ? (

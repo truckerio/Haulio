@@ -14,8 +14,16 @@ assert.ok(
   "finance page must default to spreadsheet tab"
 );
 assert.ok(
+  financePage.includes("hideHeader"),
+  "finance page must hide the default shell header for compact custom header"
+);
+assert.ok(
   financePage.includes('{activeTab === "spreadsheet" ? <FinanceSpreadsheetPanel /> : null}'),
   "finance page must render spreadsheet panel for spreadsheet tab"
+);
+assert.ok(
+  financePage.includes('aria-label="Finance alerts"'),
+  "finance page must render bell alerts action in finance header card"
 );
 assert.ok(
   spreadsheetPanel.includes('apiFetch<ReceivablesResponse>(`/finance/receivables?${params.toString()}`)'),
@@ -44,6 +52,10 @@ assert.ok(
 assert.ok(
   spreadsheetPanel.includes("Quick view"),
   "spreadsheet panel must include row details inspector"
+);
+assert.ok(
+  spreadsheetPanel.includes("2xl:grid-cols"),
+  "spreadsheet panel should avoid multi-column overflow on common laptop widths"
 );
 
 console.log("finance spreadsheet contract tests passed");
