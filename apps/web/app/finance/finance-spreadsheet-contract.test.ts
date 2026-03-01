@@ -18,12 +18,20 @@ assert.ok(
   "finance page must hide the default shell header for compact custom header"
 );
 assert.ok(
+  financePage.includes("hideTopActivityTrigger"),
+  "finance page must hide top activity trigger when embedding it in header card"
+);
+assert.ok(
+  financePage.includes("useAppShellActivity"),
+  "finance page must consume app shell activity controls"
+);
+assert.ok(
   financePage.includes('{activeTab === "spreadsheet" ? <FinanceSpreadsheetPanel /> : null}'),
   "finance page must render spreadsheet panel for spreadsheet tab"
 );
 assert.ok(
-  financePage.includes('aria-label="Finance alerts"'),
-  "finance page must render bell alerts action in finance header card"
+  financePage.includes('aria-label="Open activity"'),
+  "finance page must render activity drawer trigger in finance header card"
 );
 assert.ok(
   spreadsheetPanel.includes('apiFetch<ReceivablesResponse>(`/finance/receivables?${params.toString()}`)'),

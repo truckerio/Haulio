@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -48,6 +48,13 @@ type ActivitySummary = {
   week: ActivityItem[];
 };
 
+type AppShellActivityControls = {
+  canUseActivity: boolean;
+  activityBadgeCount: number;
+  openActivityDrawer: () => void;
+};
+
+const AppShellActivityContext = createContext<AppShellActivityControls | null>(null);
 
 const searchGroups: Array<{ type: SearchResult["type"]; label: string }> = [
   { type: "load", label: "Loads" },
@@ -383,11 +390,13 @@ function AppShellInner({
   title,
   subtitle,
   hideHeader,
+  hideTopActivityTrigger,
   children,
 }: {
   title: string;
   subtitle?: string;
   hideHeader?: boolean;
+  hideTopActivityTrigger?: boolean;
   children: ReactNode;
 }) {
   const pathname = usePathname();
@@ -448,6 +457,14 @@ function AppShellInner({
   const activityNow = useMemo(() => (activitySummary?.now ?? []).slice(0, 7), [activitySummary?.now]);
   const activityWeek = useMemo(() => (activitySummary?.week ?? []).slice(0, 7), [activitySummary?.week]);
   const activityBadgeCount = activitySummary?.badgeCount ?? 0;
+  const activityControls = useMemo<AppShellActivityControls>(
+    () => ({
+      canUseActivity,
+      activityBadgeCount,
+      openActivityDrawer: () => setActivityDrawerOpen(true),
+    }),
+    [activityBadgeCount, canUseActivity]
+  );
 
   useEffect(() => {
     setNavOpen(false);
@@ -707,7 +724,7 @@ function AppShellInner({
           <div className="text-xs text-[color:var(--color-text-muted)]">{title}</div>
         </div>
         <div className="flex items-center gap-2">
-          {canUseActivity ? (
+          {canUseActivity && !hideTopActivityTrigger ? (
             <button
               type="button"
               aria-label="Open activity"
@@ -850,7 +867,7 @@ function AppShellInner({
           className="flex-1 min-h-0 min-w-0 overflow-y-auto lg:h-screen"
         >
           <div className="space-y-6 px-3 pb-8 pt-5 sm:px-4 sm:pb-10 sm:pt-6 lg:px-10 lg:pb-16 lg:pt-8">
-            {canUseActivity ? (
+          {canUseActivity && !hideTopActivityTrigger ? (
               <div className="hidden lg:flex lg:justify-end">
                 <button
                   type="button"
@@ -898,7 +915,9 @@ function AppShellInner({
                 {subtitle ? <p className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</p> : null}
               </div>
             )}
-            {children}
+            <AppShellActivityContext.Provider value={activityControls}>
+              {children}
+            </AppShellActivityContext.Provider>
           </div>
         </main>
       </div>
@@ -1015,12 +1034,22 @@ export function AppShell({
   title,
   subtitle,
   hideHeader,
+  hideTopActivityTrigger,
   children,
 }: {
   title: string;
   subtitle?: string;
   hideHeader?: boolean;
+  hideTopActivityTrigger?: boolean;
   children: ReactNode;
 }) {
-  return <AppShellInner title={title} subtitle={subtitle} hideHeader={hideHeader}>{children}</AppShellInner>;
+  return (
+    <AppShellInner title={title} subtitle={subtitle} hideHeader={hideHeader} hideTopActivityTrigger={hideTopActivityTrigger}>
+      {children}
+    </AppShellInner>
+  );
+}
+
+export function useAppShellActivity() {
+  return useContext(AppShellActivityContext);
 }
