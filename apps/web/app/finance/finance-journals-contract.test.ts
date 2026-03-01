@@ -49,5 +49,17 @@ assert.ok(
   journalsPanel.includes("UNBALANCED_ENTRY") && journalsPanel.includes("DUPLICATE_IDEMPOTENCY_KEY"),
   "journals panel drilldown must include deterministic anomaly codes"
 );
+assert.ok(
+  journalsPanel.includes("Export CSV"),
+  "journals panel must expose csv export action"
+);
+assert.ok(
+  journalsPanel.includes("new Blob("),
+  "journals panel must generate CSV via blob export"
+);
+assert.ok(
+  journalsPanel.includes("finance_journals"),
+  "journals panel export filename should be finance_journals scoped"
+);
 
 console.log("finance journals contract tests passed");

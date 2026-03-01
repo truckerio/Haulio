@@ -63,6 +63,11 @@ function formatMoney(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
 }
 
+function csvEscape(value: string) {
+  if (!/[",\n]/.test(value)) return value;
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
 function entryTone(eventType: JournalEntry["eventType"]) {
   if (eventType === "SETTLEMENT_PAID") return "info" as const;
   return "success" as const;
@@ -133,6 +138,7 @@ export function FinanceJournalsPanel() {
   const [entityId, setEntityId] = useState("");
   const [limit, setLimit] = useState("50");
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
@@ -187,6 +193,81 @@ export function FinanceJournalsPanel() {
     [entries, selectedEntry]
   );
 
+  const exportCsv = useCallback(() => {
+    if (!entries.length) {
+      setError("No journal entries available for export.");
+      return;
+    }
+    setExporting(true);
+    try {
+      const header = [
+        "entryId",
+        "createdAt",
+        "entityType",
+        "entityId",
+        "eventType",
+        "idempotencyKey",
+        "adapter",
+        "externalPayoutId",
+        "totalDebitCents",
+        "totalCreditCents",
+        "anomalyCodes",
+        "lineAccount",
+        "lineSide",
+        "lineAmountCents",
+        "lineMemo",
+      ];
+      const rows: string[] = [header.join(",")];
+
+      for (const entry of entries) {
+        const anomalyCodes = buildEntryAnomalies(entry, entries)
+          .map((item) => item.code)
+          .join("|");
+        const lines = entry.lines && entry.lines.length > 0 ? entry.lines : [{ account: "", side: "DEBIT" as const, amountCents: 0, memo: null, createdAt: entry.createdAt }];
+        for (const line of lines) {
+          const columns = [
+            entry.id,
+            entry.createdAt,
+            entry.entityType,
+            entry.entityId,
+            entry.eventType,
+            entry.idempotencyKey,
+            entry.adapter ?? "",
+            entry.externalPayoutId ?? "",
+            String(entry.totalDebitCents ?? 0),
+            String(entry.totalCreditCents ?? 0),
+            anomalyCodes,
+            line.account ?? "",
+            line.side ?? "",
+            String(line.amountCents ?? 0),
+            line.memo ?? "",
+          ];
+          rows.push(columns.map((value) => csvEscape(String(value))).join(","));
+        }
+      }
+
+      const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const suffix = new Date().toISOString().replaceAll(":", "-");
+      const parts = [
+        "finance_journals",
+        entityType || "all-entities",
+        eventType || "all-events",
+        entityId.trim() || "all-ids",
+        suffix,
+      ];
+      link.href = url;
+      link.download = `${parts.join("_")}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  }, [entries, entityId, entityType, eventType]);
+
   if (!canAccess || restrictedBy403) {
     return (
       <Card className="space-y-3">
@@ -208,9 +289,14 @@ export function FinanceJournalsPanel() {
           title="Journal filters"
           subtitle="Read-only immutable finance entries"
           action={
-            <Button variant="secondary" size="sm" onClick={loadEntries} disabled={loading}>
-              {loading ? "Refreshing..." : "Refresh"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" size="sm" onClick={loadEntries} disabled={loading}>
+                {loading ? "Refreshing..." : "Refresh"}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={exportCsv} disabled={loading || exporting || entries.length === 0}>
+                {exporting ? "Exporting..." : "Export CSV"}
+              </Button>
+            </div>
           }
         />
         <div className="grid gap-3 md:grid-cols-4">

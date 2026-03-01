@@ -18,6 +18,7 @@ Start Phase 6 with read-only finance observability surfaces, without changing di
   - Capability-gated and fail-closed on 403 with `Restricted` label
   - Added journal drilldown drawer for selected entries
   - Drilldown includes line-level details, metadata preview, and anomaly explanations
+  - Added `Export CSV` for current filtered journal stream
 - Finance summary rail:
   - Added read-only `FinanceSummaryRail` on `/finance` across tabs
   - Shows wallet snapshot (`/finance/wallets`)
@@ -31,4 +32,5 @@ pnpm --filter @truckerio/api run test:finance
 pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit
 pnpm --filter @truckerio/web run test:finance
 pnpm --filter @truckerio/web run typecheck
+pnpm ci:phase6
 ```

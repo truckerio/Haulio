@@ -42,8 +42,10 @@
   - Added `GET /finance/journals` with capability guard and org scoping.
   - Added `/finance` Journals tab and read-only journal stream panel with filters.
   - Added journal drilldown drawer with line-level details, metadata preview, and anomaly explanations.
+  - Added CSV export for filtered journal stream.
   - Added `/finance` summary rail with wallet snapshot, latest payouts, and journal health flags.
   - Added immutable journal history contract test (`finance-journal-contract.test.ts`).
   - Added web finance journals contract test (`app/finance/finance-journals-contract.test.ts`).
   - Added web finance summary rail contract test (`app/finance/finance-summary-rail-contract.test.ts`).
+  - Added phase gate command `pnpm ci:phase6` and `docs/PHASE6_PASS.md`.
   - Added `docs/PHASE6_START.md`.

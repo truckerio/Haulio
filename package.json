@@ -57,6 +57,7 @@
     "ci:kernel:phase3": "pnpm ci:kernel:pilot && pnpm demo:smoke:phase3",
     "ci:phase4": "pnpm demo:smoke:phase4",
     "ci:phase5": "pnpm --filter @truckerio/api run test:finance && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm demo:smoke:phase5",
+    "ci:phase6": "pnpm --filter @truckerio/api run test:finance && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm --filter @truckerio/web run test:finance && pnpm --filter @truckerio/web run typecheck",
     "ci:kernel:phasee": "pnpm ci:kernel:phase3 && pnpm demo:smoke:roles && pnpm demo:smoke:enforce"
   }
 }
