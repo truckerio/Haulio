@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SectionHeader } from "@/components/ui/section-header";
 import { StatusChip } from "@/components/ui/status-chip";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -43,6 +44,9 @@ type ReceivablesResponse = {
   items?: FinanceRow[];
   rows?: FinanceRow[];
 };
+
+type FinanceDensity = "dense" | "comfortable";
+const DENSITY_STORAGE_KEY = "haulio:finance:spreadsheet:density";
 
 function formatCurrency(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
@@ -87,6 +91,7 @@ export function FinanceSpreadsheetPanel() {
   const [rowsPerPage, setRowsPerPage] = useState(25);
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [density, setDensity] = useState<FinanceDensity>("dense");
 
   const loadRows = useCallback(async () => {
     if (!canAccess) return;
@@ -118,6 +123,19 @@ export function FinanceSpreadsheetPanel() {
   }, [canAccess, readiness, search, stage]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedDensity = window.localStorage.getItem(DENSITY_STORAGE_KEY);
+    if (storedDensity === "dense" || storedDensity === "comfortable") {
+      setDensity(storedDensity);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(DENSITY_STORAGE_KEY, density);
+  }, [density]);
+
+  useEffect(() => {
     loadRows();
   }, [loadRows]);
 
@@ -126,6 +144,9 @@ export function FinanceSpreadsheetPanel() {
   const pageStart = (normalizedPage - 1) * rowsPerPage;
   const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + rowsPerPage), [pageStart, rows, rowsPerPage]);
   const selected = useMemo(() => rows.find((row) => row.loadId === selectedId) ?? null, [rows, selectedId]);
+  const rowPaddingClass = density === "dense" ? "px-2 py-1.5" : "px-2.5 py-2.5";
+  const tableTextClass = density === "dense" ? "text-xs" : "text-sm";
+  const cardPaddingClass = density === "dense" ? "!p-3 sm:!p-4" : "!p-4 sm:!p-5";
 
   if (!canAccess || restrictedBy403) {
     return (
@@ -143,14 +164,24 @@ export function FinanceSpreadsheetPanel() {
   return (
     <div className="space-y-3">
       {error ? <ErrorBanner message={error} /> : null}
-      <Card className="space-y-2 !p-3 sm:!p-4">
+      <Card className={`space-y-2 ${cardPaddingClass}`}>
         <SectionHeader
           title="Spreadsheet filters"
           subtitle="Filters stay close to finance table controls for fast triage"
           action={
-            <Button variant="secondary" size="sm" onClick={loadRows} disabled={loading}>
-              {loading ? "Refreshing..." : "Refresh"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <SegmentedControl
+                value={density}
+                options={[
+                  { label: "Dense", value: "dense" },
+                  { label: "Comfortable", value: "comfortable" },
+                ]}
+                onChange={(value) => setDensity(value === "comfortable" ? "comfortable" : "dense")}
+              />
+              <Button variant="secondary" size="sm" onClick={loadRows} disabled={loading}>
+                {loading ? "Refreshing..." : "Refresh"}
+              </Button>
+            </div>
           }
         />
         <div className="grid gap-2 md:grid-cols-4">
@@ -178,7 +209,7 @@ export function FinanceSpreadsheetPanel() {
       </Card>
 
       <div className="grid gap-3 2xl:grid-cols-[1.4fr_0.6fr]">
-        <Card className="space-y-2 !p-3 sm:!p-4">
+        <Card className={`space-y-2 ${cardPaddingClass}`}>
           <SectionHeader
             title="Finance spreadsheet"
             subtitle={`Showing ${visibleRows.length} of ${rows.length} rows · page ${normalizedPage}/${totalPages}`}
@@ -187,17 +218,17 @@ export function FinanceSpreadsheetPanel() {
           {!loading && rows.length === 0 ? <EmptyState title="No finance rows found." /> : null}
           {!loading && rows.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="min-w-[900px] border-separate border-spacing-0 text-xs">
+              <table className={`min-w-[900px] border-separate border-spacing-0 ${tableTextClass}`}>
                 <thead className="sticky top-0 z-10 bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
                   <tr>
-                    <th className="sticky left-0 z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-2 text-left">Load #</th>
-                    <th className="sticky left-[150px] z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-2 text-left">Stage</th>
-                    <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">Customer</th>
-                    <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-right">Amount</th>
-                    <th className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 text-left lg:table-cell">Delivered</th>
-                    <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">Blockers</th>
-                    <th className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 text-left lg:table-cell">QBO</th>
-                    <th className="border-b border-[color:var(--color-divider)] px-2 py-2 text-left">Next action</th>
+                    <th className={`sticky left-0 z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] text-left ${rowPaddingClass}`}>Load #</th>
+                    <th className={`sticky left-[150px] z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] text-left ${rowPaddingClass}`}>Stage</th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Customer</th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-right ${rowPaddingClass}`}>Amount</th>
+                    <th className={`hidden border-b border-[color:var(--color-divider)] text-left lg:table-cell ${rowPaddingClass}`}>Delivered</th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Blockers</th>
+                    <th className={`hidden border-b border-[color:var(--color-divider)] text-left lg:table-cell ${rowPaddingClass}`}>QBO</th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Next action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -210,24 +241,24 @@ export function FinanceSpreadsheetPanel() {
                         onClick={() => setSelectedId(row.loadId)}
                         className={`cursor-pointer ${active ? "bg-[color:var(--color-accent-soft)]/20" : ""}`}
                       >
-                        <td className={`sticky left-0 z-10 border-b border-[color:var(--color-divider)] px-2 py-2 font-semibold text-ink ${active ? "bg-[color:var(--color-accent-soft)]/20" : "bg-white"}`}>
+                        <td className={`sticky left-0 z-10 border-b border-[color:var(--color-divider)] font-semibold text-ink ${rowPaddingClass} ${active ? "bg-[color:var(--color-accent-soft)]/20" : "bg-white"}`}>
                           {row.loadNumber}
                         </td>
-                        <td className={`sticky left-[150px] z-10 border-b border-[color:var(--color-divider)] px-2 py-2 ${active ? "bg-[color:var(--color-accent-soft)]/20" : "bg-white"}`}>
+                        <td className={`sticky left-[150px] z-10 border-b border-[color:var(--color-divider)] ${rowPaddingClass} ${active ? "bg-[color:var(--color-accent-soft)]/20" : "bg-white"}`}>
                           <StatusChip tone={stageTone(row.billingStage)} label={stageLabel(row.billingStage)} />
                         </td>
-                        <td className="border-b border-[color:var(--color-divider)] px-2 py-2">{row.customer ?? "-"}</td>
-                        <td className="border-b border-[color:var(--color-divider)] px-2 py-2 text-right font-semibold text-ink">{formatCurrency(row.amountCents)}</td>
-                        <td className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 lg:table-cell">{formatDateTime(row.deliveredAt)}</td>
-                        <td className="border-b border-[color:var(--color-divider)] px-2 py-2">
+                        <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>{row.customer ?? "-"}</td>
+                        <td className={`border-b border-[color:var(--color-divider)] text-right font-semibold text-ink ${rowPaddingClass}`}>{formatCurrency(row.amountCents)}</td>
+                        <td className={`hidden border-b border-[color:var(--color-divider)] lg:table-cell ${rowPaddingClass}`}>{formatDateTime(row.deliveredAt)}</td>
+                        <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>
                           {blockerCount > 0 ? (
                             <StatusChip tone="warning" label={`${blockerCount} blocker(s)`} />
                           ) : (
                             <StatusChip tone="success" label="Ready" />
                           )}
                         </td>
-                        <td className="hidden border-b border-[color:var(--color-divider)] px-2 py-2 lg:table-cell">{row.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</td>
-                        <td className="border-b border-[color:var(--color-divider)] px-2 py-2">{actionLabel(row.actions?.primaryAction ?? "VIEW")}</td>
+                        <td className={`hidden border-b border-[color:var(--color-divider)] lg:table-cell ${rowPaddingClass}`}>{row.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</td>
+                        <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>{actionLabel(row.actions?.primaryAction ?? "VIEW")}</td>
                       </tr>
                     );
                   })}
@@ -252,7 +283,7 @@ export function FinanceSpreadsheetPanel() {
           ) : null}
         </Card>
 
-        <Card className="space-y-2 !p-3 sm:!p-4">
+        <Card className={`space-y-2 ${cardPaddingClass}`}>
           <SectionHeader title="Quick view" subtitle={selected ? `${selected.loadNumber} · ${stageLabel(selected.billingStage)}` : "Select a row"} />
           {!selected ? <EmptyState title="Pick a finance row to inspect details." /> : null}
           {selected ? (

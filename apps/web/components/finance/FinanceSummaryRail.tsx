@@ -139,7 +139,7 @@ export function FinanceSummaryRail() {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {error ? <ErrorBanner message={error} /> : null}
       <SectionHeader
         title="Finance summary rail"
@@ -150,8 +150,8 @@ export function FinanceSummaryRail() {
           </Button>
         }
       />
-      <div className="grid gap-3 xl:grid-cols-3">
-        <Card className="space-y-2">
+      <div className="grid gap-2 xl:grid-cols-3">
+        <Card className="space-y-2 !p-3 sm:!p-4">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Wallet snapshot</div>
           {loading && !state.wallets ? <EmptyState title="Loading wallets..." /> : null}
           {!loading && !state.wallets ? <EmptyState title="No wallet data available." /> : null}
@@ -174,7 +174,7 @@ export function FinanceSummaryRail() {
           ) : null}
         </Card>
 
-        <Card className="space-y-2">
+        <Card className="space-y-2 !p-3 sm:!p-4">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Latest payouts</div>
           {loading && latestPayouts.length === 0 ? <EmptyState title="Loading payout events..." /> : null}
           {!loading && latestPayouts.length === 0 ? <EmptyState title="No payout events yet." /> : null}
@@ -196,7 +196,7 @@ export function FinanceSummaryRail() {
           ) : null}
         </Card>
 
-        <Card className="space-y-2">
+        <Card className="space-y-2 !p-3 sm:!p-4">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Journal health flags</div>
           <div className="flex items-center gap-2">
             <StatusChip tone={health.hasFlags ? "warning" : "success"} label={health.hasFlags ? "Needs review" : "Healthy"} />

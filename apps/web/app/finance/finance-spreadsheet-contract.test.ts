@@ -50,6 +50,14 @@ assert.ok(
   "spreadsheet panel must expose rows per page control"
 );
 assert.ok(
+  spreadsheetPanel.includes("Dense") && spreadsheetPanel.includes("Comfortable"),
+  "spreadsheet panel must expose dense/comfortable density controls"
+);
+assert.ok(
+  spreadsheetPanel.includes("DENSITY_STORAGE_KEY"),
+  "spreadsheet panel must persist density preference"
+);
+assert.ok(
   spreadsheetPanel.includes("Quick view"),
   "spreadsheet panel must include row details inspector"
 );
