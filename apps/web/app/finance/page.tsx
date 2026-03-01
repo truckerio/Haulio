@@ -4,6 +4,7 @@ import { Suspense, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { SegmentedControl } from "@/components/ui/segmented-control";
+import { FinanceSummaryRail } from "@/components/finance/FinanceSummaryRail";
 import { ReceivablesPanel } from "@/components/finance/ReceivablesPanel";
 import { PayablesPanel } from "@/components/finance/PayablesPanel";
 import { FinanceJournalsPanel } from "@/components/finance/FinanceJournalsPanel";
@@ -46,6 +47,7 @@ function FinanceContent() {
 
   return (
     <div className="space-y-6">
+      <FinanceSummaryRail />
       <SegmentedControl value={activeTab} options={TAB_OPTIONS} onChange={handleTabChange} />
       {activeTab === "receivables" ? <ReceivablesPanel focusReadiness={focusReadiness} /> : null}
       {activeTab === "payables" ? <PayablesPanel /> : null}
