@@ -275,7 +275,7 @@ async function main() {
     throw new Error(`expected 4 wallet snapshots (2 accounts x 2 events), found ${snapshots.length}`);
   }
 
-  const walletAccounts = ["DRIVER_PAYABLE", "CASH_CLEARING"];
+  const walletAccounts = ["DRIVER_PAYABLE", "CASH_CLEARING"] as const;
   const balances =
     typeof prismaAny.financeWalletBalance?.findMany === "function"
       ? await prismaAny.financeWalletBalance.findMany({
@@ -289,7 +289,10 @@ async function main() {
             SELECT account, "debitCents", "creditCents", "netCents"
             FROM "FinanceWalletBalance"
             WHERE "orgId" = ${org.id}
-              AND account IN (${Prisma.join(walletAccounts)})
+              AND account IN (
+                ${walletAccounts[0]}::"FinanceLedgerAccount",
+                ${walletAccounts[1]}::"FinanceLedgerAccount"
+              )
           `
         );
   if (balances.length !== 2) {
