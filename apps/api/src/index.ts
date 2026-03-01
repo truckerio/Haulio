@@ -248,6 +248,7 @@ import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
 import { createPayoutReceipt } from "./lib/finance-banking-adapter";
 import { buildPayableRunPaidJournal, buildSettlementPaidJournal, journalToJson } from "./lib/finance-ledger";
 import { persistFinanceJournalEntry } from "./lib/finance-ledger-store";
+import { aggregateFinanceWalletBalances } from "./lib/finance-wallet";
 import {
   canFinalizeSettlement,
   canMarkSettlementPaid,
@@ -13292,6 +13293,61 @@ app.post("/finance/qbo/retry-failed", requireAuth, requireCsrf, requireRole("ADM
     retried: failed.length,
     processed,
   });
+});
+
+app.get("/finance/wallets", requireAuth, requireCapability("viewSettlementPreview", "runSettlements"), async (req, res) => {
+  const asOfRaw = typeof req.query.asOf === "string" ? req.query.asOf.trim() : "";
+  const asOf = asOfRaw ? new Date(asOfRaw) : null;
+  if (asOfRaw && Number.isNaN(asOf?.getTime())) {
+    res.status(400).json({ error: "Invalid asOf datetime" });
+    return;
+  }
+
+  try {
+    const lines = await (prisma as any).financeJournalLine.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        ...(asOf ? { createdAt: { lte: asOf } } : {}),
+      },
+      select: {
+        account: true,
+        side: true,
+        amountCents: true,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const balances = aggregateFinanceWalletBalances(
+      (lines ?? []).map((line: any) => ({
+        account: String(line.account ?? ""),
+        side: line.side === "CREDIT" ? "CREDIT" : "DEBIT",
+        amountCents: Number(line.amountCents ?? 0),
+      }))
+    );
+
+    const totals = balances.reduce(
+      (acc, row) => {
+        acc.debitCents += row.debitCents;
+        acc.creditCents += row.creditCents;
+        acc.netCents += row.netCents;
+        return acc;
+      },
+      { debitCents: 0, creditCents: 0, netCents: 0 }
+    );
+
+    res.json({
+      orgId: req.user!.orgId,
+      asOf: asOf ? asOf.toISOString() : new Date().toISOString(),
+      totals,
+      balances,
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2021" || error.code === "P2022")) {
+      res.status(503).json({ error: "Finance wallet tables are not initialized" });
+      return;
+    }
+    throw error;
+  }
 });
 
 app.get("/internal/loads/:id/finance-snapshot", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {

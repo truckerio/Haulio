@@ -51,3 +51,4 @@ Delivered + POD approved → Ready to invoice → Invoice issued → Settlement 
   - Immutable journal entry builders added for paid transitions (`apps/api/src/lib/finance-ledger.ts`).
   - Journal persistence store added and wired to paid routes (`apps/api/src/lib/finance-ledger-store.ts`).
   - Finance journal tables + enums migration added (`packages/db/prisma/migrations/20260409100000_finance_ledger_journal_tables`).
+  - Read-only finance wallets endpoint added (`GET /finance/wallets`) derived from journal lines.

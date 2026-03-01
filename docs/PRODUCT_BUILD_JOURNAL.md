@@ -22,3 +22,4 @@
   - Added immutable double-entry journal builders for payout transitions (`finance-ledger`).
   - Added persistent finance journal store and route wiring for paid mutations (`finance-ledger-store`).
   - Added finance journal schema migration for immutable entry/line persistence.
+  - Added read-only finance wallet balances endpoint backed by journal lines (`GET /finance/wallets`).
