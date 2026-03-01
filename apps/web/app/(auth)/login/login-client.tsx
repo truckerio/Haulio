@@ -103,19 +103,6 @@ export default function LoginClient() {
     );
   }
 
-  if (statusError) {
-    return (
-      <div className="min-h-screen px-6 py-12">
-        <div className="mx-auto max-w-5xl">
-          <Card className="space-y-2 p-6">
-            <div className="text-lg font-semibold">Setup check failed</div>
-            <div className="text-sm text-[color:var(--color-text-muted)]">{statusError}</div>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
   const handleLogin = async (event: React.FormEvent) => {
     event.preventDefault();
     if (loading) return;
@@ -234,6 +221,11 @@ export default function LoginClient() {
               <h2 className="text-xl font-semibold">Log in</h2>
               <p className="text-sm text-[color:var(--color-text-muted)]">Use your email and password to continue.</p>
             </div>
+            {statusError ? (
+              <div className="rounded-[var(--radius-control)] border border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] px-3 py-2 text-sm text-[color:var(--color-warning)]">
+                Setup check failed: {statusError}. You can still log in.
+              </div>
+            ) : null}
             {error ? <div className="text-sm text-[color:var(--color-danger)]">{error}</div> : null}
 
             {stage === "login" ? (
