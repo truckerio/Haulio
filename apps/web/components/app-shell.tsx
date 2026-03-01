@@ -457,6 +457,7 @@ function AppShellInner({
   const activityNow = useMemo(() => (activitySummary?.now ?? []).slice(0, 7), [activitySummary?.now]);
   const activityWeek = useMemo(() => (activitySummary?.week ?? []).slice(0, 7), [activitySummary?.week]);
   const activityBadgeCount = activitySummary?.badgeCount ?? 0;
+  const shouldShowTopActivityTrigger = canUseActivity && hideHeader && !hideTopActivityTrigger;
   const activityControls = useMemo<AppShellActivityControls>(
     () => ({
       canUseActivity,
@@ -724,7 +725,7 @@ function AppShellInner({
           <div className="text-xs text-[color:var(--color-text-muted)]">{title}</div>
         </div>
         <div className="flex items-center gap-2">
-          {canUseActivity && !hideTopActivityTrigger ? (
+          {shouldShowTopActivityTrigger ? (
             <button
               type="button"
               aria-label="Open activity"
@@ -867,7 +868,7 @@ function AppShellInner({
           className="flex-1 min-h-0 min-w-0 overflow-y-auto lg:h-screen"
         >
           <div className="space-y-6 px-3 pb-8 pt-5 sm:px-4 sm:pb-10 sm:pt-6 lg:px-10 lg:pb-16 lg:pt-8">
-          {canUseActivity && !hideTopActivityTrigger ? (
+          {shouldShowTopActivityTrigger ? (
               <div className="hidden lg:flex lg:justify-end">
                 <button
                   type="button"
@@ -911,8 +912,31 @@ function AppShellInner({
             ) : null}
             {hideHeader ? null : (
               <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-4 py-4 shadow-[var(--shadow-subtle)] sm:px-6">
-                <h2 className="text-[22px] font-semibold text-ink">{title}</h2>
-                {subtitle ? <p className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</p> : null}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="text-[22px] font-semibold text-ink">{title}</h2>
+                    {subtitle ? <p className="text-sm text-[color:var(--color-text-muted)]">{subtitle}</p> : null}
+                  </div>
+                  {canUseActivity && !hideTopActivityTrigger ? (
+                    <button
+                      type="button"
+                      aria-label="Open activity"
+                      onClick={() => setActivityDrawerOpen(true)}
+                      className="relative inline-flex items-center gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-1.5 text-sm text-[color:var(--color-text-muted)] shadow-[var(--shadow-subtle)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+                    >
+                      <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+                        <path d="M15 17H9a2 2 0 0 1-2-2v-4a5 5 0 1 1 10 0v4a2 2 0 0 1-2 2Z" />
+                        <path d="M10 20a2 2 0 0 0 4 0" />
+                      </svg>
+                      <span>Activity</span>
+                      {activityBadgeCount > 0 ? (
+                        <span className="inline-flex min-h-5 min-w-5 items-center justify-center rounded-full bg-[color:var(--color-danger)] px-1.5 text-[10px] font-semibold text-white">
+                          {activityBadgeCount > 99 ? "99+" : activityBadgeCount}
+                        </span>
+                      ) : null}
+                    </button>
+                  ) : null}
+                </div>
               </div>
             )}
             <AppShellActivityContext.Provider value={activityControls}>
