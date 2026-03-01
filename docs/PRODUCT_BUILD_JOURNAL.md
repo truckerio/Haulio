@@ -19,3 +19,4 @@
   - Added idempotent response behavior for repeated finalize/paid requests.
   - Added pure transition tests under `apps/api/src/lib/settlement-state.test.ts`.
   - Added mock banking adapter payout receipts with idempotency key support on paid transitions.
+  - Added immutable double-entry journal builders for payout transitions (`finance-ledger`).

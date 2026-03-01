@@ -48,3 +48,4 @@ Delivered + POD approved → Ready to invoice → Invoice issued → Settlement 
   - Settlement finalize/paid idempotency guards added in API transition paths.
   - Deterministic transition helpers added in `apps/api/src/lib/settlement-state.ts`.
   - Mock banking adapter receipts added for paid transitions (`FINANCE_BANKING_ADAPTER=mock`).
+  - Immutable journal entry builders added for paid transitions (`apps/api/src/lib/finance-ledger.ts`).

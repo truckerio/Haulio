@@ -246,6 +246,7 @@ import {
 } from "./lib/payables-engine";
 import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
 import { createPayoutReceipt } from "./lib/finance-banking-adapter";
+import { buildPayableRunPaidJournal, buildSettlementPaidJournal, journalToJson } from "./lib/finance-ledger";
 import {
   canFinalizeSettlement,
   canMarkSettlementPaid,
@@ -15818,8 +15819,14 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
     amountCents,
     idempotencyKey: resolveIdempotencyKey(req, `payable-run:${run.id}:paid`),
   });
+  const journal = buildPayableRunPaidJournal({
+    orgId: req.user!.orgId,
+    payableRunId: run.id,
+    amountCents,
+    idempotencyKey: payout.idempotencyKey,
+  });
   if (run.status === PayableRunStatus.PAID) {
-    res.json({ run, idempotent: true, payout });
+    res.json({ run, idempotent: true, payout, journal });
     return;
   }
   if (run.status !== PayableRunStatus.RUN_FINALIZED) {
@@ -15842,9 +15849,9 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
     summary: `Marked payable run ${updated.id} paid`,
     before: { status: run.status },
     after: { status: updated.status },
-    meta: { payout },
+    meta: { payout, journal: journalToJson(journal) },
   });
-  res.json({ run: updated, idempotent: false, payout });
+  res.json({ run: updated, idempotent: false, payout, journal });
 };
 
 app.post("/payables/runs/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), markPayableRunPaidHandler);
@@ -16239,8 +16246,14 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
     idempotencyKey: resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`),
   });
+  const journal = buildSettlementPaidJournal({
+    orgId: req.user!.orgId,
+    settlementId: settlement.id,
+    amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+    idempotencyKey: payout.idempotencyKey,
+  });
   if (isMarkSettlementPaidIdempotent(settlement.status)) {
-    res.json({ settlement, idempotent: true, payout });
+    res.json({ settlement, idempotent: true, payout, journal });
     return;
   }
   if (!canMarkSettlementPaid(settlement.status)) {
@@ -16261,7 +16274,7 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     userId: req.user!.id,
     type: EventType.SETTLEMENT_PAID,
     message: `Settlement paid`,
-    meta: { settlementId: updated.id, payout },
+    meta: { settlementId: updated.id, payout, journal: journalToJson(journal) },
   });
   await logAudit({
     orgId: req.user!.orgId,
@@ -16272,9 +16285,9 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     summary: `Paid settlement ${updated.id}`,
     before: { status: settlement.status },
     after: { status: updated.status },
-    meta: { payout },
+    meta: { payout, journal: journalToJson(journal) },
   });
-  res.json({ settlement: updated, idempotent: false, payout });
+  res.json({ settlement: updated, idempotent: false, payout, journal });
 });
 
 app.get("/public/files/packets/:name", async (req, res) => {

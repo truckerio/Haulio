@@ -12,6 +12,10 @@ assert.ok(
   "payable paid handler must build payout receipt via banking adapter"
 );
 assert.ok(
+  payableBlock.includes("buildPayableRunPaidJournal({"),
+  "payable paid handler must build ledger journal"
+);
+assert.ok(
   payableBlock.includes("resolveIdempotencyKey(req, `payable-run:${run.id}:paid`)"),
   "payable paid handler must derive idempotency key"
 );
@@ -27,10 +31,16 @@ assert.ok(
   "settlement paid route must build payout receipt via banking adapter"
 );
 assert.ok(
+  settlementBlock.includes("buildSettlementPaidJournal({"),
+  "settlement paid route must build ledger journal"
+);
+assert.ok(
   settlementBlock.includes("resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`)"),
   "settlement paid route must derive idempotency key"
 );
-assert.ok(settlementBlock.includes("meta: { payout }"), "settlement paid route must audit payout metadata");
+assert.ok(
+  settlementBlock.includes("meta: { payout, journal: journalToJson(journal) }"),
+  "settlement paid route must audit payout metadata"
+);
 
 console.log("finance payout contract tests passed");
-
