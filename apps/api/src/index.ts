@@ -248,7 +248,9 @@ import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
 import { createPayoutReceipt } from "./lib/finance-banking-adapter";
 import { buildPayableRunPaidJournal, buildSettlementPaidJournal, journalToJson } from "./lib/finance-ledger";
 import { persistFinanceJournalEntry } from "./lib/finance-ledger-store";
+import { evaluatePayableRunHold, evaluateSettlementHold } from "./lib/finance-hold-policy";
 import { aggregateFinanceWalletBalances } from "./lib/finance-wallet";
+import { applyFinanceWalletWriteThrough } from "./lib/finance-wallet-store";
 import {
   canFinalizeSettlement,
   canMarkSettlementPaid,
@@ -13304,26 +13306,60 @@ app.get("/finance/wallets", requireAuth, requireCapability("viewSettlementPrevie
   }
 
   try {
-    const lines = await (prisma as any).financeJournalLine.findMany({
-      where: {
-        orgId: req.user!.orgId,
-        ...(asOf ? { createdAt: { lte: asOf } } : {}),
-      },
-      select: {
-        account: true,
-        side: true,
-        amountCents: true,
-      },
-      orderBy: { createdAt: "asc" },
-    });
+    let balances: Array<{
+      account: string;
+      debitCents: number;
+      creditCents: number;
+      netCents: number;
+    }> = [];
 
-    const balances = aggregateFinanceWalletBalances(
-      (lines ?? []).map((line: any) => ({
-        account: String(line.account ?? ""),
-        side: line.side === "CREDIT" ? "CREDIT" : "DEBIT",
-        amountCents: Number(line.amountCents ?? 0),
-      }))
-    );
+    const useSnapshotTable = !asOf;
+    if (useSnapshotTable) {
+      try {
+        const materialized = await (prisma as any).financeWalletBalance.findMany({
+          where: { orgId: req.user!.orgId },
+          select: {
+            account: true,
+            debitCents: true,
+            creditCents: true,
+            netCents: true,
+          },
+          orderBy: { account: "asc" },
+        });
+        balances = (materialized ?? []).map((row: any) => ({
+          account: String(row.account ?? ""),
+          debitCents: Number(row.debitCents ?? 0),
+          creditCents: Number(row.creditCents ?? 0),
+          netCents: Number(row.netCents ?? 0),
+        }));
+      } catch (error) {
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || (error.code !== "P2021" && error.code !== "P2022")) {
+          throw error;
+        }
+      }
+    }
+
+    if (balances.length === 0) {
+      const lines = await (prisma as any).financeJournalLine.findMany({
+        where: {
+          orgId: req.user!.orgId,
+          ...(asOf ? { createdAt: { lte: asOf } } : {}),
+        },
+        select: {
+          account: true,
+          side: true,
+          amountCents: true,
+        },
+        orderBy: { createdAt: "asc" },
+      });
+      balances = aggregateFinanceWalletBalances(
+        (lines ?? []).map((line: any) => ({
+          account: String(line.account ?? ""),
+          side: line.side === "CREDIT" ? "CREDIT" : "DEBIT",
+          amountCents: Number(line.amountCents ?? 0),
+        }))
+      );
+    }
 
     const totals = balances.reduce(
       (acc, row) => {
@@ -13342,10 +13378,6 @@ app.get("/finance/wallets", requireAuth, requireCapability("viewSettlementPrevie
       balances,
     });
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2021" || error.code === "P2022")) {
-      res.status(503).json({ error: "Finance wallet tables are not initialized" });
-      return;
-    }
     throw error;
   }
 });
@@ -15840,11 +15872,33 @@ app.post("/payables/runs/:id/finalize", requireAuth, requireCsrf, requirePermiss
     res.status(400).json({ error: "Run must be previewed before finalize" });
     return;
   }
-  if (run.holdReasonCode) {
+  const lineItemCount = await prisma.payableLineItem.count({ where: { runId: run.id } });
+  const hold = evaluatePayableRunHold({
+    status: run.status,
+    lineItemCount,
+    holdReasonCode: run.holdReasonCode,
+    holdOwner: run.holdOwner,
+  });
+  if (hold.blocked) {
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "PAYABLE_RUN_HOLD_BLOCKED",
+      entity: "PayableRun",
+      entityId: run.id,
+      summary: `Blocked payable run finalize due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+      before: { status: run.status },
+      meta: {
+        stage: "FINALIZE",
+        lineItemCount,
+        holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
+        holdOwner: hold.owner ?? run.holdOwner ?? null,
+      },
+    });
     res.status(400).json({
-      error: "Run is on hold and requires review before finalize",
-      holdReasonCode: run.holdReasonCode,
-      holdOwner: run.holdOwner,
+      error: hold.message ?? "Run is on hold and requires review before finalize",
+      holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
+      holdOwner: hold.owner ?? run.holdOwner ?? null,
     });
     return;
   }
@@ -15882,12 +15936,44 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
     amountCents,
     idempotencyKey: payout.idempotencyKey,
   });
+  const hold = evaluatePayableRunHold({
+    status: run.status,
+    lineItemCount: run.lineItems.length,
+    holdReasonCode: run.holdReasonCode,
+    holdOwner: run.holdOwner,
+  });
+  if (hold.blocked) {
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "PAYABLE_RUN_HOLD_BLOCKED",
+      entity: "PayableRun",
+      entityId: run.id,
+      summary: `Blocked payable run paid transition due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+      before: { status: run.status },
+      meta: {
+        stage: "PAID",
+        lineItemCount: run.lineItems.length,
+        holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
+        holdOwner: hold.owner ?? run.holdOwner ?? null,
+      },
+    });
+    res.status(400).json({
+      error: hold.message ?? "Run is on hold and requires review before payout transitions",
+      holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
+      holdOwner: hold.owner ?? run.holdOwner ?? null,
+    });
+    return;
+  }
   if (run.status === PayableRunStatus.PAID) {
-    await persistFinanceJournalEntry(prisma as any, {
-      journal,
-      createdById: req.user!.id,
-      payout,
-      metadata: { source: "payable-run-paid-idempotent" },
+    await prisma.$transaction(async (tx) => {
+      await persistFinanceJournalEntry(tx as any, {
+        journal,
+        createdById: req.user!.id,
+        payout,
+        metadata: { source: "payable-run-paid-idempotent" },
+      });
+      await applyFinanceWalletWriteThrough(tx as any, { journal });
     });
     res.json({ run, idempotent: true, payout, journal });
     return;
@@ -15910,6 +15996,7 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
       payout,
       metadata: { source: "payable-run-paid" },
     });
+    await applyFinanceWalletWriteThrough(tx as any, { journal });
     return nextRun;
   });
   await logAudit({
@@ -16275,8 +16362,29 @@ app.post("/settlements/:id/finalize", requireAuth, requireCsrf, requirePermissio
     return;
   }
   const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
-  if (itemCount === 0) {
-    res.status(400).json({ error: "Settlement has no items" });
+  const hold = evaluateSettlementHold({
+    status: settlement.status,
+    itemCount,
+    netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+  });
+  if (hold.blocked) {
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SETTLEMENT_HOLD_BLOCKED",
+      entity: "Settlement",
+      entityId: settlement.id,
+      summary: `Blocked settlement finalize due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+      before: { status: settlement.status },
+      meta: {
+        stage: "FINALIZE",
+        itemCount,
+        netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+        holdReasonCode: hold.reasonCode ?? null,
+        holdOwner: hold.owner ?? null,
+      },
+    });
+    res.status(400).json({ error: hold.message ?? "Settlement is blocked by hold policy", holdReasonCode: hold.reasonCode ?? null });
     return;
   }
   const updated = await prisma.settlement.update({
@@ -16324,23 +16432,47 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
     idempotencyKey: payout.idempotencyKey,
   });
+  const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
+  const hold = evaluateSettlementHold({
+    status: settlement.status,
+    itemCount,
+    netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+  });
+  if (hold.blocked) {
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SETTLEMENT_HOLD_BLOCKED",
+      entity: "Settlement",
+      entityId: settlement.id,
+      summary: `Blocked settlement paid transition due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+      before: { status: settlement.status },
+      meta: {
+        stage: "PAID",
+        itemCount,
+        netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+        holdReasonCode: hold.reasonCode ?? null,
+        holdOwner: hold.owner ?? null,
+      },
+    });
+    res.status(400).json({ error: hold.message ?? "Settlement is blocked by hold policy", holdReasonCode: hold.reasonCode ?? null });
+    return;
+  }
   if (isMarkSettlementPaidIdempotent(settlement.status)) {
-    await persistFinanceJournalEntry(prisma as any, {
-      journal,
-      createdById: req.user!.id,
-      payout,
-      metadata: { source: "settlement-paid-idempotent" },
+    await prisma.$transaction(async (tx) => {
+      await persistFinanceJournalEntry(tx as any, {
+        journal,
+        createdById: req.user!.id,
+        payout,
+        metadata: { source: "settlement-paid-idempotent" },
+      });
+      await applyFinanceWalletWriteThrough(tx as any, { journal });
     });
     res.json({ settlement, idempotent: true, payout, journal });
     return;
   }
   if (!canMarkSettlementPaid(settlement.status)) {
     res.status(400).json({ error: "Settlement must be FINALIZED before marking paid" });
-    return;
-  }
-  const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
-  if (itemCount === 0) {
-    res.status(400).json({ error: "Settlement has no items" });
     return;
   }
   const updated = await prisma.$transaction(async (tx) => {
@@ -16354,6 +16486,7 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
       payout,
       metadata: { source: "settlement-paid" },
     });
+    await applyFinanceWalletWriteThrough(tx as any, { journal });
     return nextSettlement;
   });
   await createEvent({

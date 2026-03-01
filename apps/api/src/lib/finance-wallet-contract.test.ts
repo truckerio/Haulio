@@ -13,6 +13,10 @@ assert.ok(
   "finance wallets route must aggregate balances from journal lines"
 );
 assert.ok(
+  walletBlock.includes("financeWalletBalance.findMany"),
+  "finance wallets route must read materialized wallet balances when available"
+);
+assert.ok(
   walletBlock.includes("financeJournalLine.findMany"),
   "finance wallets route must read finance journal lines"
 );

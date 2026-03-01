@@ -713,6 +713,8 @@ model Organization {
   invoicePayments                  InvoicePayment[]
   financeJournalEntries            FinanceJournalEntry[]
   financeJournalLines              FinanceJournalLine[]
+  financeWalletBalances            FinanceWalletBalance[]
+  financeWalletSnapshots           FinanceWalletSnapshot[]
   loadNotes                        Note[]
   dispatchViews                    DispatchView[]
   dispatchExceptions               DispatchException[]
@@ -1141,14 +1143,14 @@ model Note {
   expiresAt     DateTime?
   pinned        Boolean            @default(false)
 
-  org           Organization @relation(fields: [orgId], references: [id])
-  load          Load?        @relation(fields: [loadId], references: [id])
-  stop          Stop?        @relation(fields: [stopId], references: [id])
-  replyTo       Note?        @relation("LoadNoteReplies", fields: [replyToNoteId], references: [id])
-  replies       Note[]       @relation("LoadNoteReplies")
-  createdBy     User         @relation("LoadNoteCreatedBy", fields: [createdById], references: [id])
-  updatedBy     User?        @relation("LoadNoteUpdatedBy", fields: [updatedById], references: [id])
-  deletedBy     User?        @relation("LoadNoteDeletedBy", fields: [deletedById], references: [id])
+  org       Organization @relation(fields: [orgId], references: [id])
+  load      Load?        @relation(fields: [loadId], references: [id])
+  stop      Stop?        @relation(fields: [stopId], references: [id])
+  replyTo   Note?        @relation("LoadNoteReplies", fields: [replyToNoteId], references: [id])
+  replies   Note[]       @relation("LoadNoteReplies")
+  createdBy User         @relation("LoadNoteCreatedBy", fields: [createdById], references: [id])
+  updatedBy User?        @relation("LoadNoteUpdatedBy", fields: [updatedById], references: [id])
+  deletedBy User?        @relation("LoadNoteDeletedBy", fields: [deletedById], references: [id])
 
   @@index([orgId, entityType, entityId, createdAt])
   @@index([orgId, entityType, entityId, priority])
@@ -1451,11 +1453,11 @@ model Stop {
   checkInMethod    String?
   sequence         Int
 
-  load     Load         @relation(fields: [loadId], references: [id])
-  org      Organization @relation(fields: [orgId], references: [id])
-  Document Document[]
-  Event    Event[]
-  Task     Task[]
+  load      Load         @relation(fields: [loadId], references: [id])
+  org       Organization @relation(fields: [orgId], references: [id])
+  Document  Document[]
+  Event     Event[]
+  Task      Task[]
   loadNotes Note[]
 
   @@index([loadId, sequence])
@@ -1626,11 +1628,11 @@ model LoadConfirmationDocument {
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
 
-  org              Organization                      @relation(fields: [orgId], references: [id])
-  uploadedBy       User?                             @relation("LoadConfirmationUploads", fields: [uploadedByUserId], references: [id])
-  createdLoad      Load?                             @relation(fields: [createdLoadId], references: [id])
-  extractEvents    LoadConfirmationExtractEvent[]
-  learningExamples LoadConfirmationLearningExample[]
+  org                     Organization                      @relation(fields: [orgId], references: [id])
+  uploadedBy              User?                             @relation("LoadConfirmationUploads", fields: [uploadedByUserId], references: [id])
+  createdLoad             Load?                             @relation(fields: [createdLoadId], references: [id])
+  extractEvents           LoadConfirmationExtractEvent[]
+  learningExamples        LoadConfirmationLearningExample[]
   inboundEmailAttachments InboundEmailAttachment[]
 
   @@index([orgId, sha256])
@@ -1645,7 +1647,7 @@ model InboundEmailAlias {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  org    Organization  @relation(fields: [orgId], references: [id])
+  org    Organization   @relation(fields: [orgId], references: [id])
   emails InboundEmail[]
 
   @@index([orgId, isActive])
@@ -2187,6 +2189,45 @@ model FinanceJournalLine {
 
   @@index([entryId])
   @@index([orgId, account, createdAt])
+}
+
+model FinanceWalletBalance {
+  id          String               @id @default(cuid())
+  orgId       String
+  account     FinanceLedgerAccount
+  debitCents  Int                  @default(0)
+  creditCents Int                  @default(0)
+  netCents    Int                  @default(0)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, account])
+  @@index([orgId, updatedAt])
+}
+
+model FinanceWalletSnapshot {
+  id                 String                   @id @default(cuid())
+  orgId              String
+  account            FinanceLedgerAccount
+  entityType         FinanceJournalEntityType
+  entityId           String
+  eventType          FinanceJournalEventType
+  idempotencyKey     String
+  deltaDebitCents    Int
+  deltaCreditCents   Int
+  deltaNetCents      Int
+  balanceDebitCents  Int
+  balanceCreditCents Int
+  balanceNetCents    Int
+  createdAt          DateTime                 @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, idempotencyKey, account])
+  @@index([orgId, account, createdAt])
+  @@index([orgId, eventType, createdAt])
 }
 
 model SettlementPolicyVersion {

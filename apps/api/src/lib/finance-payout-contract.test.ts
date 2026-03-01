@@ -6,7 +6,7 @@ const source = fs.readFileSync("src/index.ts", "utf8");
 const payableAnchor = 'const markPayableRunPaidHandler = async (req: any, res: any) => {';
 const payableIndex = source.indexOf(payableAnchor);
 assert.ok(payableIndex >= 0, "payable paid handler must exist");
-const payableBlock = source.slice(payableIndex, payableIndex + 2600);
+const payableBlock = source.slice(payableIndex, payableIndex + 7000);
 assert.ok(
   payableBlock.includes("createPayoutReceipt({"),
   "payable paid handler must build payout receipt via banking adapter"
@@ -20,6 +20,10 @@ assert.ok(
   "payable paid handler must persist journal entries"
 );
 assert.ok(
+  payableBlock.includes("applyFinanceWalletWriteThrough("),
+  "payable paid handler must apply wallet write-through"
+);
+assert.ok(
   payableBlock.includes("resolveIdempotencyKey(req, `payable-run:${run.id}:paid`)"),
   "payable paid handler must derive idempotency key"
 );
@@ -29,7 +33,7 @@ const settlementAnchor =
   'app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {';
 const settlementIndex = source.indexOf(settlementAnchor);
 assert.ok(settlementIndex >= 0, "settlement paid route must exist");
-const settlementBlock = source.slice(settlementIndex, settlementIndex + 3000);
+const settlementBlock = source.slice(settlementIndex, settlementIndex + 5000);
 assert.ok(
   settlementBlock.includes("createPayoutReceipt({"),
   "settlement paid route must build payout receipt via banking adapter"
@@ -41,6 +45,10 @@ assert.ok(
 assert.ok(
   settlementBlock.includes("persistFinanceJournalEntry("),
   "settlement paid route must persist journal entries"
+);
+assert.ok(
+  settlementBlock.includes("applyFinanceWalletWriteThrough("),
+  "settlement paid route must apply wallet write-through"
 );
 assert.ok(
   settlementBlock.includes("resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`)"),
