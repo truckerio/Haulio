@@ -245,6 +245,7 @@ import {
   payableLineFingerprint,
 } from "./lib/payables-engine";
 import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
+import { createPayoutReceipt } from "./lib/finance-banking-adapter";
 import {
   canFinalizeSettlement,
   canMarkSettlementPaid,
@@ -11725,6 +11726,13 @@ function parseDateInput(value: string, mode: "start" | "end") {
   return date;
 }
 
+function resolveIdempotencyKey(req: any, fallback: string) {
+  const headerValue = req.headers?.["x-idempotency-key"];
+  const fromHeader = typeof headerValue === "string" ? headerValue.trim() : "";
+  if (fromHeader) return fromHeader.slice(0, 128);
+  return fallback;
+}
+
 app.get("/driver/earnings", requireAuth, requireRole("DRIVER"), async (req, res) => {
   const driver = await prisma.driver.findFirst({
     where: { userId: req.user!.id, orgId: req.user!.orgId },
@@ -15796,13 +15804,22 @@ app.post("/payables/runs/:id/finalize", requireAuth, requireCsrf, requirePermiss
 const markPayableRunPaidHandler = async (req: any, res: any) => {
   const run = await prisma.payableRun.findFirst({
     where: { id: req.params.id, orgId: req.user!.orgId },
+    include: { lineItems: { select: { amountCents: true } } },
   });
   if (!run) {
     res.status(404).json({ error: "Run not found" });
     return;
   }
+  const amountCents = run.lineItems.reduce((total, item) => total + item.amountCents, 0);
+  const payout = createPayoutReceipt({
+    orgId: req.user!.orgId,
+    entityType: "PAYABLE_RUN",
+    entityId: run.id,
+    amountCents,
+    idempotencyKey: resolveIdempotencyKey(req, `payable-run:${run.id}:paid`),
+  });
   if (run.status === PayableRunStatus.PAID) {
-    res.json({ run, idempotent: true });
+    res.json({ run, idempotent: true, payout });
     return;
   }
   if (run.status !== PayableRunStatus.RUN_FINALIZED) {
@@ -15816,7 +15833,18 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
       paidAt: run.paidAt ?? new Date(),
     },
   });
-  res.json({ run: updated, idempotent: false });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "PAYABLE_RUN_PAID",
+    entity: "PayableRun",
+    entityId: updated.id,
+    summary: `Marked payable run ${updated.id} paid`,
+    before: { status: run.status },
+    after: { status: updated.status },
+    meta: { payout },
+  });
+  res.json({ run: updated, idempotent: false, payout });
 };
 
 app.post("/payables/runs/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), markPayableRunPaidHandler);
@@ -16204,8 +16232,15 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     res.status(404).json({ error: "Settlement not found" });
     return;
   }
+  const payout = createPayoutReceipt({
+    orgId: req.user!.orgId,
+    entityType: "SETTLEMENT",
+    entityId: settlement.id,
+    amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+    idempotencyKey: resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`),
+  });
   if (isMarkSettlementPaidIdempotent(settlement.status)) {
-    res.json({ settlement, idempotent: true });
+    res.json({ settlement, idempotent: true, payout });
     return;
   }
   if (!canMarkSettlementPaid(settlement.status)) {
@@ -16226,7 +16261,7 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     userId: req.user!.id,
     type: EventType.SETTLEMENT_PAID,
     message: `Settlement paid`,
-    meta: { settlementId: updated.id },
+    meta: { settlementId: updated.id, payout },
   });
   await logAudit({
     orgId: req.user!.orgId,
@@ -16237,8 +16272,9 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     summary: `Paid settlement ${updated.id}`,
     before: { status: settlement.status },
     after: { status: updated.status },
+    meta: { payout },
   });
-  res.json({ settlement: updated, idempotent: false });
+  res.json({ settlement: updated, idempotent: false, payout });
 });
 
 app.get("/public/files/packets/:name", async (req, res) => {

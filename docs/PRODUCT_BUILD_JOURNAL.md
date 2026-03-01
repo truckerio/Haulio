@@ -18,3 +18,4 @@
   - Added explicit settlement transition guards for finalize/paid paths.
   - Added idempotent response behavior for repeated finalize/paid requests.
   - Added pure transition tests under `apps/api/src/lib/settlement-state.test.ts`.
+  - Added mock banking adapter payout receipts with idempotency key support on paid transitions.
