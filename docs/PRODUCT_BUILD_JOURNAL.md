@@ -23,3 +23,6 @@
   - Added persistent finance journal store and route wiring for paid mutations (`finance-ledger-store`).
   - Added finance journal schema migration for immutable entry/line persistence.
   - Added read-only finance wallet balances endpoint backed by journal lines (`GET /finance/wallets`).
+  - Added wallet write-through tables and materialization helper for paid transitions.
+  - Added unified finance hold-policy checks with blocked transition audit events for payable/settlement.
+  - Added Phase 5 smoke script covering payout -> journal -> wallet chain with idempotency checks.

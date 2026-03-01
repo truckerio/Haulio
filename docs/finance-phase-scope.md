@@ -52,3 +52,6 @@ Delivered + POD approved → Ready to invoice → Invoice issued → Settlement 
   - Journal persistence store added and wired to paid routes (`apps/api/src/lib/finance-ledger-store.ts`).
   - Finance journal tables + enums migration added (`packages/db/prisma/migrations/20260409100000_finance_ledger_journal_tables`).
   - Read-only finance wallets endpoint added (`GET /finance/wallets`) derived from journal lines.
+  - Wallet write-through materialization added (`FinanceWalletBalance` + `FinanceWalletSnapshot`).
+  - Hold policy parity added across payable/settlement finalize+paid transitions with blocked audit actions.
+  - End-to-end smoke added: `pnpm demo:smoke:phase5` (payout -> journal -> wallet idempotency chain).
