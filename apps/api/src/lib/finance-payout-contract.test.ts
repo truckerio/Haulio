@@ -24,6 +24,10 @@ assert.ok(
   "payable paid handler must apply wallet write-through"
 );
 assert.ok(
+  payableBlock.includes("financeJournalEntry.findUnique"),
+  "payable paid handler must check persisted journal replay by idempotency key"
+);
+assert.ok(
   payableBlock.includes("resolveIdempotencyKey(req, `payable-run:${run.id}:paid`)"),
   "payable paid handler must derive idempotency key"
 );
@@ -49,6 +53,10 @@ assert.ok(
 assert.ok(
   settlementBlock.includes("applyFinanceWalletWriteThrough("),
   "settlement paid route must apply wallet write-through"
+);
+assert.ok(
+  settlementBlock.includes("financeJournalEntry.findUnique"),
+  "settlement paid route must check persisted journal replay by idempotency key"
 );
 assert.ok(
   settlementBlock.includes("resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`)"),

@@ -175,34 +175,44 @@ async function main() {
     },
   });
 
+  const payableIdemKey = `smoke-phase5-payable-${payableRun.id}`;
   const payablePaidFirst = await request<{
     run: { id: string; status: string };
     idempotent: boolean;
     payout: { idempotencyKey: string };
-  }>(`/payables/runs/${payableRun.id}/paid`, { method: "POST", body: "{}" }, billingAuth);
+  }>(
+    `/payables/runs/${payableRun.id}/paid`,
+    { method: "POST", headers: { "x-idempotency-key": payableIdemKey }, body: "{}" },
+    billingAuth
+  );
   if (payablePaidFirst.run.status !== "PAID" || payablePaidFirst.idempotent) {
     throw new Error("payable first paid transition did not complete");
   }
   const payablePaidSecond = await request<{ idempotent: boolean }>(
     `/payables/runs/${payableRun.id}/paid`,
-    { method: "POST", body: "{}" },
+    { method: "POST", headers: { "x-idempotency-key": payableIdemKey }, body: "{}" },
     billingAuth
   );
   if (!payablePaidSecond.idempotent) {
     throw new Error("payable second paid transition was not idempotent");
   }
 
+  const settlementIdemKey = `smoke-phase5-settlement-${settlement.id}`;
   const settlementPaidFirst = await request<{
     settlement: { id: string; status: string };
     idempotent: boolean;
     payout: { idempotencyKey: string };
-  }>(`/settlements/${settlement.id}/paid`, { method: "POST", body: "{}" }, billingAuth);
+  }>(
+    `/settlements/${settlement.id}/paid`,
+    { method: "POST", headers: { "x-idempotency-key": settlementIdemKey }, body: "{}" },
+    billingAuth
+  );
   if (settlementPaidFirst.settlement.status !== "PAID" || settlementPaidFirst.idempotent) {
     throw new Error("settlement first paid transition did not complete");
   }
   const settlementPaidSecond = await request<{ idempotent: boolean }>(
     `/settlements/${settlement.id}/paid`,
-    { method: "POST", body: "{}" },
+    { method: "POST", headers: { "x-idempotency-key": settlementIdemKey }, body: "{}" },
     billingAuth
   );
   if (!settlementPaidSecond.idempotent) {

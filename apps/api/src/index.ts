@@ -15936,6 +15936,33 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
     amountCents,
     idempotencyKey: payout.idempotencyKey,
   });
+  const existingJournal = await (prisma as any).financeJournalEntry.findUnique({
+    where: {
+      orgId_idempotencyKey: {
+        orgId: req.user!.orgId,
+        idempotencyKey: payout.idempotencyKey,
+      },
+    },
+    select: { id: true, entityType: true, entityId: true, eventType: true },
+  });
+  if (
+    existingJournal &&
+    existingJournal.entityType === "PAYABLE_RUN" &&
+    existingJournal.entityId === run.id &&
+    existingJournal.eventType === "PAYABLE_RUN_PAID"
+  ) {
+    await prisma.$transaction(async (tx) => {
+      await persistFinanceJournalEntry(tx as any, {
+        journal,
+        createdById: req.user!.id,
+        payout,
+        metadata: { source: "payable-run-paid-replay" },
+      });
+      await applyFinanceWalletWriteThrough(tx as any, { journal });
+    });
+    res.json({ run, idempotent: true, payout, journal });
+    return;
+  }
   const hold = evaluatePayableRunHold({
     status: run.status,
     lineItemCount: run.lineItems.length,
@@ -16432,6 +16459,33 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
     idempotencyKey: payout.idempotencyKey,
   });
+  const existingJournal = await (prisma as any).financeJournalEntry.findUnique({
+    where: {
+      orgId_idempotencyKey: {
+        orgId: req.user!.orgId,
+        idempotencyKey: payout.idempotencyKey,
+      },
+    },
+    select: { id: true, entityType: true, entityId: true, eventType: true },
+  });
+  if (
+    existingJournal &&
+    existingJournal.entityType === "SETTLEMENT" &&
+    existingJournal.entityId === settlement.id &&
+    existingJournal.eventType === "SETTLEMENT_PAID"
+  ) {
+    await prisma.$transaction(async (tx) => {
+      await persistFinanceJournalEntry(tx as any, {
+        journal,
+        createdById: req.user!.id,
+        payout,
+        metadata: { source: "settlement-paid-replay" },
+      });
+      await applyFinanceWalletWriteThrough(tx as any, { journal });
+    });
+    res.json({ settlement, idempotent: true, payout, journal });
+    return;
+  }
   const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
   const hold = evaluateSettlementHold({
     status: settlement.status,
