@@ -13382,6 +13382,84 @@ app.get("/finance/wallets", requireAuth, requireCapability("viewSettlementPrevie
   }
 });
 
+app.get("/finance/journals", requireAuth, requireCapability("viewSettlementPreview", "runSettlements"), async (req, res) => {
+  const limitRaw = Number(req.query.limit ?? 50);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 200) : 50;
+  const entityTypeRaw = typeof req.query.entityType === "string" ? req.query.entityType.toUpperCase().trim() : "";
+  const eventTypeRaw = typeof req.query.eventType === "string" ? req.query.eventType.toUpperCase().trim() : "";
+  const entityId = typeof req.query.entityId === "string" && req.query.entityId.trim().length > 0 ? req.query.entityId.trim() : undefined;
+
+  const entityType =
+    entityTypeRaw && ["PAYABLE_RUN", "SETTLEMENT"].includes(entityTypeRaw) ? (entityTypeRaw as "PAYABLE_RUN" | "SETTLEMENT") : undefined;
+  const eventType =
+    eventTypeRaw && ["PAYABLE_RUN_PAID", "SETTLEMENT_PAID"].includes(eventTypeRaw)
+      ? (eventTypeRaw as "PAYABLE_RUN_PAID" | "SETTLEMENT_PAID")
+      : undefined;
+
+  const entries = await (prisma as any).financeJournalEntry.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      ...(entityType ? { entityType } : {}),
+      ...(eventType ? { eventType } : {}),
+      ...(entityId ? { entityId } : {}),
+    },
+    include: {
+      lines: {
+        select: {
+          account: true,
+          side: true,
+          amountCents: true,
+          memo: true,
+          createdAt: true,
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      },
+      createdBy: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit,
+  });
+
+  res.json({
+    orgId: req.user!.orgId,
+    filters: {
+      entityType: entityType ?? null,
+      eventType: eventType ?? null,
+      entityId: entityId ?? null,
+      limit,
+    },
+    entries: (entries ?? []).map((entry: any) => ({
+      id: entry.id,
+      entityType: entry.entityType,
+      entityId: entry.entityId,
+      eventType: entry.eventType,
+      idempotencyKey: entry.idempotencyKey,
+      adapter: entry.adapter ?? null,
+      externalPayoutId: entry.externalPayoutId ?? null,
+      externalPayoutReference: entry.externalPayoutReference ?? null,
+      totalDebitCents: Number(entry.totalDebitCents ?? 0),
+      totalCreditCents: Number(entry.totalCreditCents ?? 0),
+      currency: entry.currency ?? "USD",
+      metadata: entry.metadata ?? null,
+      createdAt: entry.createdAt,
+      createdBy: entry.createdBy ?? null,
+      lines: (entry.lines ?? []).map((line: any) => ({
+        account: line.account,
+        side: line.side,
+        amountCents: Number(line.amountCents ?? 0),
+        memo: line.memo ?? null,
+        createdAt: line.createdAt,
+      })),
+    })),
+  });
+});
+
 app.get("/internal/loads/:id/finance-snapshot", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
   const snapshot = await computeFinanceSnapshotForLoad({
     orgId: req.user!.orgId,
@@ -15673,6 +15751,20 @@ app.post("/payables/runs", requireAuth, requireCsrf, requirePermission(Permissio
     });
   }
 
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "PAYABLE_RUN_CREATED",
+    entity: "PayableRun",
+    entityId: run.id,
+    summary: `Created payable run ${run.id}`,
+    after: {
+      status: run.status,
+      periodStart: run.periodStart,
+      periodEnd: run.periodEnd,
+    },
+  });
+
   res.json({ run });
 });
 
@@ -15794,6 +15886,32 @@ app.post("/payables/runs/:id/preview", requireAuth, requireCsrf, requirePermissi
     orderBy: [{ partyType: "asc" }, { partyId: "asc" }, { createdAt: "asc" }],
   });
 
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "PAYABLE_RUN_PREVIEWED",
+    entity: "PayableRun",
+    entityId: run.id,
+    summary: `Previewed payable run ${run.id}`,
+    before: {
+      status: run.status,
+      previewChecksum: run.previewChecksum ?? null,
+      anomalyCount: run.anomalyCount ?? 0,
+    },
+    after: {
+      status: PayableRunStatus.RUN_PREVIEWED,
+      previewChecksum,
+      anomalyCount: anomalies.length,
+      holdReasonCode,
+      holdOwner,
+    },
+    meta: {
+      diffAdded: diff.added,
+      diffRemoved: diff.removed,
+      lineItemCount: lineItems.length,
+    },
+  });
+
   res.json({
     runId: run.id,
     status: PayableRunStatus.RUN_PREVIEWED,
@@ -15834,6 +15952,24 @@ app.post("/payables/runs/:id/hold", requireAuth, requireCsrf, requirePermission(
       holdNotes: parsed.data.notes ?? null,
     },
   });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "PAYABLE_RUN_HOLD_APPLIED",
+    entity: "PayableRun",
+    entityId: updated.id,
+    summary: `Applied hold on payable run ${updated.id}`,
+    before: {
+      holdReasonCode: run.holdReasonCode,
+      holdOwner: run.holdOwner,
+      holdNotes: run.holdNotes,
+    },
+    after: {
+      holdReasonCode: updated.holdReasonCode,
+      holdOwner: updated.holdOwner,
+      holdNotes: updated.holdNotes,
+    },
+  });
   res.json({ run: updated });
 });
 
@@ -15851,6 +15987,24 @@ app.post("/payables/runs/:id/release-hold", requireAuth, requireCsrf, requirePer
       holdReasonCode: null,
       holdOwner: null,
       holdNotes: null,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "PAYABLE_RUN_HOLD_RELEASED",
+    entity: "PayableRun",
+    entityId: updated.id,
+    summary: `Released hold on payable run ${updated.id}`,
+    before: {
+      holdReasonCode: run.holdReasonCode,
+      holdOwner: run.holdOwner,
+      holdNotes: run.holdNotes,
+    },
+    after: {
+      holdReasonCode: updated.holdReasonCode,
+      holdOwner: updated.holdOwner,
+      holdNotes: updated.holdNotes,
     },
   });
   res.json({ run: updated });
@@ -15909,6 +16063,16 @@ app.post("/payables/runs/:id/finalize", requireAuth, requireCsrf, requirePermiss
       finalizedAt: run.finalizedAt ?? new Date(),
       finalizedChecksum: run.finalizedChecksum ?? run.previewChecksum,
     },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "PAYABLE_RUN_FINALIZED",
+    entity: "PayableRun",
+    entityId: updated.id,
+    summary: `Finalized payable run ${updated.id}`,
+    before: { status: run.status, finalizedChecksum: run.finalizedChecksum ?? null },
+    after: { status: updated.status, finalizedChecksum: updated.finalizedChecksum ?? null },
   });
   res.json({ run: updated, idempotent: false });
 });

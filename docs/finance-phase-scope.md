@@ -55,3 +55,6 @@ Delivered + POD approved → Ready to invoice → Invoice issued → Settlement 
   - Wallet write-through materialization added (`FinanceWalletBalance` + `FinanceWalletSnapshot`).
   - Hold policy parity added across payable/settlement finalize+paid transitions with blocked audit actions.
   - End-to-end smoke added: `pnpm demo:smoke:phase5` (payout -> journal -> wallet idempotency chain).
+  - Payable lifecycle audit coverage expanded: create, preview, hold, release-hold, finalize, paid.
+  - Finance mutation audit contract added (`apps/api/src/lib/finance-mutation-audit-contract.test.ts`).
+  - Phase gate command added: `pnpm ci:phase5` (finance tests + API typecheck + finance chain smoke).

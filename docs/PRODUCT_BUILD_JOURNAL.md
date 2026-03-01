@@ -26,3 +26,19 @@
   - Added wallet write-through tables and materialization helper for paid transitions.
   - Added unified finance hold-policy checks with blocked transition audit events for payable/settlement.
   - Added Phase 5 smoke script covering payout -> journal -> wallet chain with idempotency checks.
+
+## 2026-03-01
+- Phase 5 lock hardening:
+  - Added payable lifecycle audit actions for finance mutations:
+    - `PAYABLE_RUN_CREATED`
+    - `PAYABLE_RUN_PREVIEWED`
+    - `PAYABLE_RUN_HOLD_APPLIED`
+    - `PAYABLE_RUN_HOLD_RELEASED`
+    - `PAYABLE_RUN_FINALIZED`
+  - Added finance mutation audit contract test to prevent drift (`finance-mutation-audit-contract.test.ts`).
+  - Added repeatable Phase 5 gate command: `pnpm ci:phase5`.
+
+- Phase 6 start (observability-first, read-only):
+  - Added `GET /finance/journals` with capability guard and org scoping.
+  - Added immutable journal history contract test (`finance-journal-contract.test.ts`).
+  - Added `docs/PHASE6_START.md`.
