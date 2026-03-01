@@ -30,7 +30,25 @@ async function request<T>(path: string, options: RequestInit, auth: Auth) {
   if (options.method && options.method !== "GET") {
     headers.set("x-csrf-token", auth.csrf);
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  let lastError: unknown = null;
+  let res: Response | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+      break;
+    } catch (error) {
+      const code = (error as { cause?: { code?: string } })?.cause?.code;
+      const transient = code === "ECONNRESET" || code === "ECONNREFUSED" || code === "UND_ERR_SOCKET";
+      lastError = error;
+      if (!transient || attempt === 2) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+    }
+  }
+  if (!res) {
+    throw lastError instanceof Error ? lastError : new Error(`Request failed without response: ${path}`);
+  }
   const text = await res.text();
   let payload: any = null;
   try {

@@ -15914,130 +15914,134 @@ app.post("/payables/runs/:id/finalize", requireAuth, requireCsrf, requirePermiss
 });
 
 const markPayableRunPaidHandler = async (req: any, res: any) => {
-  const run = await prisma.payableRun.findFirst({
-    where: { id: req.params.id, orgId: req.user!.orgId },
-    include: { lineItems: { select: { amountCents: true } } },
-  });
-  if (!run) {
-    res.status(404).json({ error: "Run not found" });
-    return;
-  }
-  const amountCents = run.lineItems.reduce((total, item) => total + item.amountCents, 0);
-  const payout = createPayoutReceipt({
-    orgId: req.user!.orgId,
-    entityType: "PAYABLE_RUN",
-    entityId: run.id,
-    amountCents,
-    idempotencyKey: resolveIdempotencyKey(req, `payable-run:${run.id}:paid`),
-  });
-  const journal = buildPayableRunPaidJournal({
-    orgId: req.user!.orgId,
-    payableRunId: run.id,
-    amountCents,
-    idempotencyKey: payout.idempotencyKey,
-  });
-  const existingJournal = await (prisma as any).financeJournalEntry.findUnique({
-    where: {
-      orgId_idempotencyKey: {
-        orgId: req.user!.orgId,
-        idempotencyKey: payout.idempotencyKey,
+  try {
+    const run = await prisma.payableRun.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { lineItems: { select: { amountCents: true } } },
+    });
+    if (!run) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+    const amountCents = run.lineItems.reduce((total, item) => total + item.amountCents, 0);
+    const payout = createPayoutReceipt({
+      orgId: req.user!.orgId,
+      entityType: "PAYABLE_RUN",
+      entityId: run.id,
+      amountCents,
+      idempotencyKey: resolveIdempotencyKey(req, `payable-run:${run.id}:paid`),
+    });
+    const journal = buildPayableRunPaidJournal({
+      orgId: req.user!.orgId,
+      payableRunId: run.id,
+      amountCents,
+      idempotencyKey: payout.idempotencyKey,
+    });
+    const existingJournal = await (prisma as any).financeJournalEntry.findUnique({
+      where: {
+        orgId_idempotencyKey: {
+          orgId: req.user!.orgId,
+          idempotencyKey: payout.idempotencyKey,
+        },
       },
-    },
-    select: { id: true, entityType: true, entityId: true, eventType: true },
-  });
-  if (
-    existingJournal &&
-    existingJournal.entityType === "PAYABLE_RUN" &&
-    existingJournal.entityId === run.id &&
-    existingJournal.eventType === "PAYABLE_RUN_PAID"
-  ) {
-    await prisma.$transaction(async (tx) => {
+      select: { id: true, entityType: true, entityId: true, eventType: true },
+    });
+    if (
+      existingJournal &&
+      existingJournal.entityType === "PAYABLE_RUN" &&
+      existingJournal.entityId === run.id &&
+      existingJournal.eventType === "PAYABLE_RUN_PAID"
+    ) {
+      await prisma.$transaction(async (tx) => {
+        await persistFinanceJournalEntry(tx as any, {
+          journal,
+          createdById: req.user!.id,
+          payout,
+          metadata: { source: "payable-run-paid-replay" },
+        });
+        await applyFinanceWalletWriteThrough(tx as any, { journal });
+      });
+      res.json({ run, idempotent: true, payout, journal });
+      return;
+    }
+    const hold = evaluatePayableRunHold({
+      status: run.status,
+      lineItemCount: run.lineItems.length,
+      holdReasonCode: run.holdReasonCode,
+      holdOwner: run.holdOwner,
+    });
+    if (hold.blocked) {
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "PAYABLE_RUN_HOLD_BLOCKED",
+        entity: "PayableRun",
+        entityId: run.id,
+        summary: `Blocked payable run paid transition due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+        before: { status: run.status },
+        meta: {
+          stage: "PAID",
+          lineItemCount: run.lineItems.length,
+          holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
+          holdOwner: hold.owner ?? run.holdOwner ?? null,
+        },
+      });
+      res.status(400).json({
+        error: hold.message ?? "Run is on hold and requires review before payout transitions",
+        holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
+        holdOwner: hold.owner ?? run.holdOwner ?? null,
+      });
+      return;
+    }
+    if (run.status === PayableRunStatus.PAID) {
+      await prisma.$transaction(async (tx) => {
+        await persistFinanceJournalEntry(tx as any, {
+          journal,
+          createdById: req.user!.id,
+          payout,
+          metadata: { source: "payable-run-paid-idempotent" },
+        });
+        await applyFinanceWalletWriteThrough(tx as any, { journal });
+      });
+      res.json({ run, idempotent: true, payout, journal });
+      return;
+    }
+    if (run.status !== PayableRunStatus.RUN_FINALIZED) {
+      res.status(400).json({ error: "Run must be finalized before marking paid" });
+      return;
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const nextRun = await tx.payableRun.update({
+        where: { id: run.id },
+        data: {
+          status: PayableRunStatus.PAID,
+          paidAt: run.paidAt ?? new Date(),
+        },
+      });
       await persistFinanceJournalEntry(tx as any, {
         journal,
         createdById: req.user!.id,
         payout,
-        metadata: { source: "payable-run-paid-replay" },
+        metadata: { source: "payable-run-paid" },
       });
       await applyFinanceWalletWriteThrough(tx as any, { journal });
+      return nextRun;
     });
-    res.json({ run, idempotent: true, payout, journal });
-    return;
-  }
-  const hold = evaluatePayableRunHold({
-    status: run.status,
-    lineItemCount: run.lineItems.length,
-    holdReasonCode: run.holdReasonCode,
-    holdOwner: run.holdOwner,
-  });
-  if (hold.blocked) {
     await logAudit({
       orgId: req.user!.orgId,
       userId: req.user!.id,
-      action: "PAYABLE_RUN_HOLD_BLOCKED",
+      action: "PAYABLE_RUN_PAID",
       entity: "PayableRun",
-      entityId: run.id,
-      summary: `Blocked payable run paid transition due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+      entityId: updated.id,
+      summary: `Marked payable run ${updated.id} paid`,
       before: { status: run.status },
-      meta: {
-        stage: "PAID",
-        lineItemCount: run.lineItems.length,
-        holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
-        holdOwner: hold.owner ?? run.holdOwner ?? null,
-      },
+      after: { status: updated.status },
+      meta: { payout, journal: journalToJson(journal) },
     });
-    res.status(400).json({
-      error: hold.message ?? "Run is on hold and requires review before payout transitions",
-      holdReasonCode: hold.reasonCode ?? run.holdReasonCode ?? null,
-      holdOwner: hold.owner ?? run.holdOwner ?? null,
-    });
-    return;
+    res.json({ run: updated, idempotent: false, payout, journal });
+  } catch (error) {
+    sendServerError(res, "Failed to mark payable run paid", error);
   }
-  if (run.status === PayableRunStatus.PAID) {
-    await prisma.$transaction(async (tx) => {
-      await persistFinanceJournalEntry(tx as any, {
-        journal,
-        createdById: req.user!.id,
-        payout,
-        metadata: { source: "payable-run-paid-idempotent" },
-      });
-      await applyFinanceWalletWriteThrough(tx as any, { journal });
-    });
-    res.json({ run, idempotent: true, payout, journal });
-    return;
-  }
-  if (run.status !== PayableRunStatus.RUN_FINALIZED) {
-    res.status(400).json({ error: "Run must be finalized before marking paid" });
-    return;
-  }
-  const updated = await prisma.$transaction(async (tx) => {
-    const nextRun = await tx.payableRun.update({
-      where: { id: run.id },
-      data: {
-        status: PayableRunStatus.PAID,
-        paidAt: run.paidAt ?? new Date(),
-      },
-    });
-    await persistFinanceJournalEntry(tx as any, {
-      journal,
-      createdById: req.user!.id,
-      payout,
-      metadata: { source: "payable-run-paid" },
-    });
-    await applyFinanceWalletWriteThrough(tx as any, { journal });
-    return nextRun;
-  });
-  await logAudit({
-    orgId: req.user!.orgId,
-    userId: req.user!.id,
-    action: "PAYABLE_RUN_PAID",
-    entity: "PayableRun",
-    entityId: updated.id,
-    summary: `Marked payable run ${updated.id} paid`,
-    before: { status: run.status },
-    after: { status: updated.status },
-    meta: { payout, journal: journalToJson(journal) },
-  });
-  res.json({ run: updated, idempotent: false, payout, journal });
 };
 
 app.post("/payables/runs/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), markPayableRunPaidHandler);
@@ -16439,129 +16443,136 @@ app.post("/settlements/:id/finalize", requireAuth, requireCsrf, requirePermissio
 });
 
 app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {
-  let settlement;
   try {
-    settlement = await requireOrgEntity(prisma.settlement, req.user!.orgId, req.params.id, "Settlement");
-  } catch {
-    res.status(404).json({ error: "Settlement not found" });
-    return;
-  }
-  const payout = createPayoutReceipt({
-    orgId: req.user!.orgId,
-    entityType: "SETTLEMENT",
-    entityId: settlement.id,
-    amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
-    idempotencyKey: resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`),
-  });
-  const journal = buildSettlementPaidJournal({
-    orgId: req.user!.orgId,
-    settlementId: settlement.id,
-    amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
-    idempotencyKey: payout.idempotencyKey,
-  });
-  const existingJournal = await (prisma as any).financeJournalEntry.findUnique({
-    where: {
-      orgId_idempotencyKey: {
-        orgId: req.user!.orgId,
-        idempotencyKey: payout.idempotencyKey,
+    let settlement;
+    try {
+      settlement = await requireOrgEntity(prisma.settlement, req.user!.orgId, req.params.id, "Settlement");
+    } catch {
+      res.status(404).json({ error: "Settlement not found" });
+      return;
+    }
+    const payout = createPayoutReceipt({
+      orgId: req.user!.orgId,
+      entityType: "SETTLEMENT",
+      entityId: settlement.id,
+      amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+      idempotencyKey: resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`),
+    });
+    const journal = buildSettlementPaidJournal({
+      orgId: req.user!.orgId,
+      settlementId: settlement.id,
+      amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+      idempotencyKey: payout.idempotencyKey,
+    });
+    const existingJournal = await (prisma as any).financeJournalEntry.findUnique({
+      where: {
+        orgId_idempotencyKey: {
+          orgId: req.user!.orgId,
+          idempotencyKey: payout.idempotencyKey,
+        },
       },
-    },
-    select: { id: true, entityType: true, entityId: true, eventType: true },
-  });
-  if (
-    existingJournal &&
-    existingJournal.entityType === "SETTLEMENT" &&
-    existingJournal.entityId === settlement.id &&
-    existingJournal.eventType === "SETTLEMENT_PAID"
-  ) {
-    await prisma.$transaction(async (tx) => {
+      select: { id: true, entityType: true, entityId: true, eventType: true },
+    });
+    if (
+      existingJournal &&
+      existingJournal.entityType === "SETTLEMENT" &&
+      existingJournal.entityId === settlement.id &&
+      existingJournal.eventType === "SETTLEMENT_PAID"
+    ) {
+      await prisma.$transaction(async (tx) => {
+        await persistFinanceJournalEntry(tx as any, {
+          journal,
+          createdById: req.user!.id,
+          payout,
+          metadata: { source: "settlement-paid-replay" },
+        });
+        await applyFinanceWalletWriteThrough(tx as any, { journal });
+      });
+      res.json({ settlement, idempotent: true, payout, journal });
+      return;
+    }
+    const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
+    const hold = evaluateSettlementHold({
+      status: settlement.status,
+      itemCount,
+      netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+    });
+    if (hold.blocked) {
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "SETTLEMENT_HOLD_BLOCKED",
+        entity: "Settlement",
+        entityId: settlement.id,
+        summary: `Blocked settlement paid transition due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+        before: { status: settlement.status },
+        meta: {
+          stage: "PAID",
+          itemCount,
+          netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
+          holdReasonCode: hold.reasonCode ?? null,
+          holdOwner: hold.owner ?? null,
+        },
+      });
+      res.status(400).json({
+        error: hold.message ?? "Settlement is blocked by hold policy",
+        holdReasonCode: hold.reasonCode ?? null,
+      });
+      return;
+    }
+    if (isMarkSettlementPaidIdempotent(settlement.status)) {
+      await prisma.$transaction(async (tx) => {
+        await persistFinanceJournalEntry(tx as any, {
+          journal,
+          createdById: req.user!.id,
+          payout,
+          metadata: { source: "settlement-paid-idempotent" },
+        });
+        await applyFinanceWalletWriteThrough(tx as any, { journal });
+      });
+      res.json({ settlement, idempotent: true, payout, journal });
+      return;
+    }
+    if (!canMarkSettlementPaid(settlement.status)) {
+      res.status(400).json({ error: "Settlement must be FINALIZED before marking paid" });
+      return;
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const nextSettlement = await tx.settlement.update({
+        where: { id: settlement.id },
+        data: { status: SettlementStatus.PAID, paidAt: new Date() },
+      });
       await persistFinanceJournalEntry(tx as any, {
         journal,
         createdById: req.user!.id,
         payout,
-        metadata: { source: "settlement-paid-replay" },
+        metadata: { source: "settlement-paid" },
       });
       await applyFinanceWalletWriteThrough(tx as any, { journal });
+      return nextSettlement;
     });
-    res.json({ settlement, idempotent: true, payout, journal });
-    return;
-  }
-  const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
-  const hold = evaluateSettlementHold({
-    status: settlement.status,
-    itemCount,
-    netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
-  });
-  if (hold.blocked) {
+    await createEvent({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      type: EventType.SETTLEMENT_PAID,
+      message: `Settlement paid`,
+      meta: { settlementId: updated.id, payout, journal: journalToJson(journal) },
+    });
     await logAudit({
       orgId: req.user!.orgId,
       userId: req.user!.id,
-      action: "SETTLEMENT_HOLD_BLOCKED",
+      action: "SETTLEMENT_PAID",
       entity: "Settlement",
-      entityId: settlement.id,
-      summary: `Blocked settlement paid transition due to hold policy (${hold.reasonCode ?? "UNKNOWN"})`,
+      entityId: updated.id,
+      summary: `Paid settlement ${updated.id}`,
       before: { status: settlement.status },
-      meta: {
-        stage: "PAID",
-        itemCount,
-        netCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
-        holdReasonCode: hold.reasonCode ?? null,
-        holdOwner: hold.owner ?? null,
-      },
+      after: { status: updated.status },
+      meta: { payout, journal: journalToJson(journal) },
     });
-    res.status(400).json({ error: hold.message ?? "Settlement is blocked by hold policy", holdReasonCode: hold.reasonCode ?? null });
-    return;
+    res.json({ settlement: updated, idempotent: false, payout, journal });
+  } catch (error) {
+    sendServerError(res, "Failed to mark settlement paid", error);
   }
-  if (isMarkSettlementPaidIdempotent(settlement.status)) {
-    await prisma.$transaction(async (tx) => {
-      await persistFinanceJournalEntry(tx as any, {
-        journal,
-        createdById: req.user!.id,
-        payout,
-        metadata: { source: "settlement-paid-idempotent" },
-      });
-      await applyFinanceWalletWriteThrough(tx as any, { journal });
-    });
-    res.json({ settlement, idempotent: true, payout, journal });
-    return;
-  }
-  if (!canMarkSettlementPaid(settlement.status)) {
-    res.status(400).json({ error: "Settlement must be FINALIZED before marking paid" });
-    return;
-  }
-  const updated = await prisma.$transaction(async (tx) => {
-    const nextSettlement = await tx.settlement.update({
-      where: { id: settlement.id },
-      data: { status: SettlementStatus.PAID, paidAt: new Date() },
-    });
-    await persistFinanceJournalEntry(tx as any, {
-      journal,
-      createdById: req.user!.id,
-      payout,
-      metadata: { source: "settlement-paid" },
-    });
-    await applyFinanceWalletWriteThrough(tx as any, { journal });
-    return nextSettlement;
-  });
-  await createEvent({
-    orgId: req.user!.orgId,
-    userId: req.user!.id,
-    type: EventType.SETTLEMENT_PAID,
-    message: `Settlement paid`,
-    meta: { settlementId: updated.id, payout, journal: journalToJson(journal) },
-  });
-  await logAudit({
-    orgId: req.user!.orgId,
-    userId: req.user!.id,
-    action: "SETTLEMENT_PAID",
-    entity: "Settlement",
-    entityId: updated.id,
-    summary: `Paid settlement ${updated.id}`,
-    before: { status: settlement.status },
-    after: { status: updated.status },
-    meta: { payout, journal: journalToJson(journal) },
-  });
-  res.json({ settlement: updated, idempotent: false, payout, journal });
 });
 
 app.get("/public/files/packets/:name", async (req, res) => {
