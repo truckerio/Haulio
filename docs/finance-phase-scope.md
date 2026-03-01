@@ -42,3 +42,8 @@ Delivered + POD approved → Ready to invoice → Invoice issued → Settlement 
 ## Definition of done
 - Finance foundation is implemented, audited, and frozen.
 - No additional finance features are added in Phase 5 beyond the scope above.
+
+## Phase 5 Progress (Current)
+- In progress:
+  - Settlement finalize/paid idempotency guards added in API transition paths.
+  - Deterministic transition helpers added in `apps/api/src/lib/settlement-state.ts`.

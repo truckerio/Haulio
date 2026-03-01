@@ -246,6 +246,12 @@ import {
 } from "./lib/payables-engine";
 import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
 import {
+  canFinalizeSettlement,
+  canMarkSettlementPaid,
+  isFinalizeSettlementIdempotent,
+  isMarkSettlementPaidIdempotent,
+} from "./lib/settlement-state";
+import {
   applyKernelTransition,
   buildKernelPatchFromLegacyLoadSnapshots,
   buildKernelStateFromLegacyLoad,
@@ -16153,8 +16159,12 @@ app.post("/settlements/:id/finalize", requireAuth, requireCsrf, requirePermissio
     res.status(404).json({ error: "Settlement not found" });
     return;
   }
-  if (settlement.status !== SettlementStatus.DRAFT) {
-    res.status(400).json({ error: "Settlement not in draft" });
+  if (isFinalizeSettlementIdempotent(settlement.status)) {
+    res.json({ settlement, idempotent: true });
+    return;
+  }
+  if (!canFinalizeSettlement(settlement.status)) {
+    res.status(400).json({ error: "Settlement must be in DRAFT before finalize" });
     return;
   }
   const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
@@ -16183,7 +16193,7 @@ app.post("/settlements/:id/finalize", requireAuth, requireCsrf, requirePermissio
     before: { status: settlement.status },
     after: { status: updated.status },
   });
-  res.json({ settlement: updated });
+  res.json({ settlement: updated, idempotent: false });
 });
 
 app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {
@@ -16192,6 +16202,14 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     settlement = await requireOrgEntity(prisma.settlement, req.user!.orgId, req.params.id, "Settlement");
   } catch {
     res.status(404).json({ error: "Settlement not found" });
+    return;
+  }
+  if (isMarkSettlementPaidIdempotent(settlement.status)) {
+    res.json({ settlement, idempotent: true });
+    return;
+  }
+  if (!canMarkSettlementPaid(settlement.status)) {
+    res.status(400).json({ error: "Settlement must be FINALIZED before marking paid" });
     return;
   }
   const itemCount = await prisma.settlementItem.count({ where: { settlementId: settlement.id } });
@@ -16220,7 +16238,7 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
     before: { status: settlement.status },
     after: { status: updated.status },
   });
-  res.json({ settlement: updated });
+  res.json({ settlement: updated, idempotent: false });
 });
 
 app.get("/public/files/packets/:name", async (req, res) => {

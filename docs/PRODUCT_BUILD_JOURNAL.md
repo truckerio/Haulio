@@ -12,3 +12,9 @@
   - Why: close the loop from delivery → invoice → settlement → payout with auditability.
   - Non-goals: no real ACH, no factoring partner, no card issuing, no ML.
   - Done means: ledger + wallets + holds + payouts + idempotency + audit log, then freeze.
+
+## 2026-02-28
+- Phase 5 start: settlement finance-state idempotency hardening.
+  - Added explicit settlement transition guards for finalize/paid paths.
+  - Added idempotent response behavior for repeated finalize/paid requests.
+  - Added pure transition tests under `apps/api/src/lib/settlement-state.test.ts`.
