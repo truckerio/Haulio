@@ -38,6 +38,7 @@
     "demo:smoke": "pnpm --filter @truckerio/api exec tsx scripts/smoke-happy-path.ts && pnpm --filter @truckerio/api exec tsx scripts/smoke-failure-paths.ts && pnpm --filter @truckerio/api exec tsx scripts/tenant-isolation.ts",
     "demo:smoke:phase2": "pnpm --filter @truckerio/api exec tsx scripts/smoke-phase2-trip-finance.ts",
     "demo:smoke:phase3": "pnpm --filter @truckerio/api exec tsx scripts/smoke-kernel-first-wave.ts",
+    "demo:smoke:phase4": "pnpm --filter @truckerio/api run test:driver && pnpm --filter @truckerio/web run test:driver && pnpm --filter @truckerio/api run test:today && pnpm --filter @truckerio/web run test:today",
     "demo:smoke:enforce": "pnpm --filter @truckerio/api exec tsx scripts/smoke-kernel-enforce-wave.ts",
     "demo:smoke:roles": "pnpm --filter @truckerio/api exec tsx scripts/smoke-role-matrix.ts",
     "demo:kernel:report": "pnpm --filter @truckerio/api exec tsx scripts/kernel-divergence-report.ts",
@@ -53,6 +54,7 @@
     "ci:drift": "pnpm ci:drift:roles && pnpm ci:drift:status",
     "ci:kernel:pilot": "pnpm --filter @truckerio/api run test:kernel && pnpm demo:kernel:report",
     "ci:kernel:phase3": "pnpm ci:kernel:pilot && pnpm demo:smoke:phase3",
+    "ci:phase4": "pnpm demo:smoke:phase4",
     "ci:kernel:phasee": "pnpm ci:kernel:phase3 && pnpm demo:smoke:roles && pnpm demo:smoke:enforce"
   }
 }

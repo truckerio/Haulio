@@ -8,7 +8,7 @@
     "build": "pnpm -w prisma:generate",
     "prisma:generate": "pnpm -w prisma:generate",
     "start": "node dist/index.js",
-    "test": "pnpm test:billing && pnpm test:finance && pnpm test:payables && pnpm test:notes && pnpm test:activity && pnpm test:inbound && pnpm test:authz",
+    "test": "pnpm test:billing && pnpm test:finance && pnpm test:payables && pnpm test:notes && pnpm test:activity && pnpm test:inbound && pnpm test:authz && pnpm test:driver",
     "test:assist": "tsx src/modules/assignmentAssist/scoring.test.ts && tsx src/modules/assignmentAssist/validation.test.ts",
     "test:assignment": "tsx src/lib/load-assignment.test.ts",
     "test:billing": "node --import tsx src/lib/billing-readiness.test.ts",
@@ -21,6 +21,7 @@
     "test:activity": "node --import tsx src/modules/activity/summary.test.ts",
     "test:inbound": "node --import tsx src/modules/inbound-email/sendgrid.test.ts && node --import tsx src/modules/inbound-email/service.test.ts",
     "test:authz": "node --import tsx src/lib/dispatch-role-parity.test.ts && node --import tsx src/lib/settlement-preview-auth.test.ts",
+    "test:driver": "node --import tsx src/lib/driver-ops-contract.test.ts",
     "test:teams": "tsx src/modules/teams/assign.test.ts",
     "test:vault": "tsx src/lib/vault-status.test.ts"
   },

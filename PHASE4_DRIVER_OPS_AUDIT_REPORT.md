@@ -55,5 +55,7 @@ Date: 2026-01-25
 - `pnpm -r typecheck` ✅
 - `pnpm -r lint` ✅
 - `pnpm -r build` ✅
+- `pnpm demo:smoke:phase4` ✅
+- `pnpm ci:phase4` ✅
 
 Phase 4 is **DONE** per contract (all criteria PASS).

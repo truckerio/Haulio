@@ -49,14 +49,14 @@
 - Driver access to load/tracking restricted to assigned loads
 
 ## Audit Checklist (PASS/FAIL)
-- [ ] Driver home shows current load and next action
-- [ ] Arrive/Depart actions are confirmed and logged
-- [ ] POD/doc upload works and status updates
-- [ ] Compliance warnings visible in driver UI
-- [ ] Tracking start/stop/ping works for assigned loads
-- [ ] Driver settlements list filters work and are read-only
-- [ ] Driver cannot access non‑assigned loads
-- [ ] Task Inbox receives compliance/POD tasks
+- [x] Driver home shows current load and next action
+- [x] Arrive/Depart actions are confirmed and logged
+- [x] POD/doc upload works and status updates
+- [x] Compliance warnings visible in driver UI
+- [x] Tracking start/stop/ping works for assigned loads
+- [x] Driver settlements list filters work and are read-only
+- [x] Driver cannot access non‑assigned loads
+- [x] Task Inbox receives compliance/POD tasks
 
 ---
 
