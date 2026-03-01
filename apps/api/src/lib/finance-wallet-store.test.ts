@@ -14,6 +14,11 @@ function createMockDb() {
   return {
     db: {
       financeWalletSnapshot: {
+        async findUnique(args: any) {
+          const key = `${args.where.orgId_idempotencyKey_account.orgId}:${args.where.orgId_idempotencyKey_account.idempotencyKey}:${args.where.orgId_idempotencyKey_account.account}`;
+          const row = snapshots.get(key) ?? null;
+          return row ? { id: row.id } : null;
+        },
         async create(args: any) {
           const key = `${args.data.orgId}:${args.data.idempotencyKey}:${args.data.account}`;
           if (snapshots.has(key)) {
