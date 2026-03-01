@@ -238,26 +238,60 @@ async function main() {
   }
 
   const idempotencyKeys = [payablePaidFirst.payout.idempotencyKey, settlementPaidFirst.payout.idempotencyKey];
-  const journals = await (prisma as any).financeJournalEntry.findMany({
-    where: { orgId: org.id, idempotencyKey: { in: idempotencyKeys } },
-    select: { id: true, idempotencyKey: true, eventType: true },
-  });
+  const prismaAny = prisma as any;
+  const journals =
+    typeof prismaAny.financeJournalEntry?.findMany === "function"
+      ? await prismaAny.financeJournalEntry.findMany({
+          where: { orgId: org.id, idempotencyKey: { in: idempotencyKeys } },
+          select: { id: true, idempotencyKey: true, eventType: true },
+        })
+      : await prisma.$queryRaw<Array<{ id: string; idempotencyKey: string; eventType: string }>>(
+          Prisma.sql`
+            SELECT id, "idempotencyKey", "eventType"
+            FROM "FinanceJournalEntry"
+            WHERE "orgId" = ${org.id}
+              AND "idempotencyKey" IN (${Prisma.join(idempotencyKeys)})
+          `
+        );
   if (journals.length !== 2) {
     throw new Error(`expected 2 journal entries, found ${journals.length}`);
   }
 
-  const snapshots = await (prisma as any).financeWalletSnapshot.findMany({
-    where: { orgId: org.id, idempotencyKey: { in: idempotencyKeys } },
-    select: { account: true, idempotencyKey: true },
-  });
+  const snapshots =
+    typeof prismaAny.financeWalletSnapshot?.findMany === "function"
+      ? await prismaAny.financeWalletSnapshot.findMany({
+          where: { orgId: org.id, idempotencyKey: { in: idempotencyKeys } },
+          select: { account: true, idempotencyKey: true },
+        })
+      : await prisma.$queryRaw<Array<{ account: string; idempotencyKey: string }>>(
+          Prisma.sql`
+            SELECT account, "idempotencyKey"
+            FROM "FinanceWalletSnapshot"
+            WHERE "orgId" = ${org.id}
+              AND "idempotencyKey" IN (${Prisma.join(idempotencyKeys)})
+          `
+        );
   if (snapshots.length !== 4) {
     throw new Error(`expected 4 wallet snapshots (2 accounts x 2 events), found ${snapshots.length}`);
   }
 
-  const balances = await (prisma as any).financeWalletBalance.findMany({
-    where: { orgId: org.id, account: { in: ["DRIVER_PAYABLE", "CASH_CLEARING"] } },
-    select: { account: true, debitCents: true, creditCents: true, netCents: true },
-  });
+  const walletAccounts = ["DRIVER_PAYABLE", "CASH_CLEARING"];
+  const balances =
+    typeof prismaAny.financeWalletBalance?.findMany === "function"
+      ? await prismaAny.financeWalletBalance.findMany({
+          where: { orgId: org.id, account: { in: walletAccounts } },
+          select: { account: true, debitCents: true, creditCents: true, netCents: true },
+        })
+      : await prisma.$queryRaw<
+          Array<{ account: string; debitCents: bigint | number; creditCents: bigint | number; netCents: bigint | number }>
+        >(
+          Prisma.sql`
+            SELECT account, "debitCents", "creditCents", "netCents"
+            FROM "FinanceWalletBalance"
+            WHERE "orgId" = ${org.id}
+              AND account IN (${Prisma.join(walletAccounts)})
+          `
+        );
   if (balances.length !== 2) {
     throw new Error(`expected 2 wallet balances, found ${balances.length}`);
   }
