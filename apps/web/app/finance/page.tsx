@@ -6,11 +6,13 @@ import { AppShell } from "@/components/app-shell";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { ReceivablesPanel } from "@/components/finance/ReceivablesPanel";
 import { PayablesPanel } from "@/components/finance/PayablesPanel";
+import { FinanceJournalsPanel } from "@/components/finance/FinanceJournalsPanel";
 import { FinanceSettingsPanel } from "@/components/finance/FinanceSettingsPanel";
 
 const TAB_OPTIONS = [
   { label: "Receivables", value: "receivables" },
   { label: "Payables", value: "payables" },
+  { label: "Journals", value: "journals" },
   { label: "Settings", value: "settings" },
 ];
 
@@ -47,6 +49,7 @@ function FinanceContent() {
       <SegmentedControl value={activeTab} options={TAB_OPTIONS} onChange={handleTabChange} />
       {activeTab === "receivables" ? <ReceivablesPanel focusReadiness={focusReadiness} /> : null}
       {activeTab === "payables" ? <PayablesPanel /> : null}
+      {activeTab === "journals" ? <FinanceJournalsPanel /> : null}
       {activeTab === "settings" ? <FinanceSettingsPanel /> : null}
     </div>
   );

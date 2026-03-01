@@ -12,9 +12,15 @@ Start Phase 6 with read-only finance observability surfaces, without changing di
   - Strict org scoping
   - Optional filters: `entityType`, `eventType`, `entityId`, `limit`
   - Returns immutable journal headers + lines + idempotency keys
+- Finance cockpit surface:
+  - Added `Journals` tab on `/finance`
+  - New read-only `FinanceJournalsPanel` wired to `/finance/journals`
+  - Capability-gated and fail-closed on 403 with `Restricted` label
 
 ## Validation
 ```bash
 pnpm --filter @truckerio/api run test:finance
 pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit
+pnpm --filter @truckerio/web run test:finance
+pnpm --filter @truckerio/web run typecheck
 ```
