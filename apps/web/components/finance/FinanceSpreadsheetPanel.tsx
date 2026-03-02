@@ -44,6 +44,9 @@ type ReceivablesResponse = {
   rows?: FinanceRow[];
 };
 
+type SortKey = "loadNumber" | "billingStage" | "customer" | "amountCents" | "deliveredAt" | "blockers" | "qbo" | "action";
+type SortDirection = "asc" | "desc";
+
 const LANE_LABELS = {
   GENERATE_INVOICE: "Invoice now",
   RETRY_QBO_SYNC: "Retry QBO",
@@ -80,6 +83,38 @@ function actionLabel(action: string) {
     .join(" ");
 }
 
+function compareText(a: string | null | undefined, b: string | null | undefined) {
+  return (a ?? "").localeCompare(b ?? "", undefined, { sensitivity: "base" });
+}
+
+function stageSortRank(stage: FinanceRow["billingStage"]) {
+  switch (stage) {
+    case "DELIVERED":
+      return 0;
+    case "DOCS_REVIEW":
+      return 1;
+    case "READY":
+      return 2;
+    case "INVOICE_SENT":
+      return 3;
+    case "COLLECTED":
+      return 4;
+    case "SETTLED":
+      return 5;
+    default:
+      return 99;
+  }
+}
+
+function blockerCount(row: FinanceRow) {
+  return row.readinessSnapshot?.blockers?.length ?? 0;
+}
+
+function nextSortDirection(key: SortKey): SortDirection {
+  if (key === "amountCents" || key === "deliveredAt" || key === "blockers") return "desc";
+  return "asc";
+}
+
 export function FinanceSpreadsheetPanel() {
   const router = useRouter();
   const { user, capabilities } = useUser();
@@ -95,6 +130,9 @@ export function FinanceSpreadsheetPanel() {
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isSpreadsheetMaximized, setIsSpreadsheetMaximized] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>("deliveredAt");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
 
   const loadRows = useCallback(async () => {
     if (!canAccess) return;
@@ -110,6 +148,7 @@ export function FinanceSpreadsheetPanel() {
       setRows(nextRows);
       setSelectedId((prev) => (prev && nextRows.some((row) => row.loadId === prev) ? prev : nextRows[0]?.loadId ?? null));
       setPage(1);
+      setLastRefreshedAt(new Date().toISOString());
       setError(null);
       setRestrictedBy403(false);
     } catch (err) {
@@ -147,14 +186,33 @@ export function FinanceSpreadsheetPanel() {
     };
   }, [isSpreadsheetMaximized]);
 
-  const totalPages = Math.max(1, Math.ceil(rows.length / rowsPerPage));
+  const sortedRows = useMemo(() => {
+    const factor = sortDirection === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      let result = 0;
+      if (sortKey === "loadNumber") result = compareText(a.loadNumber, b.loadNumber);
+      if (sortKey === "billingStage") result = stageSortRank(a.billingStage) - stageSortRank(b.billingStage);
+      if (sortKey === "customer") result = compareText(a.customer, b.customer);
+      if (sortKey === "amountCents") result = Number(a.amountCents || 0) - Number(b.amountCents || 0);
+      if (sortKey === "deliveredAt") result = Number(new Date(a.deliveredAt ?? 0)) - Number(new Date(b.deliveredAt ?? 0));
+      if (sortKey === "blockers") result = blockerCount(a) - blockerCount(b);
+      if (sortKey === "qbo") result = compareText(a.integrations?.quickbooks?.syncStatus, b.integrations?.quickbooks?.syncStatus);
+      if (sortKey === "action") result = compareText(a.actions?.primaryAction, b.actions?.primaryAction);
+      if (result === 0) {
+        result = compareText(a.loadNumber, b.loadNumber);
+      }
+      return result * factor;
+    });
+  }, [rows, sortDirection, sortKey]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / rowsPerPage));
   const normalizedPage = Math.min(page, totalPages);
   const pageStart = (normalizedPage - 1) * rowsPerPage;
-  const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + rowsPerPage), [pageStart, rows, rowsPerPage]);
-  const selected = useMemo(() => rows.find((row) => row.loadId === selectedId) ?? null, [rows, selectedId]);
+  const visibleRows = useMemo(() => sortedRows.slice(pageStart, pageStart + rowsPerPage), [pageStart, rowsPerPage, sortedRows]);
+  const selected = useMemo(() => sortedRows.find((row) => row.loadId === selectedId) ?? null, [sortedRows, selectedId]);
   const laneCounts = useMemo(() => {
     const counts = Object.fromEntries(Object.keys(LANE_LABELS).map((key) => [key, 0])) as Record<string, number>;
-    for (const row of rows) {
+    for (const row of sortedRows) {
       for (const action of row.actions?.allowedActions ?? []) {
         if (action in counts) {
           counts[action] += 1;
@@ -162,7 +220,31 @@ export function FinanceSpreadsheetPanel() {
       }
     }
     return counts;
-  }, [rows]);
+  }, [sortedRows]);
+  const summaryStats = useMemo(() => {
+    let blocked = 0;
+    let ready = 0;
+    let totalAmountCents = 0;
+    for (const row of sortedRows) {
+      const blockers = blockerCount(row);
+      if (blockers > 0) blocked += 1;
+      else ready += 1;
+      totalAmountCents += Number(row.amountCents || 0);
+    }
+    return { blocked, ready, totalAmountCents };
+  }, [sortedRows]);
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortKey(key);
+    setSortDirection(nextSortDirection(key));
+  };
+  const sortGlyph = (key: SortKey) => {
+    if (sortKey !== key) return "↕";
+    return sortDirection === "asc" ? "↑" : "↓";
+  };
   const rowPaddingClass = "px-2.5 py-1.5";
   const tableTextClass = "text-xs";
   const cardPaddingClass = "!p-2.5 sm:!p-3";
@@ -247,7 +329,7 @@ export function FinanceSpreadsheetPanel() {
         <Card className={`space-y-2 ${cardPaddingClass}`}>
           <SectionHeader
             title="Finance spreadsheet"
-            subtitle={`Showing ${visibleRows.length} of ${rows.length} rows · page ${normalizedPage}/${totalPages}`}
+            subtitle={`Showing ${visibleRows.length} of ${sortedRows.length} rows · page ${normalizedPage}/${totalPages}`}
             action={
               <Button
                 size="sm"
@@ -271,6 +353,12 @@ export function FinanceSpreadsheetPanel() {
               </Button>
             }
           />
+          <div className="flex flex-wrap items-center gap-2 border-b border-[color:var(--color-divider)] pb-2 text-xs">
+            <StatusChip tone={summaryStats.blocked > 0 ? "warning" : "success"} label={`Blocked ${summaryStats.blocked}`} />
+            <StatusChip tone="success" label={`Ready ${summaryStats.ready}`} />
+            <StatusChip tone="info" label={`Amount ${formatCurrency(summaryStats.totalAmountCents)}`} />
+            <span className="ml-auto text-[color:var(--color-text-muted)]">{lastRefreshedAt ? `Last refresh ${formatDateTime(lastRefreshedAt)}` : "Not refreshed yet"}</span>
+          </div>
           {loading ? <EmptyState title="Loading finance rows..." /> : null}
           {!loading && rows.length === 0 ? <EmptyState title="No finance rows found." /> : null}
           {!loading && rows.length > 0 ? (
@@ -288,30 +376,64 @@ export function FinanceSpreadsheetPanel() {
                 </colgroup>
                 <thead className="sticky top-0 z-10 bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
                   <tr>
-                    <th className={`sticky left-0 z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] text-left ${rowPaddingClass}`}>Load #</th>
-                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Stage</th>
-                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Customer</th>
-                    <th className={`border-b border-[color:var(--color-divider)] text-right ${rowPaddingClass}`}>Amount</th>
-                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Delivered</th>
-                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Blockers</th>
-                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>QBO</th>
-                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Next action</th>
+                    <th className={`sticky left-0 z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] text-left ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("loadNumber")}>
+                        Load #<span aria-hidden="true">{sortGlyph("loadNumber")}</span>
+                      </button>
+                    </th>
+                    <th className={`sticky left-[160px] z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] text-left ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("billingStage")}>
+                        Stage <span aria-hidden="true">{sortGlyph("billingStage")}</span>
+                      </button>
+                    </th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("customer")}>
+                        Customer <span aria-hidden="true">{sortGlyph("customer")}</span>
+                      </button>
+                    </th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-right ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("amountCents")}>
+                        Amount <span aria-hidden="true">{sortGlyph("amountCents")}</span>
+                      </button>
+                    </th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("deliveredAt")}>
+                        Delivered <span aria-hidden="true">{sortGlyph("deliveredAt")}</span>
+                      </button>
+                    </th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("blockers")}>
+                        Blockers <span aria-hidden="true">{sortGlyph("blockers")}</span>
+                      </button>
+                    </th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("qbo")}>
+                        QBO <span aria-hidden="true">{sortGlyph("qbo")}</span>
+                      </button>
+                    </th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>
+                      <button type="button" className="inline-flex items-center gap-1 font-semibold" onClick={() => handleSort("action")}>
+                        Next action <span aria-hidden="true">{sortGlyph("action")}</span>
+                      </button>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleRows.map((row) => {
+                  {visibleRows.map((row, index) => {
                     const active = row.loadId === selectedId;
                     const blockerCount = row.readinessSnapshot?.blockers?.length ?? 0;
+                    const striped = index % 2 === 1 ? "bg-[color:var(--color-bg-muted)]/35" : "bg-white";
+                    const rowTone = active ? "bg-[color:var(--color-accent-soft)]/20" : striped;
                     return (
                       <tr
                         key={row.loadId}
                         onClick={() => setSelectedId(row.loadId)}
-                        className={`cursor-pointer ${active ? "bg-[color:var(--color-accent-soft)]/20" : ""}`}
+                        className={`cursor-pointer transition-colors hover:bg-[color:var(--color-accent-soft)]/15 ${rowTone}`}
                       >
-                        <td className={`sticky left-0 z-10 border-b border-[color:var(--color-divider)] font-semibold text-ink ${rowPaddingClass} ${active ? "bg-[color:var(--color-accent-soft)]/20" : "bg-white"}`}>
+                        <td className={`sticky left-0 z-10 border-b border-[color:var(--color-divider)] font-semibold text-ink ${rowPaddingClass} ${rowTone}`}>
                           {row.loadNumber}
                         </td>
-                        <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>
+                        <td className={`sticky left-[160px] z-10 border-b border-[color:var(--color-divider)] ${rowPaddingClass} ${rowTone}`}>
                           <StatusChip tone={stageTone(row.billingStage)} label={stageLabel(row.billingStage)} />
                         </td>
                         <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>{row.customer ?? "-"}</td>
@@ -336,7 +458,7 @@ export function FinanceSpreadsheetPanel() {
           {rows.length > 0 ? (
             <div className="flex items-center justify-between gap-2 border-t border-[color:var(--color-divider)] pt-2">
               <div className="text-xs text-[color:var(--color-text-muted)]">
-                {pageStart + 1}-{Math.min(pageStart + rowsPerPage, rows.length)} of {rows.length}
+                {pageStart + 1}-{Math.min(pageStart + rowsPerPage, sortedRows.length)} of {sortedRows.length}
               </div>
               <div className="flex items-center gap-2">
                 <Button size="sm" variant="secondary" onClick={() => setPage((prev) => Math.max(1, prev - 1))} disabled={normalizedPage <= 1}>

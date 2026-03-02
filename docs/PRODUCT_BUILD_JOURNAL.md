@@ -49,3 +49,15 @@
   - Added web finance summary rail contract test (`app/finance/finance-summary-rail-contract.test.ts`).
   - Added phase gate command `pnpm ci:phase6` and `docs/PHASE6_PASS.md`.
   - Added `docs/PHASE6_START.md`.
+
+## 2026-03-02
+- Phase 9 start + pass: finance spreadsheet UX principles hardening.
+  - Added sortable columns to finance spreadsheet for faster triage scans.
+  - Added in-surface summary chips (blocked, ready, amount) and refresh recency signal.
+  - Improved table scan hierarchy with sticky stage context and clearer row rhythm.
+  - Added Phase 9 finance UX contract test and phase scripts:
+    - `demo:smoke:phase9`
+    - `ci:phase9`
+  - Added docs:
+    - `docs/PHASE9_START.md`
+    - `docs/PHASE9_PASS.md`
