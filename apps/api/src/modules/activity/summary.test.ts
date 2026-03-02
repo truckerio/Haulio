@@ -24,6 +24,7 @@ const issueSummary = buildTodayIssueSummary({
 });
 
 const activity = buildActivitySummary({
+  generatedAt: new Date("2026-03-02T23:20:00.000Z"),
   role: Role.DISPATCHER,
   issueSummary,
   openExceptionsCount: 2,
@@ -66,6 +67,11 @@ assert.equal(activity.badgeCount, expectedBadge, "badgeCount must equal NOW ALER
 
 const groupedMissingPod = activity.now.find((item) => item.id === "issue:MISSING_POD");
 assert.equal(groupedMissingPod?.count, 3, "missing POD must stay grouped with correct count");
+assert.equal(
+  groupedMissingPod?.timestamp,
+  "2026-03-02T23:20:00.000Z",
+  "issue timestamps should use summary generation time"
+);
 
 const dispatchOnly = buildActivitySummary({
   role: Role.DISPATCHER,

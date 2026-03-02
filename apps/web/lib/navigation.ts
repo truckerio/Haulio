@@ -41,9 +41,7 @@ const roleRoutes: Record<string, string[]> = {
   ADMIN: [
     "/today",
     "/dashboard",
-    "/loads",
     "/dispatch",
-    "/trips",
     "/teams",
     "/finance",
     "/audit",

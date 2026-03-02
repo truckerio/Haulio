@@ -4547,6 +4547,11 @@ async function buildRoleIssueSummary(params: {
     });
     const mappedIssues = mapReadinessProjectionToIssues(readiness);
     for (const issueType of ISSUE_TYPES) {
+      if (issueType === "NEEDS_ASSIGNMENT") {
+        // Count loads that need assignment, not individual missing-driver/missing-equipment blockers.
+        issueCounts[issueType] += mappedIssues.issueCounts[issueType] > 0 ? 1 : 0;
+        continue;
+      }
       issueCounts[issueType] += mappedIssues.issueCounts[issueType];
     }
   }

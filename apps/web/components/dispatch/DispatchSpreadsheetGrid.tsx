@@ -1646,14 +1646,14 @@ export function DispatchSpreadsheetGrid({
     return exportColumns.length ? exportColumns : defaultVisibleExportColumns;
   }, [defaultVisibleExportColumns, exportColumnMode, exportColumns]);
 
-  const exportColumnLabels = useMemo(() => {
-    const base = effectiveExportColumns.map((column) => ({
-      key: column,
-      label: columnLabel(column),
-    }));
-    if (!includeRowHighlights) return base;
-    return [...base, { key: "__rowHighlight" as const, label: "Row Highlight" }];
-  }, [effectiveExportColumns, includeRowHighlights]);
+  const exportColumnLabels = useMemo(
+    () =>
+      effectiveExportColumns.map((column) => ({
+        key: column,
+        label: columnLabel(column),
+      })),
+    [effectiveExportColumns]
+  );
 
   const exportRows = useMemo(() => {
     if (exportScope === "selected") return selectedRowsForExport;
@@ -1811,7 +1811,7 @@ export function DispatchSpreadsheetGrid({
     [setColumnFilters]
   );
 
-  const downloadExportCsv = useCallback(async () => {
+  const downloadExportFile = useCallback(async () => {
     if (!exportColumnLabels.length) return;
     setExportPreparing(true);
     try {
@@ -1819,16 +1819,7 @@ export function DispatchSpreadsheetGrid({
         window.requestAnimationFrame(() => resolve());
       });
       const headers = exportColumnLabels.map((column) => column.label);
-      const lines = [headers.map(csvEscape).join(",")];
-      for (const row of exportRows) {
-        const values = exportColumnLabels.map((column) => {
-          if (column.key === "__rowHighlight") return highlightedRowIds.has(row.id) ? "Highlighted" : "";
-          return buildExportCellValue(row, column.key);
-        });
-        lines.push(values.map((value) => csvEscape(value)).join(","));
-      }
-      const csv = lines.join("\n");
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const rowValues = exportRows.map((row) => exportColumnLabels.map((column) => buildExportCellValue(row, column.key)));
       const datePart = new Date().toISOString().slice(0, 10);
       let scopePart: string = exportScope;
       if (statusFilter.includeValues.length || statusFilter.excludeValues.length) {
@@ -1838,7 +1829,45 @@ export function DispatchSpreadsheetGrid({
           scopePart = `not-${statusFilter.excludeValues.map((value) => toSlug(value)).join("-")}`;
         }
       }
-      const filename = `loads_${scopePart || "dispatch"}_${datePart}.csv`;
+
+      let blob: Blob;
+      let filename: string;
+      if (includeRowHighlights) {
+        const XLSX = await import("xlsx");
+        const sheetData = [headers, ...rowValues];
+        const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
+        for (let rowIndex = 0; rowIndex < exportRows.length; rowIndex += 1) {
+          if (!highlightedRowIds.has(exportRows[rowIndex].id)) continue;
+          for (let columnIndex = 0; columnIndex < exportColumnLabels.length; columnIndex += 1) {
+            const address = XLSX.utils.encode_cell({ r: rowIndex + 1, c: columnIndex });
+            const cell = worksheet[address];
+            if (!cell) continue;
+            cell.s = {
+              ...(cell.s ?? {}),
+              fill: {
+                patternType: "solid",
+                fgColor: { rgb: "FFF4DB" },
+              },
+            };
+          }
+        }
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Dispatch");
+        const xlsx = XLSX.write(workbook, { type: "array", bookType: "xlsx", cellStyles: true });
+        blob = new Blob([xlsx], {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        filename = `loads_${scopePart || "dispatch"}_${datePart}.xlsx`;
+      } else {
+        const lines = [headers.map(csvEscape).join(",")];
+        for (const values of rowValues) {
+          lines.push(values.map((value) => csvEscape(value)).join(","));
+        }
+        const csv = lines.join("\n");
+        blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+        filename = `loads_${scopePart || "dispatch"}_${datePart}.csv`;
+      }
+
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1850,7 +1879,15 @@ export function DispatchSpreadsheetGrid({
     } finally {
       setExportPreparing(false);
     }
-  }, [exportColumnLabels, exportRows, exportScope, highlightedRowIds, statusFilter.excludeValues, statusFilter.includeValues]);
+  }, [
+    exportColumnLabels,
+    exportRows,
+    exportScope,
+    highlightedRowIds,
+    includeRowHighlights,
+    statusFilter.excludeValues,
+    statusFilter.includeValues,
+  ]);
 
   const copyRowsToClipboard = useCallback(async () => {
     const rowsToCopy = selectedRowsForExport.length > 0 ? selectedRowsForExport : sortedRows;
@@ -2528,19 +2565,11 @@ export function DispatchSpreadsheetGrid({
                 : hoveredRowId === row.id
                 ? "bg-[color:var(--color-bg-muted)]/55"
                 : "bg-[color:var(--color-surface)]";
-              const rowBackgroundColor = selected
-                ? "var(--color-surface-hover)"
-                : highlighted
-                ? "var(--color-accent-soft)"
-                : hoveredRowId === row.id
-                ? "var(--color-bg-muted)"
-                : "var(--color-surface)";
               return (
                 <div
                   key={row.id}
                   className={cn(
                     "absolute left-0 right-0 border-b border-[color:var(--color-divider)]",
-                    rowBackgroundClass,
                     focused ? "ring-1 ring-inset ring-[color:var(--color-accent-soft)]" : ""
                   )}
                   style={{ top, height: rowHeight }}
@@ -2569,6 +2598,7 @@ export function DispatchSpreadsheetGrid({
                         density === "compact" ? "py-1.5" : "py-2",
                         column.align === "right" ? "flex items-center justify-end" : "flex items-center",
                         column.align === "center" ? "justify-center" : "",
+                        rowBackgroundClass,
                         isFocusedCell ? "bg-[color:var(--color-bg-muted)]/60" : ""
                       );
 
@@ -2879,7 +2909,6 @@ export function DispatchSpreadsheetGrid({
                                   position: "sticky",
                                   left: stickyLeft,
                                   zIndex: 10,
-                                  backgroundColor: rowBackgroundColor,
                                 }
                               : undefined
                           }
@@ -3063,7 +3092,7 @@ export function DispatchSpreadsheetGrid({
             <div className="flex items-center justify-between border-b border-[color:var(--color-divider)] px-4 py-4 sm:px-5">
               <div>
                 <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Export</div>
-                <div className="text-lg font-semibold text-ink">CSV Preview</div>
+                <div className="text-lg font-semibold text-ink">Export Preview</div>
               </div>
               <button
                 type="button"
@@ -3097,7 +3126,7 @@ export function DispatchSpreadsheetGrid({
                   checked={includeRowHighlights}
                   onChange={(event) => setIncludeRowHighlights(event.target.checked)}
                 />
-                Include row highlights in export
+                Include row highlights in export (downloads XLSX)
               </label>
               {exportColumnMode === "choose" ? (
                 <div className="mt-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] p-3">
@@ -3138,14 +3167,13 @@ export function DispatchSpreadsheetGrid({
                   </thead>
                   <tbody>
                     {exportPreviewRows.map((row) => (
-                      <tr key={row.id}>
+                      <tr
+                        key={row.id}
+                        className={highlightedRowIds.has(row.id) ? "bg-[color:var(--color-accent-soft)]/35" : undefined}
+                      >
                         {exportColumnLabels.map((column) => (
                           <td key={`${row.id}:${column.key}`} className="border-b border-r border-[color:var(--color-divider)] px-2 py-1">
-                            {column.key === "__rowHighlight"
-                              ? highlightedRowIds.has(row.id)
-                                ? "Highlighted"
-                                : ""
-                              : buildExportCellValue(row, column.key)}
+                            {buildExportCellValue(row, column.key)}
                           </td>
                         ))}
                       </tr>
@@ -3174,9 +3202,9 @@ export function DispatchSpreadsheetGrid({
                 type="button"
                 className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-accent)] px-3 py-1.5 text-xs text-white hover:opacity-95 disabled:opacity-60"
                 disabled={exportPreparing || !exportColumnLabels.length}
-                onClick={() => void downloadExportCsv()}
+                onClick={() => void downloadExportFile()}
               >
-                {exportPreparing ? "Preparing…" : "Download CSV"}
+                {exportPreparing ? "Preparing…" : includeRowHighlights ? "Download XLSX" : "Download CSV"}
               </button>
             </div>
           </div>

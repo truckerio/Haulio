@@ -184,7 +184,10 @@ export function roleDefaultActivityDomain(role: Role): ActivityDomainFilter {
   return "dispatch";
 }
 
-function createIssueItems(issueSummary?: TodayIssueSummary): Array<{ bucket: ActivityBucket; item: ActivityItem }> {
+function createIssueItems(
+  issueSummary: TodayIssueSummary | undefined,
+  generatedAt: Date
+): Array<{ bucket: ActivityBucket; item: ActivityItem }> {
   const tiles = issueSummary?.tiles ?? [];
   return tiles
     .filter((tile) => tile.count > 0)
@@ -199,7 +202,7 @@ function createIssueItems(issueSummary?: TodayIssueSummary): Array<{ bucket: Act
           title: ISSUE_LABELS[tile.type],
           severity,
           domain,
-          timestamp: new Date(0).toISOString(),
+          timestamp: generatedAt.toISOString(),
           count: tile.count,
           cta: {
             label: queueCtaLabel(domain),
@@ -280,7 +283,7 @@ export function buildActivitySummary(params: {
   } as const;
 
   const items = [
-    ...createIssueItems(params.issueSummary),
+    ...createIssueItems(params.issueSummary, generatedAt),
     ...createNoteItems(params.noteGroups ?? []),
     ...createHistoryItems(params.history ?? []),
   ];
