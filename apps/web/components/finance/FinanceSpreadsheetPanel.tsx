@@ -244,8 +244,6 @@ export function FinanceSpreadsheetPanel() {
             : ""
         }
       >
-        <div className={isSpreadsheetMaximized ? "space-y-3" : ""}>
-          <div className={isSpreadsheetMaximized ? "grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(340px,380px)]" : "grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]"}>
         <Card className={`space-y-2 ${cardPaddingClass}`}>
           <SectionHeader
             title="Finance spreadsheet"
@@ -255,9 +253,21 @@ export function FinanceSpreadsheetPanel() {
                 size="sm"
                 variant="secondary"
                 aria-label={isSpreadsheetMaximized ? "Exit full screen" : "Maximize spreadsheet"}
+                title={isSpreadsheetMaximized ? "Exit full screen" : "Maximize spreadsheet"}
                 onClick={() => setIsSpreadsheetMaximized((prev) => !prev)}
+                className="h-8 w-8 p-0"
               >
-                {isSpreadsheetMaximized ? "Exit full screen" : "Maximize"}
+                {isSpreadsheetMaximized ? (
+                  <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M9 9H5V5M15 9h4V5M9 15H5v4M15 15h4v4" />
+                    <path d="M8 8l3 3M16 8l-3 3M8 16l3-3M16 16l-3-3" />
+                  </svg>
+                ) : (
+                  <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M5 9V5h4M19 9V5h-4M5 15v4h4M19 15v4h-4" />
+                    <path d="M9 5L5 9M15 5l4 4M9 19l-4-4M15 19l4-4" />
+                  </svg>
+                )}
               </Button>
             }
           />
@@ -338,66 +348,66 @@ export function FinanceSpreadsheetPanel() {
               </div>
             </div>
           ) : null}
-        </Card>
+          <div className="space-y-2 border-t border-[color:var(--color-divider)] pt-2">
+            <SectionHeader
+              title="Selected row details"
+              subtitle={selected ? `${selected.loadNumber} · ${stageLabel(selected.billingStage)}` : "Select a row in the spreadsheet"}
+            />
+            {!selected ? <EmptyState title="Pick a finance row to inspect details." /> : null}
+            {selected ? (
+              <div className="space-y-3">
+                <div className="grid gap-2 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 sm:block sm:space-y-1">
+                    <span className="text-[color:var(--color-text-muted)]">Customer</span>
+                    <div className="font-semibold text-ink">{selected.customer ?? "-"}</div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 sm:block sm:space-y-1">
+                    <span className="text-[color:var(--color-text-muted)]">Amount</span>
+                    <div className="font-semibold text-ink">{formatCurrency(selected.amountCents)}</div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 sm:block sm:space-y-1">
+                    <span className="text-[color:var(--color-text-muted)]">Delivered</span>
+                    <div className="text-ink">{formatDateTime(selected.deliveredAt)}</div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 sm:block sm:space-y-1">
+                    <span className="text-[color:var(--color-text-muted)]">QBO</span>
+                    <div className="text-ink">{selected.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</div>
+                  </div>
+                </div>
 
-        <Card className={`space-y-2 ${cardPaddingClass} xl:sticky xl:top-4 xl:h-fit`}>
-          <SectionHeader title="Quick view" subtitle={selected ? `${selected.loadNumber} · ${stageLabel(selected.billingStage)}` : "Select a row"} />
-          {!selected ? <EmptyState title="Pick a finance row to inspect details." /> : null}
-          {selected ? (
-            <div className="space-y-3">
-              <div className="grid gap-2 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-[color:var(--color-text-muted)]">Customer</span>
-                  <span className="font-semibold text-ink">{selected.customer ?? "-"}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[color:var(--color-text-muted)]">Amount</span>
-                  <span className="font-semibold text-ink">{formatCurrency(selected.amountCents)}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[color:var(--color-text-muted)]">Delivered</span>
-                  <span className="text-ink">{formatDateTime(selected.deliveredAt)}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[color:var(--color-text-muted)]">QBO</span>
-                  <span className="text-ink">{selected.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</span>
-                </div>
-              </div>
-
-              <div className="space-y-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2">
-                <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Readiness blockers</div>
-                {(selected.readinessSnapshot?.blockers ?? []).length === 0 ? (
-                  <StatusChip tone="success" label="No blockers" />
-                ) : (
-                  (selected.readinessSnapshot?.blockers ?? []).slice(0, 3).map((blocker) => (
-                    <div key={`${selected.loadId}-${blocker.code}`} className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2 text-xs">
-                      <div className="flex items-center gap-2">
-                        <StatusChip tone={blocker.severity === "error" ? "danger" : "warning"} label={blocker.code} />
+                <div className="space-y-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2">
+                  <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Readiness blockers</div>
+                  {(selected.readinessSnapshot?.blockers ?? []).length === 0 ? (
+                    <StatusChip tone="success" label="No blockers" />
+                  ) : (
+                    (selected.readinessSnapshot?.blockers ?? []).slice(0, 3).map((blocker) => (
+                      <div key={`${selected.loadId}-${blocker.code}`} className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2 text-xs">
+                        <div className="flex items-center gap-2">
+                          <StatusChip tone={blocker.severity === "error" ? "danger" : "warning"} label={blocker.code} />
+                        </div>
+                        <div className="mt-1 text-[color:var(--color-text-muted)]">{blocker.message}</div>
                       </div>
-                      <div className="mt-1 text-[color:var(--color-text-muted)]">{blocker.message}</div>
-                    </div>
-                  ))
-                )}
-              </div>
+                    ))
+                  )}
+                </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" variant="secondary" onClick={() => router.push(`/loads/${selected.loadId}`)}>
-                  Open load
-                </Button>
-                <Button size="sm" variant="secondary" onClick={() => router.push(`/finance?tab=receivables&search=${encodeURIComponent(selected.loadNumber)}`)}>
-                  Open receivables board
-                </Button>
-                {user?.role === "BILLING" || user?.role === "ADMIN" ? (
-                  <Button size="sm" onClick={() => router.push(`/finance?tab=payables&loadId=${selected.loadId}`)}>
-                    Open payables context
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => router.push(`/loads/${selected.loadId}`)}>
+                    Open load
                   </Button>
-                ) : null}
+                  <Button size="sm" variant="secondary" onClick={() => router.push(`/finance?tab=receivables&search=${encodeURIComponent(selected.loadNumber)}`)}>
+                    Open receivables board
+                  </Button>
+                  {user?.role === "BILLING" || user?.role === "ADMIN" ? (
+                    <Button size="sm" onClick={() => router.push(`/finance?tab=payables&loadId=${selected.loadId}`)}>
+                      Open payables context
+                    </Button>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ) : null}
-        </Card>
+            ) : null}
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   );

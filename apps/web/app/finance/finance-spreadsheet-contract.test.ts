@@ -70,21 +70,21 @@ assert.ok(
   "spreadsheet panel must not expose density toggle controls"
 );
 assert.ok(
-  spreadsheetPanel.includes("Quick view"),
-  "spreadsheet panel must include row details inspector"
-);
-assert.ok(
-  spreadsheetPanel.includes("xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]"),
-  "spreadsheet panel should keep a right-side quick view on standard laptop widths"
+  spreadsheetPanel.includes("Selected row details"),
+  "spreadsheet panel must include inline selected-row details"
 );
 assert.ok(
   spreadsheetPanel.includes("max-h-[58vh]") && spreadsheetPanel.includes("colgroup"),
   "spreadsheet panel should keep the table dense and within viewport height"
 );
 assert.ok(
+  !spreadsheetPanel.includes("Quick view"),
+  "spreadsheet panel should not render a separate quick view panel"
+);
+assert.ok(
   spreadsheetPanel.includes("isSpreadsheetMaximized") &&
-    spreadsheetPanel.includes("Maximize") &&
-    spreadsheetPanel.includes("Exit full screen"),
+    spreadsheetPanel.includes('aria-label={isSpreadsheetMaximized ? "Exit full screen" : "Maximize spreadsheet"}') &&
+    spreadsheetPanel.includes("className=\"h-8 w-8 p-0\""),
   "spreadsheet panel must expose fullscreen maximize controls"
 );
 
