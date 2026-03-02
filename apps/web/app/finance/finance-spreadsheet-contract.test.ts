@@ -81,5 +81,11 @@ assert.ok(
   spreadsheetPanel.includes("max-h-[58vh]") && spreadsheetPanel.includes("colgroup"),
   "spreadsheet panel should keep the table dense and within viewport height"
 );
+assert.ok(
+  spreadsheetPanel.includes("isSpreadsheetMaximized") &&
+    spreadsheetPanel.includes("Maximize") &&
+    spreadsheetPanel.includes("Exit full screen"),
+  "spreadsheet panel must expose fullscreen maximize controls"
+);
 
 console.log("finance spreadsheet contract tests passed");

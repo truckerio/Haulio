@@ -94,6 +94,7 @@ export function FinanceSpreadsheetPanel() {
   const [rowsPerPage, setRowsPerPage] = useState(25);
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [isSpreadsheetMaximized, setIsSpreadsheetMaximized] = useState(false);
 
   const loadRows = useCallback(async () => {
     if (!canAccess) return;
@@ -127,6 +128,24 @@ export function FinanceSpreadsheetPanel() {
   useEffect(() => {
     loadRows();
   }, [loadRows]);
+
+  useEffect(() => {
+    if (!isSpreadsheetMaximized || typeof window === "undefined") {
+      return;
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsSpreadsheetMaximized(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isSpreadsheetMaximized]);
 
   const totalPages = Math.max(1, Math.ceil(rows.length / rowsPerPage));
   const normalizedPage = Math.min(page, totalPages);
@@ -218,16 +237,34 @@ export function FinanceSpreadsheetPanel() {
         </div>
       </Card>
 
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]">
+      <div
+        className={
+          isSpreadsheetMaximized
+            ? "fixed inset-3 z-40 overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] p-3 shadow-[var(--shadow-card)] sm:inset-4 sm:p-4 lg:inset-6"
+            : ""
+        }
+      >
+        <div className={isSpreadsheetMaximized ? "space-y-3" : ""}>
+          <div className={isSpreadsheetMaximized ? "grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(340px,380px)]" : "grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]"}>
         <Card className={`space-y-2 ${cardPaddingClass}`}>
           <SectionHeader
             title="Finance spreadsheet"
             subtitle={`Showing ${visibleRows.length} of ${rows.length} rows · page ${normalizedPage}/${totalPages}`}
+            action={
+              <Button
+                size="sm"
+                variant="secondary"
+                aria-label={isSpreadsheetMaximized ? "Exit full screen" : "Maximize spreadsheet"}
+                onClick={() => setIsSpreadsheetMaximized((prev) => !prev)}
+              >
+                {isSpreadsheetMaximized ? "Exit full screen" : "Maximize"}
+              </Button>
+            }
           />
           {loading ? <EmptyState title="Loading finance rows..." /> : null}
           {!loading && rows.length === 0 ? <EmptyState title="No finance rows found." /> : null}
           {!loading && rows.length > 0 ? (
-            <div className="max-h-[58vh] overflow-auto">
+            <div className={isSpreadsheetMaximized ? "max-h-[calc(100dvh-16rem)] overflow-auto" : "max-h-[58vh] overflow-auto"}>
               <table className={`min-w-[980px] border-separate border-spacing-0 ${tableTextClass}`}>
                 <colgroup>
                   <col className="w-[160px]" />
@@ -359,6 +396,8 @@ export function FinanceSpreadsheetPanel() {
             </div>
           ) : null}
         </Card>
+          </div>
+        </div>
       </div>
     </div>
   );
