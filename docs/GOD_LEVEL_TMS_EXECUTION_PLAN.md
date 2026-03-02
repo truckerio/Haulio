@@ -26,7 +26,8 @@ Primary outcomes:
 - Primary workbenches:
   - Dispatch cockpit: `/dispatch` (trip-first default for dispatch roles)
   - Finance cockpit: `/finance`
-  - Safety/support ops surface: `/loads` + `/trips` (read-heavy)
+  - Safety cockpit: `/safety` (read-heavy)
+  - Support cockpit: `/support` (read-heavy)
   - Driver portal: `/driver`
 
 ## 4) Execution Timeline (16 Weeks)
@@ -352,6 +353,26 @@ Gate E Status: PASS (March 2, 2026)
 
 ### Program Status
 - God-level execution plan: complete through closeout phase.
+- Phase 17 rollout stabilization gate available: `pnpm ci:phase17`.
+
+---
+
+## 12A) Phase 17: Controlled Pilot Rollout + Stabilization
+
+### Scope
+- Stabilization-only phase after UI consolidation closeout.
+- No new features and no workflow rewrites.
+
+### Delivered
+- Added pilot rollout gate scripts:
+  - `demo:smoke:phase17`
+  - `ci:phase17`
+- Added phase docs:
+  - `docs/PHASE17_START.md`
+  - `docs/PHASE17_PASS.md`
+
+### Evidence
+- `ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:phase17`
 
 ---
 
@@ -387,8 +408,8 @@ pnpm prod:local:reset-seed
 | DISPATCHER | `/dispatch?workspace=trips` | dispatch execution, docs upload, charges edit, tracking start | admin-only config |
 | HEAD_DISPATCHER | `/dispatch?workspace=trips` | same execution controls as dispatcher | admin-only config |
 | BILLING | `/finance` | receivables/payables/billing actions | trip assignment execution controls |
-| SAFETY | `/loads` | read-heavy load/trip/compliance visibility | finance and dispatch mutations |
-| SUPPORT | `/loads` | read-heavy troubleshooting views | finance and dispatch mutations |
+| SAFETY | `/safety` | read-heavy load/trip/compliance visibility | finance and dispatch mutations |
+| SUPPORT | `/support` | read-heavy troubleshooting views | finance and dispatch mutations |
 | DRIVER | `/driver` | driver workflow + assigned tracking flow | ops/admin/finance actions |
 
 ---

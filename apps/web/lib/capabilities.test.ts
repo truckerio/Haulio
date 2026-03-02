@@ -39,8 +39,8 @@ assert.equal(getRoleLandingPath("HEAD_DISPATCHER"), "/dispatch?workspace=trips")
 assert.equal(getRoleLandingPath("BILLING"), "/finance");
 assert.equal(getRoleLandingPath("ADMIN"), "/admin");
 assert.equal(getRoleLandingPath("DRIVER"), "/driver");
-assert.equal(getRoleLandingPath("SAFETY"), "/loads");
-assert.equal(getRoleLandingPath("SUPPORT"), "/loads");
+assert.equal(getRoleLandingPath("SAFETY"), "/safety");
+assert.equal(getRoleLandingPath("SUPPORT"), "/support");
 
 assert.equal(getDefaultDispatchWorkspace({ role: "DISPATCHER", operatingMode: "CARRIER" }), "trips");
 assert.equal(getDefaultDispatchWorkspace({ role: "HEAD_DISPATCHER", operatingMode: "BOTH" }), "trips");

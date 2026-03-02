@@ -18,6 +18,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { Badge } from "@/components/ui/badge";
 import { StatusChip } from "@/components/ui/status-chip";
+import { NoAccess } from "@/components/rbac/no-access";
 import { apiFetch, getApiBase } from "@/lib/api";
 import { getRoleCapabilities } from "@/lib/capabilities";
 import { BulkLoadImport } from "@/components/BulkLoadImport";
@@ -37,6 +38,7 @@ import {
   derivePrimaryAction,
   deriveTrackingBadge,
 } from "@/lib/load-derivations";
+import { toneFromSemantic } from "@/lib/status-semantics";
 
 const PAGE_SIZE = 25;
 
@@ -94,6 +96,13 @@ const defaultRefine: RefineState = {
   minRate: "",
   maxRate: "",
 };
+
+function formatLoadsRefreshTime(value: string | null) {
+  if (!value) return "Not refreshed yet";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Not refreshed yet";
+  return `Last refresh ${parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
 
 function LoadsPageContent() {
   const router = useRouter();
@@ -171,6 +180,11 @@ function LoadsPageContent() {
   const lastPickupNameQuery = useRef("");
   const lastDeliveryNameQuery = useRef("");
   const [showStopDetails, setShowStopDetails] = useState(false);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueLoadedOnce, setQueueLoadedOnce] = useState(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
+  const [partialSyncWarning, setPartialSyncWarning] = useState<string | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const [form, setForm] = useState({
     loadNumber: "",
     status: "PLANNED",
@@ -261,15 +275,27 @@ function LoadsPageContent() {
   ]);
 
   const loadData = useCallback(async () => {
+    setQueueLoading(true);
+    const partialMessages: string[] = [];
     const query = buildParams({ page: pageIndex + 1, limit: PAGE_SIZE, includeChip: true });
     const url = query ? `/loads?${query}` : "/loads";
-    const loadsData = await apiFetch<{ loads: any[]; page: number; totalPages: number; total: number }>(url);
+    let loadsData: { loads: any[]; page: number; totalPages: number; total: number } | null = null;
+    try {
+      loadsData = await apiFetch<{ loads: any[]; page: number; totalPages: number; total: number }>(url);
+      setQueueError(null);
+    } catch (error) {
+      setQueueError((error as Error).message || "Unable to load loads workspace.");
+      setQueueLoading(false);
+      setQueueLoadedOnce(true);
+      return;
+    }
     if (roleCapabilities.canDispatchExecution || roleCapabilities.canBillActions) {
       try {
         const driversData = await apiFetch<{ drivers: any[] }>("/assets/drivers");
         setDrivers(driversData.drivers);
-      } catch {
+      } catch (error) {
         setDrivers([]);
+        partialMessages.push((error as Error).message || "Drivers unavailable");
       }
     } else {
       setDrivers([]);
@@ -280,14 +306,15 @@ function LoadsPageContent() {
     try {
       const entitiesData = await apiFetch<{ entities: any[] }>("/api/operating-entities");
       setOperatingEntities(entitiesData.entities);
-    } catch {
+    } catch (error) {
       setOperatingEntities([]);
+      partialMessages.push((error as Error).message || "Operating entities unavailable");
     }
-  }, [buildParams, pageIndex, user?.role]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+    setPartialSyncWarning(partialMessages.length ? partialMessages.join(" · ") : null);
+    setLastRefreshedAt(new Date().toISOString());
+    setQueueLoading(false);
+    setQueueLoadedOnce(true);
+  }, [buildParams, pageIndex, roleCapabilities.canBillActions, roleCapabilities.canDispatchExecution]);
 
   useEffect(() => {
     apiFetch<{ user: any; org: { operatingMode?: string | null } | null }>("/auth/me")
@@ -356,7 +383,7 @@ function LoadsPageContent() {
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
-      loadData();
+      void loadData();
     }, 300);
     return () => window.clearTimeout(timeout);
   }, [loadData]);
@@ -720,11 +747,11 @@ function LoadsPageContent() {
   }, [loads]);
 
   const statusTone = (status: string) => {
-    if (status === "PAID" || status === "DELIVERED" || status === "INVOICED") return "success";
-    if (status === "IN_TRANSIT") return "info";
-    if (status === "READY_TO_INVOICE" || status === "POD_RECEIVED") return "warning";
-    if (status === "CANCELLED") return "danger";
-    return "neutral";
+    if (status === "PAID" || status === "DELIVERED" || status === "INVOICED") return toneFromSemantic("complete");
+    if (status === "IN_TRANSIT") return toneFromSemantic("info");
+    if (status === "READY_TO_INVOICE" || status === "POD_RECEIVED") return toneFromSemantic("attention");
+    if (status === "CANCELLED") return toneFromSemantic("blocked");
+    return toneFromSemantic("neutral");
   };
 
   const baseLoads = useMemo(() => {
@@ -806,6 +833,15 @@ function LoadsPageContent() {
     });
     return counts;
   }, [chipDefinitions, searchFiltered]);
+  const readHeavySummary = useMemo(
+    () => ({
+      trackingOff: chipCounts["tracking-off"] ?? 0,
+      missingPod: chipCounts["missing-pod"] ?? 0,
+      deliveredUnbilled: chipCounts["delivered-unbilled"] ?? 0,
+      readyToInvoice: chipCounts["ready-to-invoice"] ?? 0,
+    }),
+    [chipCounts]
+  );
 
   const filteredLoads = useMemo(() => {
     let result = searchFiltered;
@@ -972,6 +1008,14 @@ function LoadsPageContent() {
     setSelectedGridLoadId(null);
   };
 
+  if (user && !roleCapabilities.canAccessLoads) {
+    return (
+      <AppShell title="Loads" subtitle="Read-only load visibility">
+        <NoAccess title="No access to Loads" description="You do not have permission to view load operations." />
+      </AppShell>
+    );
+  }
+
   return (
     <AppShell
       title="Loads"
@@ -1006,6 +1050,22 @@ function LoadsPageContent() {
           </Button>
         </div>
       </div>
+      <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatLoadsRefreshTime(lastRefreshedAt)}</div>
+      {partialSyncWarning ? (
+        <div className="rounded-[var(--radius-control)] border border-[color:var(--color-warning)]/45 bg-[color:var(--color-warning)]/10 px-3 py-2 text-xs text-[color:var(--color-warning)]">
+          Partial sync warning: {partialSyncWarning}
+        </div>
+      ) : null}
+      {queueError ? (
+        <div className="rounded-[var(--radius-control)] border border-[color:var(--color-warning)]/45 bg-[color:var(--color-warning)]/10 px-3 py-2 text-xs text-[color:var(--color-warning)]">
+          <div>{queueError}</div>
+          <div className="mt-2">
+            <Button size="sm" variant="secondary" onClick={() => void loadData()} disabled={queueLoading}>
+              Retry queue refresh
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {isReadHeavyOpsRole ? (
         <Card className="space-y-2 !p-3 sm:!p-4">
@@ -1018,6 +1078,24 @@ function LoadsPageContent() {
             <span className="text-xs text-[color:var(--color-text-muted)]">
               Mutation controls are hidden for this role. Use queue chips and row drilldown to investigate.
             </span>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">Tracking off</div>
+              <div className="font-semibold text-ink">{readHeavySummary.trackingOff}</div>
+            </div>
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">Missing POD</div>
+              <div className="font-semibold text-ink">{readHeavySummary.missingPod}</div>
+            </div>
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">Delivered-unbilled</div>
+              <div className="font-semibold text-ink">{readHeavySummary.deliveredUnbilled}</div>
+            </div>
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">Ready to invoice</div>
+              <div className="font-semibold text-ink">{readHeavySummary.readyToInvoice}</div>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="secondary" onClick={() => setActiveChip("tracking-off")}>
@@ -1043,7 +1121,10 @@ function LoadsPageContent() {
             onChange={(event) => setSearchTerm(event.target.value)}
           />
         </div>
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-end gap-2">
+          <Button variant="secondary" size="sm" onClick={() => void loadData()} disabled={queueLoading}>
+            {queueLoading ? "Refreshing..." : "Refresh"}
+          </Button>
           <Button variant="secondary" size="sm" onClick={() => setShowFilters((prev) => !prev)}>
             {showFilters ? "Hide refine" : "Refine"}
           </Button>
@@ -1898,7 +1979,9 @@ function LoadsPageContent() {
         </RefinePanel>
       ) : null}
 
-      {loads.length === 0 ? (
+      {queueLoading && !queueLoadedOnce ? (
+        <EmptyState title="Loading loads workspace..." description="Preparing queue rows and role-safe controls." />
+      ) : loads.length === 0 ? (
         <EmptyState
           title={canCreateLoad ? "Create your first load" : "No loads in this workspace"}
           description={

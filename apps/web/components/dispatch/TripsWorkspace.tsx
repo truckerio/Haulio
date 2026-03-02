@@ -19,6 +19,7 @@ import {
 } from "@/components/dispatch/TripSpreadsheetGrid";
 import { apiFetch } from "@/lib/api";
 import { getRoleCapabilities } from "@/lib/capabilities";
+import { toneFromSemantic } from "@/lib/status-semantics";
 
 type TripStatus = "PLANNED" | "ASSIGNED" | "IN_TRANSIT" | "ARRIVED" | "COMPLETE" | "CANCELLED";
 type MovementMode = "FTL" | "LTL" | "POOL_DISTRIBUTION";
@@ -85,11 +86,11 @@ const STATUS_OPTIONS: TripStatus[] = ["PLANNED", "ASSIGNED", "IN_TRANSIT", "ARRI
 const MOVEMENT_OPTIONS: MovementMode[] = ["FTL", "LTL", "POOL_DISTRIBUTION"];
 
 const statusTone = (status: TripStatus) => {
-  if (status === "COMPLETE" || status === "ARRIVED") return "success" as const;
-  if (status === "IN_TRANSIT") return "info" as const;
-  if (status === "ASSIGNED") return "warning" as const;
-  if (status === "CANCELLED") return "danger" as const;
-  return "neutral" as const;
+  if (status === "COMPLETE" || status === "ARRIVED") return toneFromSemantic("complete");
+  if (status === "IN_TRANSIT") return toneFromSemantic("info");
+  if (status === "ASSIGNED") return toneFromSemantic("attention");
+  if (status === "CANCELLED") return toneFromSemantic("blocked");
+  return toneFromSemantic("neutral");
 };
 
 const isConsolidationMode = (mode: MovementMode) => mode === "LTL" || mode === "POOL_DISTRIBUTION";

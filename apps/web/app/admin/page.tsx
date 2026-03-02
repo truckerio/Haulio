@@ -46,6 +46,15 @@ export default function AdminPage() {
   const [settings, setSettings] = useState<any | null>(null);
   const [financePolicy, setFinancePolicy] = useState<any | null>(null);
   const [samsaraStatus, setSamsaraStatus] = useState<any | null>(null);
+  const [controlTower, setControlTower] = useState<{
+    openAlerts: number;
+    openExceptions: number;
+    dueToday: number;
+    trackingOff: number;
+    deliveredUnbilled: number;
+    complianceExpiring: number;
+    financeBlocked: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -81,6 +90,30 @@ export default function AdminPage() {
         if (settingsResult.status === "fulfilled") setSettings(settingsResult.value.settings ?? null);
         if (financePolicyResult.status === "fulfilled") setFinancePolicy(financePolicyResult.value.policy ?? null);
         if (samsaraResult.status === "fulfilled") setSamsaraStatus(samsaraResult.value.integration ?? null);
+        const [activityResult, trackingOffResult, deliveredUnbilledResult, complianceExpiringResult, financeBlockedResult] =
+          await Promise.allSettled([
+            apiFetch<{ kpis?: { openAlerts?: number; openExceptions?: number; dueToday?: number } }>("/activity/summary"),
+            apiFetch<{ total?: number }>("/loads?chip=tracking-off&limit=1"),
+            apiFetch<{ total?: number }>("/loads?chip=delivered-unbilled&limit=1"),
+            apiFetch<{ total?: number }>("/loads?chip=compliance-expiring&limit=1"),
+            apiFetch<{ items?: unknown[]; rows?: unknown[] }>("/finance/receivables?limit=200&readiness=BLOCKED"),
+          ]);
+        const activityKpis = activityResult.status === "fulfilled" ? activityResult.value.kpis : null;
+        const financeBlockedCount =
+          financeBlockedResult.status === "fulfilled"
+            ? (financeBlockedResult.value.items ?? financeBlockedResult.value.rows ?? []).length
+            : 0;
+        setControlTower({
+          openAlerts: Number(activityKpis?.openAlerts ?? 0),
+          openExceptions: Number(activityKpis?.openExceptions ?? 0),
+          dueToday: Number(activityKpis?.dueToday ?? 0),
+          trackingOff: trackingOffResult.status === "fulfilled" ? Number(trackingOffResult.value.total ?? 0) : 0,
+          deliveredUnbilled:
+            deliveredUnbilledResult.status === "fulfilled" ? Number(deliveredUnbilledResult.value.total ?? 0) : 0,
+          complianceExpiring:
+            complianceExpiringResult.status === "fulfilled" ? Number(complianceExpiringResult.value.total ?? 0) : 0,
+          financeBlocked: financeBlockedCount,
+        });
         setError(null);
       } catch (err) {
         setError((err as Error).message || "Failed to load settings.");
@@ -123,6 +156,42 @@ export default function AdminPage() {
       <RouteGuard allowedRoles={["ADMIN"]}>
         <div className="space-y-6">
           {error ? <ErrorBanner message={error} /> : null}
+
+          {controlTower ? (
+            <Card className="space-y-3 bg-white/90 p-4">
+              <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Control Tower</div>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="text-[color:var(--color-text-muted)]">Open alerts</div>
+                  <div className="text-lg font-semibold text-ink">{controlTower.openAlerts}</div>
+                </div>
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="text-[color:var(--color-text-muted)]">Open exceptions</div>
+                  <div className="text-lg font-semibold text-ink">{controlTower.openExceptions}</div>
+                </div>
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="text-[color:var(--color-text-muted)]">Tracking off</div>
+                  <div className="text-lg font-semibold text-ink">{controlTower.trackingOff}</div>
+                </div>
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="text-[color:var(--color-text-muted)]">Delivered unbilled</div>
+                  <div className="text-lg font-semibold text-ink">{controlTower.deliveredUnbilled}</div>
+                </div>
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="text-[color:var(--color-text-muted)]">Compliance expiring</div>
+                  <div className="text-lg font-semibold text-ink">{controlTower.complianceExpiring}</div>
+                </div>
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="text-[color:var(--color-text-muted)]">Finance blocked</div>
+                  <div className="text-lg font-semibold text-ink">{controlTower.financeBlocked}</div>
+                </div>
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="text-[color:var(--color-text-muted)]">Due today</div>
+                  <div className="text-lg font-semibold text-ink">{controlTower.dueToday}</div>
+                </div>
+              </div>
+            </Card>
+          ) : null}
 
           <Card className="divide-y divide-[color:var(--color-divider)] bg-white/90 p-0 overflow-hidden">
             <SettingsRow

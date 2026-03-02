@@ -3460,6 +3460,7 @@ const buildLoadFilters = (
   const destCity = typeof req.query.destCity === "string" ? req.query.destCity.trim() : "";
   const destState = typeof req.query.destState === "string" ? req.query.destState.trim() : "";
   const destSearch = typeof req.query.destSearch === "string" ? req.query.destSearch.trim() : "";
+  const issuePreset = typeof req.query.issuePreset === "string" ? req.query.issuePreset.trim().toUpperCase() : "";
   const minRate = typeof req.query.minRate === "string" ? req.query.minRate.trim() : "";
   const maxRate = typeof req.query.maxRate === "string" ? req.query.maxRate.trim() : "";
   const fromDate = typeof req.query.fromDate === "string" ? req.query.fromDate.trim() : "";
@@ -3556,6 +3557,62 @@ const buildLoadFilters = (
       ];
     }
     where.stops = { some: stopFilter };
+  }
+
+  const presetConditions: Prisma.LoadWhereInput[] = [];
+  if (issuePreset) {
+    const now = new Date();
+    const recentPingSince = new Date(now.getTime() - 10 * 60 * 1000);
+    const complianceThreshold = addDays(now, READINESS_POLICY_DEFAULTS.complianceExpiringSoonDays);
+    switch (issuePreset) {
+      case "NEEDS_ASSIGNMENT":
+        presetConditions.push({
+          OR: [{ assignedDriverId: null }, { truckId: null }, { trailerId: null }, { status: LoadStatus.PLANNED }],
+        });
+        break;
+      case "LATE_RISK":
+        presetConditions.push({
+          OR: [
+            {
+              status: LoadStatus.IN_TRANSIT,
+              trackingSessions: { none: { status: "ON" } },
+              locationPings: { none: { capturedAt: { gte: recentPingSince } } },
+            },
+            { stops: { some: { appointmentEnd: { lt: now }, arrivedAt: null } } },
+          ],
+        });
+        break;
+      case "MISSING_POD":
+        presetConditions.push({ status: LoadStatus.DELIVERED });
+        presetConditions.push({ docs: { none: { type: DocType.POD } } });
+        break;
+      case "COMPLIANCE_EXPIRED":
+        presetConditions.push({
+          assignedDriverId: { not: null },
+          OR: [
+            { driver: { is: { licenseExpiresAt: { not: null, lt: now } } } },
+            { driver: { is: { medCardExpiresAt: { not: null, lt: now } } } },
+          ],
+        });
+        break;
+      case "COMPLIANCE_EXPIRING":
+        presetConditions.push({
+          assignedDriverId: { not: null },
+          OR: [
+            { driver: { is: { licenseExpiresAt: { not: null, gte: now, lte: complianceThreshold } } } },
+            { driver: { is: { medCardExpiresAt: { not: null, gte: now, lte: complianceThreshold } } } },
+          ],
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (presetConditions.length > 0) {
+    const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+    andConditions.push(...presetConditions);
+    where.AND = andConditions;
   }
 
   return { where };
@@ -5422,6 +5479,25 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
           { locationPings: { none: { capturedAt: { gte: recentPingSince } } } }
         );
         where.AND = andConditions;
+      } else if (chip === "compliance-expiring") {
+        const now = new Date();
+        const threshold = addDays(now, READINESS_POLICY_DEFAULTS.complianceExpiringSoonDays);
+        where.status = { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] };
+        const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+        andConditions.push({
+          assignedDriverId: { not: null },
+          OR: [
+            { driver: { is: { licenseExpiresAt: { not: null, lte: threshold } } } },
+            { driver: { is: { medCardExpiresAt: { not: null, lte: threshold } } } },
+          ],
+        });
+        where.AND = andConditions;
+      } else if (chip === "qbo-failed") {
+        const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+        andConditions.push({
+          OR: [{ qboSyncStatus: "FAILED" }, { qboSyncLastError: { not: null } }],
+        });
+        where.AND = andConditions;
       }
     }
     const view = typeof req.query.view === "string" ? req.query.view : "";
@@ -6065,6 +6141,9 @@ const applyChipFilter = (loads: any[], chip: string) => {
   if (chip === "missing-pod") {
     return loads.filter((load) => load.status === "DELIVERED" && derivePodStatus(load.docs ?? []).status === "Missing");
   }
+  if (chip === "qbo-failed") {
+    return loads.filter((load) => load.qboSyncStatus === "FAILED" || Boolean(load.qboSyncLastError));
+  }
   return loads;
 };
 
@@ -6077,6 +6156,8 @@ const fetchExportCandidates = async (where: any) =>
       id: true,
       status: true,
       createdAt: true,
+      qboSyncStatus: true,
+      qboSyncLastError: true,
       docs: { where: { type: DocType.POD }, select: { type: true, status: true, uploadedAt: true, verifiedAt: true, rejectedAt: true } },
       trackingSessions: { where: { status: "ON" }, orderBy: { startedAt: "desc" }, take: 1, select: { status: true } },
       locationPings: { orderBy: { capturedAt: "desc" }, take: 1, select: { capturedAt: true } },

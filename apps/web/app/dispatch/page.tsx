@@ -364,6 +364,13 @@ function formatExceptionAge(createdAt: string) {
   return `${Math.round(diffMinutes / (24 * 60))}d open`;
 }
 
+function formatDispatchRefreshTime(value: string | null) {
+  if (!value) return "Not refreshed yet";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Not refreshed yet";
+  return `Last refresh ${parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
 function countActiveDispatchFilters(filters: Filters) {
   let count = 0;
   if (filters.search.trim()) count += 1;
@@ -506,6 +513,11 @@ function DispatchPageContent({
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueLoadedOnce, setQueueLoadedOnce] = useState(false);
+  const [assetsError, setAssetsError] = useState<string | null>(null);
+  const [exceptionsError, setExceptionsError] = useState<string | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const [dispatchExceptions, setDispatchExceptions] = useState<DispatchExceptionItem[]>([]);
   const [exceptionsSummary, setExceptionsSummary] = useState<{ total: number; open: number; acknowledged: number; blockers: number } | null>(null);
   const [tripInspector, setTripInspector] = useState<any | null>(null);
@@ -605,6 +617,7 @@ function DispatchPageContent({
   const capabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
   const hasDispatchRole = capabilities.canDispatchExecution;
   const canDispatch = capabilities.canAccessDispatch;
+  const canCreateLoad = capabilities.canEditLoad || capabilities.canDispatchExecution;
   const isQueueReadOnly = queueView !== "active";
   const canStartTracking = capabilities.canStartTracking && canDispatch;
   const canSeeAllTeams = Boolean(
@@ -632,6 +645,12 @@ function DispatchPageContent({
   );
   const rateConMissing = Boolean(dispatchStage && rateConRequired && !hasRateCon);
   const activeFilterCount = useMemo(() => countActiveDispatchFilters(filters), [filters]);
+  const partialFailureMessages = useMemo(() => {
+    const messages: string[] = [];
+    if (assetsError) messages.push(`Assets sync issue: ${assetsError}`);
+    if (exceptionsError) messages.push(`Exceptions sync issue: ${exceptionsError}`);
+    return messages;
+  }, [assetsError, exceptionsError]);
   const assignDisabled =
     isQueueReadOnly ||
     !assignForm.driverId ||
@@ -775,6 +794,7 @@ function DispatchPageContent({
   const loadAssets = useCallback(async () => {
     if (!canDispatch) return;
     try {
+      setAssetsError(null);
       const [driversData, trucksData, trailersData, entitiesData] = await Promise.all([
         apiFetch<{ drivers: DriverRecord[] }>("/assets/drivers"),
         apiFetch<{ trucks: TruckRecord[] }>("/assets/trucks"),
@@ -785,9 +805,8 @@ function DispatchPageContent({
       setTrucks(trucksData.trucks ?? []);
       setTrailers(trailersData.trailers ?? []);
       setOperatingEntities(entitiesData.entities ?? []);
-      setDispatchError(null);
     } catch (error) {
-      setDispatchError((error as Error).message || "Unable to load dispatch assets.");
+      setAssetsError((error as Error).message || "Unable to load dispatch assets.");
     }
   }, [canDispatch]);
 
@@ -833,6 +852,7 @@ function DispatchPageContent({
 
   const loadDispatchLoads = useCallback(async (nextFilters = filters, page = pageIndex) => {
     if (!canDispatch) return;
+    setQueueLoading(true);
     try {
       const query = buildParams(nextFilters, page);
       const url = query ? `/loads?${query}` : "/loads?view=dispatch";
@@ -841,8 +861,12 @@ function DispatchPageContent({
       setTotalPages(data.totalPages ?? 1);
       setTotalCount(data.total ?? 0);
       setDispatchError(null);
+      setLastRefreshedAt(new Date().toISOString());
     } catch (error) {
       setDispatchError((error as Error).message || "Unable to load dispatch queue.");
+    } finally {
+      setQueueLoading(false);
+      setQueueLoadedOnce(true);
     }
   }, [canDispatch, buildParams, filters, pageIndex]);
 
@@ -854,6 +878,7 @@ function DispatchPageContent({
   const loadDispatchExceptions = useCallback(async () => {
     if (!canDispatch) return;
     try {
+      setExceptionsError(null);
       const data = await apiFetch<{
         exceptions: DispatchExceptionItem[];
         summary: { total: number; open: number; acknowledged: number; blockers: number };
@@ -861,9 +886,10 @@ function DispatchPageContent({
       const unresolved = (data.exceptions ?? []).filter((item) => item.status !== "RESOLVED");
       setDispatchExceptions(unresolved);
       setExceptionsSummary(data.summary ?? null);
-    } catch {
+    } catch (error) {
       setDispatchExceptions([]);
       setExceptionsSummary(null);
+      setExceptionsError((error as Error).message || "Unable to load dispatch exceptions.");
     }
   }, [canDispatch]);
 
@@ -1733,6 +1759,46 @@ function DispatchPageContent({
     });
   }, [loads, queueView]);
 
+  const dispatchSignals = useMemo(() => {
+    const inTransit = sortedLoads.filter((load) => load.status === "IN_TRANSIT");
+    const atRisk = sortedLoads.filter((load) => load.riskFlags?.atRisk).length;
+    const overdueStops = sortedLoads.filter((load) => load.riskFlags?.overdueStopWindow).length;
+    const trackingHealthy = inTransit.filter((load) => load.tracking?.state === "ON").length;
+    const trackingContinuity = inTransit.length ? Math.round((trackingHealthy / inTransit.length) * 100) : 100;
+    const etaConfidence =
+      inTransit.length === 0
+        ? "High"
+        : trackingContinuity >= 85 && overdueStops === 0
+          ? "High"
+          : trackingContinuity >= 60
+            ? "Medium"
+            : "Low";
+    return {
+      inTransitCount: inTransit.length,
+      atRiskCount: atRisk,
+      overdueStopsCount: overdueStops,
+      trackingContinuity,
+      etaConfidence,
+    };
+  }, [sortedLoads]);
+
+  const workbenchMapHref = useMemo(
+    () =>
+      buildYardOsPlanningUrl({
+        orgId: user?.orgId ?? null,
+        loadIds: sortedLoads.slice(0, 80).map((load) => load.id),
+        operatingEntityId: filters.operatingEntityId || null,
+        teamId: canSeeAllTeams ? filters.teamId || null : null,
+        source: "truckerio.dispatch.workbench",
+      }),
+    [canSeeAllTeams, filters.operatingEntityId, filters.teamId, sortedLoads, user?.orgId]
+  );
+
+  const openWorkbenchMap = useCallback(() => {
+    if (!workbenchMapHref) return;
+    window.open(workbenchMapHref, "_blank", "noopener,noreferrer");
+  }, [workbenchMapHref]);
+
   const selectedLoadSummary = useMemo(() => {
     if (!selectedLoadId) return null;
     return sortedLoads.find((load) => load.id === selectedLoadId) ?? null;
@@ -1978,6 +2044,9 @@ function DispatchPageContent({
   const showTripInspectorPanel = panelLayout.tripInspector;
   const showExceptionsPanel = panelLayout.exceptions;
   const showDriverLanesPanel = panelLayout.driverLanes;
+  const showInitialQueueLoadingState = queueLoading && !queueLoadedOnce;
+  const showQueueEmptyState = !queueLoading && queueLoadedOnce && !dispatchError && gridRows.length === 0;
+  const showQueueCanvas = !showInitialQueueLoadingState && !showQueueEmptyState;
   const dispatchGridTemplateColumns = [
     ...(showExceptionsPanel && panelLayout.exceptionsDock === "left" ? ["minmax(220px, 280px)"] : []),
     "minmax(0, 1fr)",
@@ -2038,6 +2107,20 @@ function DispatchPageContent({
               ]}
               onChange={(value) => onWorkspaceChange(value as DispatchWorkspace)}
             />
+            {workspace === "loads" && workbenchMapHref ? (
+              <Button variant="secondary" size="sm" onClick={openWorkbenchMap}>
+                Live map
+              </Button>
+            ) : null}
+            {workspace === "loads" && canCreateLoad ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => router.push("/loads?create=1")}
+              >
+                Create load
+              </Button>
+            ) : null}
             <button
               type="button"
               aria-label={showFilters ? "Hide refine filters" : "Open refine filters"}
@@ -2078,11 +2161,34 @@ function DispatchPageContent({
               ]}
               onChange={(value) => setGridDensity(value as DispatchGridDensity)}
             />
-            <Button variant="secondary" size="sm" onClick={() => loadDispatchLoads(filters, pageIndex)}>
-              Refresh
+            <Button variant="secondary" size="sm" onClick={() => void loadDispatchLoads(filters, pageIndex)} disabled={queueLoading}>
+              {queueLoading ? "Refreshing..." : "Refresh"}
             </Button>
           </div>
         </div>
+        <div className="mt-2 text-[11px] text-[color:var(--color-text-muted)]">
+          {formatDispatchRefreshTime(lastRefreshedAt)}
+        </div>
+        {workspace === "loads" ? (
+          <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">In transit</div>
+              <div className="font-semibold text-ink">{dispatchSignals.inTransitCount}</div>
+            </div>
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">At risk</div>
+              <div className="font-semibold text-ink">{dispatchSignals.atRiskCount}</div>
+            </div>
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">Tracking continuity</div>
+              <div className="font-semibold text-ink">{dispatchSignals.trackingContinuity}%</div>
+            </div>
+            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
+              <div className="text-[color:var(--color-text-muted)]">ETA confidence</div>
+              <div className="font-semibold text-ink">{dispatchSignals.etaConfidence}</div>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-3 grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 lg:grid-cols-[minmax(220px,1fr)_auto_auto_auto_auto] lg:items-center">
@@ -2429,12 +2535,55 @@ function DispatchPageContent({
         </div>
       ) : null}
 
+      {partialFailureMessages.length > 0 ? (
+        <div className="mt-3 rounded-[var(--radius-control)] border border-[color:var(--color-warning)]/45 bg-[color:var(--color-warning)]/10 px-3 py-2 text-xs text-[color:var(--color-warning)]">
+          Partial sync warning: {partialFailureMessages.join(" · ")}
+        </div>
+      ) : null}
       {dispatchError ? (
         <div className="mt-3 border-l-2 border-[color:var(--color-warning)] pl-3 text-sm text-[color:var(--color-warning)]">
-          {dispatchError}
+          <div>{dispatchError}</div>
+          <div className="mt-2">
+            <Button size="sm" variant="secondary" onClick={() => void loadDispatchLoads(filters, pageIndex)} disabled={queueLoading}>
+              Retry queue refresh
+            </Button>
+          </div>
         </div>
       ) : null}
       {dispatchActionNote ? <div className="mt-2 text-xs text-[color:var(--color-success)]">{dispatchActionNote}</div> : null}
+      {showInitialQueueLoadingState ? (
+        <div className="mt-3">
+          <Card>
+            <EmptyState title="Loading dispatch queue..." description="Preparing trip-first execution rows." />
+          </Card>
+        </div>
+      ) : null}
+      {showQueueEmptyState ? (
+        <div className="mt-3">
+          <Card>
+            <EmptyState title="No queue rows match this view." description="Adjust filters or switch queue/lens to continue triage." />
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setFilters(defaultFilters);
+                  setActiveWorkflowQueueId("");
+                  setGridFilters(DEFAULT_GRID_STATE.filters);
+                  setPageIndex(0);
+                  void loadDispatchLoads(defaultFilters, 0);
+                }}
+              >
+                Reset filters
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => void loadDispatchLoads(filters, pageIndex)}>
+                Retry
+              </Button>
+            </div>
+          </Card>
+        </div>
+      ) : null}
+      {showQueueCanvas ? (
       <div className="mt-4" style={{ display: "grid", gap: "12px", gridTemplateColumns: dispatchGridTemplateColumns }}>
         {showExceptionsPanel && panelLayout.exceptionsDock === "left" ? (
           <RefinePanel className="max-h-[62vh] overflow-auto">
@@ -2591,7 +2740,9 @@ function DispatchPageContent({
           </RefinePanel>
         ) : null}
       </div>
+      ) : null}
 
+      {showQueueCanvas ? (
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs text-[color:var(--color-text-muted)]">
           Page {pageIndex + 1} of {totalPages} - {totalCount} loads
@@ -2610,6 +2761,7 @@ function DispatchPageContent({
           </Button>
         </div>
       </div>
+      ) : null}
 
       <DispatchDocUploadDrawer
         open={Boolean(docUploadTarget)}

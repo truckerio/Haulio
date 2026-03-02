@@ -256,8 +256,8 @@ export function getRoleLandingPath(role?: string | null) {
   if (canonicalRole === "DISPATCHER" || canonicalRole === "HEAD_DISPATCHER") return "/dispatch?workspace=trips";
   if (canonicalRole === "BILLING") return "/finance";
   if (canonicalRole === "DRIVER") return "/driver";
-  if (canonicalRole === "SAFETY") return "/loads";
-  if (canonicalRole === "SUPPORT") return "/loads";
+  if (canonicalRole === "SAFETY") return "/safety";
+  if (canonicalRole === "SUPPORT") return "/support";
   return "/today";
 }
 

@@ -136,6 +136,23 @@ function NavIcon({ href, active }: { href: string; active: boolean }) {
       </svg>
     );
   }
+  if (href === "/safety") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M12 3.5 5 6.5V12c0 4.1 2.5 7.8 7 8.9 4.5-1.1 7-4.8 7-8.9V6.5l-7-3Z" />
+        <path d="M9.5 12.2 11 13.8l3.5-3.7" />
+      </svg>
+    );
+  }
+  if (href === "/support") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="11" cy="11" r="6.5" />
+        <path d="M20 20l-4.2-4.2" />
+        <path d="M9 10.2h4M9 12.8h2.5" />
+      </svg>
+    );
+  }
   if (href === "/teams") {
     return (
       <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">

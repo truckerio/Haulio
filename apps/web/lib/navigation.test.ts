@@ -9,6 +9,9 @@ const dispatcherSections = getVisibleSections("DISPATCHER");
 assert.equal(dispatcherSections.some((section) => section.title === "More"), true);
 assert.equal(flattenHrefs("DISPATCHER").includes("/today"), true);
 assert.equal(flattenHrefs("DISPATCHER").includes("/dashboard"), true);
+assert.equal(flattenHrefs("DISPATCHER").includes("/dispatch"), true);
+assert.equal(flattenHrefs("DISPATCHER").includes("/loads"), false);
+assert.equal(flattenHrefs("DISPATCHER").includes("/trips"), false);
 assert.equal(
   dispatcherSections
     .filter((section) => section.title !== "More")
@@ -26,19 +29,22 @@ assert.equal(
 
 const headDispatcherWithTeams = flattenHrefs("HEAD_DISPATCHER", { showTeamsOps: true });
 assert.equal(headDispatcherWithTeams.includes("/teams"), true);
+assert.equal(headDispatcherWithTeams.includes("/dispatch"), true);
+assert.equal(headDispatcherWithTeams.includes("/loads"), false);
+assert.equal(headDispatcherWithTeams.includes("/trips"), false);
 const headDispatcherWithoutTeams = flattenHrefs("HEAD_DISPATCHER", { showTeamsOps: false });
 assert.equal(headDispatcherWithoutTeams.includes("/teams"), false);
 
 const safetyHrefs = flattenHrefs("SAFETY", { showTeamsOps: true });
 assert.deepEqual(
   safetyHrefs.sort(),
-  ["/loads", "/profile", "/trips"].sort()
+  ["/profile", "/safety"].sort()
 );
 
 const supportHrefs = flattenHrefs("SUPPORT", { showTeamsOps: true });
 assert.deepEqual(
   supportHrefs.sort(),
-  ["/loads", "/profile", "/trips"].sort()
+  ["/profile", "/support"].sort()
 );
 
 const billingHrefs = flattenHrefs("BILLING", { showTeamsOps: true });

@@ -15,6 +15,7 @@ import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
 import { formatDateTime } from "@/lib/date-time";
 import { isForbiddenError } from "@/lib/capabilities";
+import { toneFromSemantic, toneFromSeverity } from "@/lib/status-semantics";
 
 type FinanceRow = {
   loadId: string;
@@ -46,6 +47,7 @@ type ReceivablesResponse = {
 
 type SortKey = "loadNumber" | "billingStage" | "customer" | "amountCents" | "deliveredAt" | "blockers" | "qbo" | "action";
 type SortDirection = "asc" | "desc";
+type LaneFilter = "all" | "disputes" | "shortPay" | "qboFailed";
 
 const LANE_LABELS = {
   GENERATE_INVOICE: "Invoice now",
@@ -59,10 +61,10 @@ function formatCurrency(cents: number) {
 }
 
 function stageTone(stage: FinanceRow["billingStage"]) {
-  if (stage === "READY" || stage === "COLLECTED" || stage === "SETTLED") return "success" as const;
-  if (stage === "INVOICE_SENT") return "info" as const;
-  if (stage === "DOCS_REVIEW") return "warning" as const;
-  return "neutral" as const;
+  if (stage === "READY" || stage === "COLLECTED" || stage === "SETTLED") return toneFromSemantic("complete");
+  if (stage === "INVOICE_SENT") return toneFromSemantic("info");
+  if (stage === "DOCS_REVIEW") return toneFromSemantic("attention");
+  return toneFromSemantic("neutral");
 }
 
 function stageLabel(stage: FinanceRow["billingStage"]) {
@@ -81,6 +83,25 @@ function actionLabel(action: string) {
     .split("_")
     .map((token) => token.slice(0, 1).toUpperCase() + token.slice(1))
     .join(" ");
+}
+
+function hasSignalByCode(row: FinanceRow, hints: string[]) {
+  const values = [
+    row.topBlocker?.code ?? "",
+    row.topBlocker?.message ?? "",
+    ...(row.readinessSnapshot?.blockers ?? []).flatMap((blocker) => [blocker.code, blocker.message]),
+  ]
+    .join(" ")
+    .toUpperCase();
+  return hints.some((hint) => values.includes(hint.toUpperCase()));
+}
+
+function matchesLaneFilter(row: FinanceRow, lane: LaneFilter) {
+  if (lane === "all") return true;
+  if (lane === "qboFailed") return row.integrations?.quickbooks?.syncStatus === "FAILED";
+  if (lane === "disputes") return hasSignalByCode(row, ["DISPUTE", "CHARGEBACK", "CUSTOMER_DISPUTE"]);
+  if (lane === "shortPay") return hasSignalByCode(row, ["SHORT_PAY", "PARTIAL_PAYMENT", "UNDERPAID", "COLLECTION"]);
+  return true;
 }
 
 function compareText(a: string | null | undefined, b: string | null | undefined) {
@@ -132,6 +153,7 @@ export function FinanceSpreadsheetPanel() {
   const [isSpreadsheetMaximized, setIsSpreadsheetMaximized] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("deliveredAt");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [laneFilter, setLaneFilter] = useState<LaneFilter>("all");
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
 
   const loadRows = useCallback(async () => {
@@ -169,6 +191,10 @@ export function FinanceSpreadsheetPanel() {
   }, [loadRows]);
 
   useEffect(() => {
+    setPage(1);
+  }, [laneFilter, rowsPerPage]);
+
+  useEffect(() => {
     if (!isSpreadsheetMaximized || typeof window === "undefined") {
       return;
     }
@@ -186,9 +212,11 @@ export function FinanceSpreadsheetPanel() {
     };
   }, [isSpreadsheetMaximized]);
 
+  const scopedRows = useMemo(() => rows.filter((row) => matchesLaneFilter(row, laneFilter)), [laneFilter, rows]);
+
   const sortedRows = useMemo(() => {
     const factor = sortDirection === "asc" ? 1 : -1;
-    return [...rows].sort((a, b) => {
+    return [...scopedRows].sort((a, b) => {
       let result = 0;
       if (sortKey === "loadNumber") result = compareText(a.loadNumber, b.loadNumber);
       if (sortKey === "billingStage") result = stageSortRank(a.billingStage) - stageSortRank(b.billingStage);
@@ -203,7 +231,7 @@ export function FinanceSpreadsheetPanel() {
       }
       return result * factor;
     });
-  }, [rows, sortDirection, sortKey]);
+  }, [scopedRows, sortDirection, sortKey]);
 
   const totalPages = Math.max(1, Math.ceil(sortedRows.length / rowsPerPage));
   const normalizedPage = Math.min(page, totalPages);
@@ -221,6 +249,14 @@ export function FinanceSpreadsheetPanel() {
     }
     return counts;
   }, [sortedRows]);
+  const riskLaneCounts = useMemo(
+    () => ({
+      disputes: rows.filter((row) => matchesLaneFilter(row, "disputes")).length,
+      shortPay: rows.filter((row) => matchesLaneFilter(row, "shortPay")).length,
+      qboFailed: rows.filter((row) => matchesLaneFilter(row, "qboFailed")).length,
+    }),
+    [rows]
+  );
   const summaryStats = useMemo(() => {
     let blocked = 0;
     let ready = 0;
@@ -317,6 +353,37 @@ export function FinanceSpreadsheetPanel() {
             );
           })}
         </div>
+        <div className="flex flex-wrap items-center gap-2 border-t border-[color:var(--color-divider)] pt-2 text-xs">
+          <span className="font-medium text-[color:var(--color-text-muted)]">Risk lanes</span>
+          <button
+            type="button"
+            onClick={() => setLaneFilter("all")}
+            className={`rounded-full border px-2 py-1 ${laneFilter === "all" ? "border-[color:var(--color-accent)] text-[color:var(--color-accent)]" : "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"}`}
+          >
+            All ({rows.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setLaneFilter("disputes")}
+            className={`rounded-full border px-2 py-1 ${laneFilter === "disputes" ? "border-[color:var(--color-accent)] text-[color:var(--color-accent)]" : "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"}`}
+          >
+            Disputes ({riskLaneCounts.disputes})
+          </button>
+          <button
+            type="button"
+            onClick={() => setLaneFilter("shortPay")}
+            className={`rounded-full border px-2 py-1 ${laneFilter === "shortPay" ? "border-[color:var(--color-accent)] text-[color:var(--color-accent)]" : "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"}`}
+          >
+            Short pay ({riskLaneCounts.shortPay})
+          </button>
+          <button
+            type="button"
+            onClick={() => setLaneFilter("qboFailed")}
+            className={`rounded-full border px-2 py-1 ${laneFilter === "qboFailed" ? "border-[color:var(--color-accent)] text-[color:var(--color-accent)]" : "border-[color:var(--color-divider)] text-[color:var(--color-text-muted)]"}`}
+          >
+            QBO failed ({riskLaneCounts.qboFailed})
+          </button>
+        </div>
       </Card>
 
       <div
@@ -357,6 +424,7 @@ export function FinanceSpreadsheetPanel() {
             <StatusChip tone={summaryStats.blocked > 0 ? "warning" : "success"} label={`Blocked ${summaryStats.blocked}`} />
             <StatusChip tone="success" label={`Ready ${summaryStats.ready}`} />
             <StatusChip tone="info" label={`Amount ${formatCurrency(summaryStats.totalAmountCents)}`} />
+            <StatusChip tone="neutral" label={`Lane ${laneFilter === "all" ? "All" : laneFilter === "shortPay" ? "Short pay" : laneFilter === "qboFailed" ? "QBO failed" : "Disputes"}`} />
             <span className="ml-auto text-[color:var(--color-text-muted)]">{lastRefreshedAt ? `Last refresh ${formatDateTime(lastRefreshedAt)}` : "Not refreshed yet"}</span>
           </div>
           {loading ? <EmptyState title="Loading finance rows..." /> : null}
@@ -505,7 +573,7 @@ export function FinanceSpreadsheetPanel() {
                     (selected.readinessSnapshot?.blockers ?? []).slice(0, 3).map((blocker) => (
                       <div key={`${selected.loadId}-${blocker.code}`} className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2 text-xs">
                         <div className="flex items-center gap-2">
-                          <StatusChip tone={blocker.severity === "error" ? "danger" : "warning"} label={blocker.code} />
+                          <StatusChip tone={toneFromSeverity(blocker.severity)} label={blocker.code} />
                         </div>
                         <div className="mt-1 text-[color:var(--color-text-muted)]">{blocker.message}</div>
                       </div>

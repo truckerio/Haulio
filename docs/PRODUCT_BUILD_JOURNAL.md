@@ -72,3 +72,85 @@
   - Added docs:
     - `docs/PHASE10_START.md`
     - `docs/PHASE10_PASS.md`
+
+- Phase 11 start + pass: UI consolidation Wave 0 (audit + baseline instrumentation).
+  - Added UI consolidation execution report:
+    - `docs/GOD_LEVEL_TMS_UI_CONSOLIDATION_REPORT.md`
+  - Added Wave 0 audit artifacts:
+    - `docs/UI_PRINCIPLES_AUDIT.md`
+    - `docs/ROLE_TASK_SCENARIOS.md`
+    - `docs/UI_BASELINE_METRICS.md`
+  - Added web telemetry baseline runtime and queue utilities:
+    - `apps/web/lib/ui-telemetry.ts`
+    - `apps/web/components/telemetry/ui-telemetry-runtime.tsx`
+  - Mounted telemetry runtime in root web layout.
+  - Added Phase 11 contract tests and gates:
+    - `apps/web/lib/ui-telemetry.test.ts`
+    - `apps/web/app/phase11-telemetry-contract.test.ts`
+    - `demo:smoke:phase11`
+    - `ci:phase11`
+
+- Phase 12 start + pass: UI consolidation Wave 1 (dispatch state completeness).
+  - Added explicit dispatch state handling in `apps/web/app/dispatch/page.tsx`:
+    - loading state
+    - empty state
+    - error + retry state
+    - partial-failure warning state
+    - refresh visibility state
+  - Added dispatch state contract test:
+    - `apps/web/app/dispatch/dispatch-phase12-state-contract.test.ts`
+  - Added phase gates:
+    - `demo:smoke:phase12`
+    - `ci:phase12`
+
+- Phase 13 start + pass: UI consolidation Wave 2 (finance state completeness).
+  - Hardened summary rail loading path with partial-safe fetch handling (`Promise.allSettled`).
+  - Added explicit partial-failure warning state and refresh-state visibility in finance summary.
+  - Added stable card heights to reduce layout shift in dense finance scanning mode.
+  - Added finance phase contract:
+    - `apps/web/app/finance/finance-phase13-state-contract.test.ts`
+  - Added phase gates:
+    - `demo:smoke:phase13`
+    - `ci:phase13`
+
+- Phase 14 start + pass: UI consolidation Wave 3 (safety/support read-heavy hardening).
+  - Hardened loads workspace state completeness:
+    - loading, error/retry, partial warning, and refresh visibility states.
+  - Added explicit fail-closed no-access rendering for non-load-capable roles.
+  - Added read-heavy triage snapshot cards for safety/support queues.
+  - Added loads phase contract:
+    - `apps/web/app/loads/loads-phase14-readheavy-contract.test.ts`
+  - Added phase gates:
+    - `demo:smoke:phase14`
+    - `ci:phase14`
+
+- Phase 15 start + pass: UI consolidation Wave 4 (cross-surface consistency pass).
+  - Added shared status semantic map:
+    - `apps/web/lib/status-semantics.ts`
+  - Applied semantic tone mapping in loads/trips/finance surfaces.
+  - Added consistency contracts:
+    - `apps/web/lib/status-semantics.test.ts`
+    - `apps/web/app/phase15-status-consistency-contract.test.ts`
+  - Added phase gates:
+    - `demo:smoke:phase15`
+    - `ci:phase15`
+
+- Phase 16 start + pass: UI consolidation Wave 5 (final validation + rollout gate).
+  - Added final phase gate scripts:
+    - `demo:smoke:phase16`
+    - `ci:phase16`
+  - Bound validation to:
+    - `pnpm ci:godlevel:complete`
+
+- Phase 17 start + pass: controlled pilot rollout + stabilization.
+  - Added pilot rollout scripts:
+    - `demo:smoke:phase17`
+    - `ci:phase17`
+  - Bound Phase 17 to:
+    - `ci:phase16`
+    - `demo:smoke`
+    - `demo:smoke:roles`
+    - `demo:smoke:enforce`
+  - Added docs:
+    - `docs/PHASE17_START.md`
+    - `docs/PHASE17_PASS.md`

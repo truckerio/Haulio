@@ -52,6 +52,11 @@ type SummaryState = {
   journals: JournalEntry[];
 };
 
+type SummaryPartialState = {
+  walletsError: string | null;
+  journalsError: string | null;
+};
+
 function formatMoney(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
 }
@@ -67,28 +72,66 @@ export function FinanceSummaryRail() {
   const [error, setError] = useState<string | null>(null);
   const [restrictedBy403, setRestrictedBy403] = useState(false);
   const [state, setState] = useState<SummaryState>({ wallets: null, journals: [] });
+  const [partialState, setPartialState] = useState<SummaryPartialState>({ walletsError: null, journalsError: null });
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
 
   const loadSummary = useCallback(async () => {
     if (!canAccess) return;
     setLoading(true);
     try {
-      const [wallets, journalsResponse] = await Promise.all([
+      const [walletsResult, journalsResult] = await Promise.allSettled([
         apiFetch<WalletResponse>("/finance/wallets"),
         apiFetch<JournalsResponse>("/finance/journals?limit=40"),
       ]);
-      setState({ wallets, journals: journalsResponse.entries ?? [] });
-      setError(null);
+      const nextState: SummaryState = { wallets: null, journals: [] };
+      const nextPartial: SummaryPartialState = { walletsError: null, journalsError: null };
+
+      if (walletsResult.status === "fulfilled") {
+        nextState.wallets = walletsResult.value;
+      } else if (isForbiddenError(walletsResult.reason)) {
+        setRestrictedBy403(true);
+        setError(null);
+        setState({ wallets: null, journals: [] });
+        setPartialState({ walletsError: null, journalsError: null });
+        return;
+      } else {
+        nextPartial.walletsError = (walletsResult.reason as Error)?.message ?? "Unable to load wallet snapshot.";
+      }
+
+      if (journalsResult.status === "fulfilled") {
+        nextState.journals = journalsResult.value.entries ?? [];
+      } else if (isForbiddenError(journalsResult.reason)) {
+        setRestrictedBy403(true);
+        setError(null);
+        setState({ wallets: null, journals: [] });
+        setPartialState({ walletsError: null, journalsError: null });
+        return;
+      } else {
+        nextPartial.journalsError = (journalsResult.reason as Error)?.message ?? "Unable to load journal stream.";
+      }
+
       setRestrictedBy403(false);
+      setState(nextState);
+      setPartialState(nextPartial);
+      setLastRefreshedAt(new Date().toISOString());
+      if (nextPartial.walletsError && nextPartial.journalsError) {
+        setError("Unable to load finance summary data right now.");
+      } else {
+        setError(null);
+      }
     } catch (err) {
       if (isForbiddenError(err)) {
         setRestrictedBy403(true);
         setError(null);
         setState({ wallets: null, journals: [] });
+        setPartialState({ walletsError: null, journalsError: null });
       } else {
         setError((err as Error).message);
       }
     } finally {
       setLoading(false);
+      setLoadedOnce(true);
     }
   }, [canAccess]);
 
@@ -125,6 +168,8 @@ export function FinanceSummaryRail() {
       hasFlags: unbalanced > 0 || incompleteLines > 0 || duplicateIdempotency > 0,
     };
   }, [state.journals]);
+  const hasPartialFailure = Boolean(partialState.walletsError || partialState.journalsError);
+  const hasHardFailure = Boolean(error && !hasPartialFailure);
 
   if (!canAccess || restrictedBy403) {
     return (
@@ -140,7 +185,15 @@ export function FinanceSummaryRail() {
 
   return (
     <div className="space-y-1.5">
-      {error ? <ErrorBanner message={error} /> : null}
+      {hasHardFailure ? <ErrorBanner message={error ?? "Unable to load finance summary data right now."} /> : null}
+      {hasPartialFailure ? (
+        <div className="rounded-[var(--radius-control)] border border-[color:var(--color-warning)]/45 bg-[color:var(--color-warning)]/10 px-3 py-2 text-xs text-[color:var(--color-warning)]">
+          Partial sync warning:
+          {partialState.walletsError ? ` wallets (${partialState.walletsError})` : ""}
+          {partialState.walletsError && partialState.journalsError ? " ·" : ""}
+          {partialState.journalsError ? ` journals (${partialState.journalsError})` : ""}
+        </div>
+      ) : null}
       <SectionHeader
         title="Finance summary rail"
         subtitle="Read-only wallet, payout stream, and ledger health"
@@ -150,8 +203,11 @@ export function FinanceSummaryRail() {
           </Button>
         }
       />
+      <div className="text-[11px] text-[color:var(--color-text-muted)]">
+        {lastRefreshedAt ? `Last refresh ${formatDateTime(lastRefreshedAt)}` : loadedOnce ? "Not refreshed yet" : "Loading summary..."}
+      </div>
       <div className="grid gap-2 lg:grid-cols-3">
-        <Card className="space-y-1.5 !p-2.5 sm:!p-3">
+        <Card className="space-y-1.5 !p-2.5 sm:!p-3 min-h-[180px]">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Wallet snapshot</div>
           {loading && !state.wallets ? <EmptyState title="Loading wallets..." /> : null}
           {!loading && !state.wallets ? <EmptyState title="No wallet data available." /> : null}
@@ -174,7 +230,7 @@ export function FinanceSummaryRail() {
           ) : null}
         </Card>
 
-        <Card className="space-y-1.5 !p-2.5 sm:!p-3">
+        <Card className="space-y-1.5 !p-2.5 sm:!p-3 min-h-[180px]">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Latest payouts</div>
           {loading && latestPayouts.length === 0 ? <EmptyState title="Loading payout events..." /> : null}
           {!loading && latestPayouts.length === 0 ? <EmptyState title="No payout events yet." /> : null}
@@ -196,7 +252,7 @@ export function FinanceSummaryRail() {
           ) : null}
         </Card>
 
-        <Card className="space-y-1.5 !p-2.5 sm:!p-3">
+        <Card className="space-y-1.5 !p-2.5 sm:!p-3 min-h-[180px]">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Journal health flags</div>
           <div className="flex items-center gap-2">
             <StatusChip tone={health.hasFlags ? "warning" : "success"} label={health.hasFlags ? "Needs review" : "Healthy"} />
