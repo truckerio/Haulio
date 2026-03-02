@@ -1039,7 +1039,7 @@ export function DispatchSpreadsheetGrid({
     [onSortRulesChange, sortRules]
   );
 
-  const rowHeight = density === "compact" ? 50 : 62;
+  const rowHeight = density === "compact" ? 72 : 84;
 
   const visibleColumns = useMemo(() => {
     return DISPATCH_GRID_COLUMNS.filter((column) => {
@@ -2594,10 +2594,10 @@ export function DispatchSpreadsheetGrid({
                       const isEditing = editingCell?.rowId === row.id && editingCell.column === column.key;
                       const editKey = `${row.id}:${column.key}`;
                       const cellClass = cn(
-                        "relative h-full border-r border-[color:var(--color-divider)] px-2 text-[13px] text-ink",
-                        density === "compact" ? "py-1.5" : "py-2",
-                        column.align === "right" ? "flex items-center justify-end" : "flex items-center",
-                        column.align === "center" ? "justify-center" : "",
+                        "relative h-full border-r border-[color:var(--color-divider)] px-2 py-2.5 text-[13px] text-ink",
+                        column.key === "select" ? "flex items-center" : "flex items-start",
+                        column.align === "right" ? "justify-end text-right" : "justify-start",
+                        column.align === "center" ? "justify-center text-center" : "",
                         rowBackgroundClass,
                         isFocusedCell ? "bg-[color:var(--color-bg-muted)]/60" : ""
                       );

@@ -240,7 +240,7 @@ const DEFAULT_PANELS: DispatchPanels = {
   inspector: true,
   tripInspector: false,
   driverLanes: false,
-  exceptions: true,
+  exceptions: false,
   exceptionsDock: "left",
 };
 
@@ -253,7 +253,7 @@ const SYSTEM_VIEW: DispatchViewConfig = {
   id: "dispatch-core",
   name: "Dispatch Core",
   filters: defaultFilters,
-  density: "compact",
+  density: "comfortable",
   columns: DEFAULT_COLUMNS,
   panels: DEFAULT_PANELS,
   grid: DEFAULT_GRID_STATE,
@@ -422,7 +422,7 @@ function sanitizeView(view: DispatchViewConfig): DispatchViewConfig {
       exceptions: view.panels?.exceptions ?? DEFAULT_PANELS.exceptions,
       exceptionsDock: view.panels?.exceptionsDock === "right" ? "right" : "left",
     },
-    density: view.density === "comfortable" ? "comfortable" : "compact",
+    density: "comfortable",
     grid: {
       filters: view.grid?.filters ?? DEFAULT_GRID_STATE.filters,
       sortRules: Array.isArray(view.grid?.sortRules) && view.grid!.sortRules.length ? view.grid!.sortRules : DEFAULT_GRID_STATE.sortRules,
@@ -439,7 +439,7 @@ function hydrateDispatchViewFromApi(view: any): DispatchViewConfig {
     isRoleDefault: Boolean(view.isRoleDefault),
     userId: view.userId ?? null,
     filters: view.config?.filters ?? view.filters ?? defaultFilters,
-    density: view.config?.density ?? view.density ?? "compact",
+    density: "comfortable",
     columns: view.config?.columns ?? view.columns ?? DEFAULT_COLUMNS,
     panels: view.config?.panels ?? view.panels ?? DEFAULT_PANELS,
     grid: view.config?.grid ?? view.grid ?? DEFAULT_GRID_STATE,
@@ -467,7 +467,7 @@ function DispatchPageContent({
   );
   const [teams, setTeams] = useState<Array<{ id: string; name: string; active?: boolean }>>([]);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
-  const [gridDensity, setGridDensity] = useState<DispatchGridDensity>("compact");
+  const [gridDensity, setGridDensity] = useState<DispatchGridDensity>("comfortable");
   const [columnVisibility, setColumnVisibility] =
     useState<Partial<Record<DispatchGridColumnKey, boolean>>>(normalizeViewColumns(DEFAULT_COLUMNS));
   const [gridFilters, setGridFilters] = useState<DispatchGridFilterState>(DEFAULT_GRID_STATE.filters);
@@ -478,6 +478,7 @@ function DispatchPageContent({
   const [canManageTemplates, setCanManageTemplates] = useState(false);
   const [activeViewId, setActiveViewId] = useState<string>(SYSTEM_VIEW.id);
   const [showFilters, setShowFilters] = useState(false);
+  const [showWorkbenchMenu, setShowWorkbenchMenu] = useState(false);
   const [activeWorkflowQueueId, setActiveWorkflowQueueId] = useState<WorkflowQueuePresetId | "">("");
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -528,6 +529,7 @@ function DispatchPageContent({
   const [blocked, setBlocked] = useState<{ message?: string; ctaHref?: string } | null>(null);
   const pendingLoadIdRef = useRef<string | null>(null);
   const appliedIssuePresetRef = useRef<string | null>(null);
+  const workbenchMenuRef = useRef<HTMLDivElement | null>(null);
 
   const loadIdParam = searchParams.get("loadId");
   const queueView = useMemo<QueueView>(() => {
@@ -667,6 +669,25 @@ function DispatchPageContent({
   }, []);
 
   useEffect(() => {
+    if (!showWorkbenchMenu) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!workbenchMenuRef.current) return;
+      if (workbenchMenuRef.current.contains(event.target as Node)) return;
+      setShowWorkbenchMenu(false);
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setShowWorkbenchMenu(false);
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [showWorkbenchMenu]);
+
+  useEffect(() => {
     if (!canDispatch || !user?.id) return;
     let active = true;
     apiFetch<{
@@ -694,7 +715,7 @@ function DispatchPageContent({
         setFilters(nextView.filters);
         setGridDensity(nextView.density);
         setColumnVisibility(normalizeViewColumns(nextView.columns));
-        setPanelLayout(nextView.panels);
+        setPanelLayout({ ...nextView.panels, exceptions: false });
       })
       .catch(() => {
         if (!active) return;
@@ -1813,14 +1834,56 @@ function DispatchPageContent({
   );
   const selectedCount = selectedRows.size;
   const loadById = useMemo(() => new Map(sortedLoads.map((load) => [load.id, load])), [sortedLoads]);
-  const exceptionRows = useMemo(
-    () =>
-      dispatchExceptions.map((item) => ({
-        ...item,
-        loadNumber: item.loadNumber ?? loadById.get(item.loadId)?.loadNumber ?? "Unknown load",
-      })),
-    [dispatchExceptions, loadById]
-  );
+  const exceptionRows = useMemo<Array<DispatchExceptionItem & { actionable: boolean; source: "dispatch" | "signal" }>>(() => {
+    const mapped = dispatchExceptions.map((item) => ({
+      ...item,
+      loadNumber: item.loadNumber ?? loadById.get(item.loadId)?.loadNumber ?? "Unknown load",
+      actionable: true,
+      source: "dispatch" as const,
+    }));
+    const seen = new Set(
+      mapped.map((item) => `${item.loadId}:${item.title.trim().toLowerCase()}`)
+    );
+    const signalRows = sortedLoads.flatMap((load) => {
+      const derived: Array<DispatchExceptionItem & { actionable: boolean; source: "signal" }> = [];
+      const loadNumber = load.loadNumber ?? "Unknown load";
+      const createdAt = load.updatedAt ?? new Date().toISOString();
+      const pushSignal = (title: string, severity: "WARNING" | "BLOCKER") => {
+        const signature = `${load.id}:${title.toLowerCase()}`;
+        if (seen.has(signature)) return;
+        seen.add(signature);
+        derived.push({
+          id: `signal:${load.id}:${title.toLowerCase().replace(/\s+/g, "-")}`,
+          loadId: load.id,
+          loadNumber,
+          tripId: load.trip?.id ?? null,
+          tripNumber: load.trip?.tripNumber ?? null,
+          type: "RISK_SIGNAL",
+          severity,
+          owner: "DISPATCH",
+          status: "OPEN",
+          title,
+          detail: "Derived from active dispatch risk signals.",
+          createdAt,
+          actionable: false,
+          source: "signal",
+        });
+      };
+      if (load.riskFlags?.needsAssignment) pushSignal("Needs assignment", "BLOCKER");
+      if (load.riskFlags?.trackingOffInTransit) pushSignal("Tracking off", "WARNING");
+      if (load.riskFlags?.overdueStopWindow) pushSignal("Overdue stop", "WARNING");
+      return derived;
+    });
+    return [...mapped, ...signalRows];
+  }, [dispatchExceptions, loadById, sortedLoads]);
+  const exceptionSubtitle = useMemo(() => {
+    if (exceptionsSummary && (exceptionsSummary.open > 0 || dispatchExceptions.length > 0)) {
+      return `${exceptionsSummary.open} open · ${exceptionsSummary.acknowledged} acknowledged · ${exceptionsSummary.blockers} blockers`;
+    }
+    if (!exceptionRows.length) return "Open issues visible in queue";
+    const blockers = exceptionRows.filter((item) => item.severity === "BLOCKER").length;
+    return `${exceptionRows.length} open signals · ${blockers} blockers`;
+  }, [dispatchExceptions.length, exceptionRows, exceptionsSummary]);
 
   const selectedTripId =
     selectedLoadSummary?.trip?.id ?? selectedLoad?.tripLoads?.[0]?.trip?.id ?? null;
@@ -2121,29 +2184,177 @@ function DispatchPageContent({
                 Create load
               </Button>
             ) : null}
-            <button
-              type="button"
-              aria-label={showFilters ? "Hide refine filters" : "Open refine filters"}
-              title={showFilters ? "Hide refine filters (F)" : "Refine filters (F)"}
-              onClick={() => setShowFilters((prev) => !prev)}
-              className="relative inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
-            >
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
+            <div ref={workbenchMenuRef} className="relative">
+              <button
+                type="button"
+                aria-label={showWorkbenchMenu ? "Close dispatch controls menu" : "Open dispatch controls menu"}
+                title={showWorkbenchMenu ? "Close dispatch controls menu" : "Open dispatch controls menu"}
+                onClick={() => setShowWorkbenchMenu((prev) => !prev)}
+                className="relative inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
               >
-                <path d="M4 6h16M7 12h10M10 18h4" strokeLinecap="round" />
-              </svg>
-              {activeFilterCount > 0 ? (
-                <span className="absolute -right-1 -top-1 inline-flex h-[var(--icon-badge-size)] min-w-[var(--icon-badge-size)] items-center justify-center rounded-full bg-[color:var(--color-accent)] px-1 text-[10px] font-semibold leading-none text-white">
-                  {activeFilterCount}
-                </span>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                >
+                  <path d="M4 6h16M7 12h10M10 18h4" strokeLinecap="round" />
+                </svg>
+                {activeFilterCount > 0 ? (
+                  <span className="absolute -right-1 -top-1 inline-flex h-[var(--icon-badge-size)] min-w-[var(--icon-badge-size)] items-center justify-center rounded-full bg-[color:var(--color-accent)] px-1 text-[10px] font-semibold leading-none text-white">
+                    {activeFilterCount}
+                  </span>
+                ) : null}
+              </button>
+              {showWorkbenchMenu ? (
+                <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[min(92vw,560px)] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 shadow-[var(--shadow-elevated)]">
+                  <div className="grid gap-3">
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Workbench controls</div>
+                    <FormField label="View" htmlFor="dispatchViewSelectMenu">
+                      <Select
+                        id="dispatchViewSelectMenu"
+                        value={activeViewId}
+                        onChange={(event) => {
+                          const nextId = event.target.value;
+                          if (nextId === SYSTEM_VIEW.id) {
+                            applyView(SYSTEM_VIEW);
+                            return;
+                          }
+                          const view = allViews.find((entry) => entry.id === nextId);
+                          if (view) applyView(view);
+                        }}
+                      >
+                        <option value={SYSTEM_VIEW.id}>{SYSTEM_VIEW.name}</option>
+                        {templateViews.map((view) => (
+                          <option key={view.id} value={view.id}>
+                            [Template] {view.name}
+                          </option>
+                        ))}
+                        {personalViews.map((view) => (
+                          <option key={view.id} value={view.id}>
+                            [Mine] {view.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </FormField>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Button size="sm" variant="secondary" onClick={() => void saveCurrentAsView("PERSONAL")}>
+                        Save as new
+                      </Button>
+                      {canManageTemplates ? (
+                        <Button size="sm" variant="ghost" onClick={() => void saveCurrentAsView("ADMIN_TEMPLATE")}>
+                          Save template
+                        </Button>
+                      ) : null}
+                      <Button size="sm" variant="secondary" onClick={() => void updateCurrentView()}>
+                        Save current
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void deleteCurrentView()}
+                        disabled={
+                          activeViewId === SYSTEM_VIEW.id ||
+                          (activeView.scope === "ADMIN_TEMPLATE" && !canManageTemplates)
+                        }
+                      >
+                        Delete view
+                      </Button>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                      <FormField label="Workflow queue preset" htmlFor="workflowQueuePresetMenu">
+                        <Select
+                          id="workflowQueuePresetMenu"
+                          value={activeWorkflowQueueId}
+                          onChange={(event) => {
+                            const nextValue = event.target.value as WorkflowQueuePresetId | "";
+                            if (!nextValue) {
+                              setActiveWorkflowQueueId("");
+                              return;
+                            }
+                            applyWorkflowQueuePreset(nextValue);
+                          }}
+                        >
+                          <option value="">Workflow queue preset</option>
+                          {WORKFLOW_QUEUE_PRESETS.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.label}
+                            </option>
+                          ))}
+                        </Select>
+                      </FormField>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => void saveCurrentAsView("PERSONAL")}
+                        disabled={!activeWorkflowQueueId}
+                      >
+                        Save
+                      </Button>
+                    </div>
+                    <div className="grid gap-2">
+                      <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Panels</div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <Button
+                          size="sm"
+                          variant={panelLayout.inspector ? "secondary" : "ghost"}
+                          onClick={() => setPanelLayout((prev) => ({ ...prev, inspector: !prev.inspector }))}
+                        >
+                          Inspector
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={panelLayout.tripInspector ? "secondary" : "ghost"}
+                          onClick={() => setPanelLayout((prev) => ({ ...prev, tripInspector: !prev.tripInspector }))}
+                        >
+                          Trip inspector
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={panelLayout.driverLanes ? "secondary" : "ghost"}
+                          onClick={() => setPanelLayout((prev) => ({ ...prev, driverLanes: !prev.driverLanes }))}
+                        >
+                          Driver lanes
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={panelLayout.exceptions ? "secondary" : "ghost"}
+                          onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: !prev.exceptions }))}
+                        >
+                          Exceptions
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <FormField label="Exceptions dock" htmlFor="exceptionsDockMenu">
+                        <Select
+                          id="exceptionsDockMenu"
+                          value={panelLayout.exceptionsDock}
+                          onChange={(event) =>
+                            setPanelLayout((prev) => ({
+                              ...prev,
+                              exceptionsDock: event.target.value === "right" ? "right" : "left",
+                            }))
+                          }
+                        >
+                          <option value="left">Left</option>
+                          <option value="right">Right</option>
+                        </Select>
+                      </FormField>
+                      <div className="flex items-end">
+                        <Button size="sm" variant="secondary" onClick={() => setShowFilters((prev) => !prev)}>
+                          {showFilters ? "Hide refine filters" : "Show refine filters"}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-[color:var(--color-text-muted)]">Active view: {activeView.name}</div>
+                  </div>
+                </div>
               ) : null}
-            </button>
+            </div>
             <SegmentedControl
               value={queueView}
               options={[
@@ -2152,14 +2363,6 @@ function DispatchPageContent({
                 { label: "History", value: "history" },
               ]}
               onChange={(value) => updateQueueViewParam(value as QueueView)}
-            />
-            <SegmentedControl
-              value={gridDensity}
-              options={[
-                { label: "Compact", value: "compact" },
-                { label: "Comfortable", value: "comfortable" },
-              ]}
-              onChange={(value) => setGridDensity(value as DispatchGridDensity)}
             />
             <Button variant="secondary" size="sm" onClick={() => void loadDispatchLoads(filters, pageIndex)} disabled={queueLoading}>
               {queueLoading ? "Refreshing..." : "Refresh"}
@@ -2189,138 +2392,6 @@ function DispatchPageContent({
             </div>
           </div>
         ) : null}
-      </div>
-
-      <div className="mt-3 grid gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 lg:grid-cols-[minmax(220px,1fr)_auto_auto_auto_auto] lg:items-center">
-        <FormField label="View" htmlFor="dispatchViewSelect">
-          <Select
-            id="dispatchViewSelect"
-            value={activeViewId}
-            onChange={(event) => {
-              const nextId = event.target.value;
-              if (nextId === SYSTEM_VIEW.id) {
-                applyView(SYSTEM_VIEW);
-                return;
-              }
-              const view = allViews.find((entry) => entry.id === nextId);
-              if (view) applyView(view);
-            }}
-          >
-            <option value={SYSTEM_VIEW.id}>{SYSTEM_VIEW.name}</option>
-            {templateViews.map((view) => (
-              <option key={view.id} value={view.id}>
-                [Template] {view.name}
-              </option>
-            ))}
-            {personalViews.map((view) => (
-              <option key={view.id} value={view.id}>
-                [Mine] {view.name}
-              </option>
-            ))}
-          </Select>
-          <div className="mt-2 flex items-center gap-2">
-            <Select
-              aria-label="Workflow queue preset"
-              value={activeWorkflowQueueId}
-              onChange={(event) => {
-                const nextValue = event.target.value as WorkflowQueuePresetId | "";
-                if (!nextValue) {
-                  setActiveWorkflowQueueId("");
-                  return;
-                }
-                applyWorkflowQueuePreset(nextValue);
-              }}
-            >
-              <option value="">Workflow queue preset</option>
-              {WORKFLOW_QUEUE_PRESETS.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.label}
-                </option>
-              ))}
-            </Select>
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              onClick={() => void saveCurrentAsView("PERSONAL")}
-              disabled={!activeWorkflowQueueId}
-            >
-              Save
-            </Button>
-          </div>
-        </FormField>
-        <div className="flex gap-2">
-          <Button size="sm" variant="secondary" onClick={() => void saveCurrentAsView("PERSONAL")}>
-            Save as new
-          </Button>
-          {canManageTemplates ? (
-            <Button size="sm" variant="ghost" onClick={() => void saveCurrentAsView("ADMIN_TEMPLATE")}>
-              Save template
-            </Button>
-          ) : null}
-          <Button size="sm" variant="secondary" onClick={() => void updateCurrentView()}>
-            Save current
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => void deleteCurrentView()}
-            disabled={
-              activeViewId === SYSTEM_VIEW.id ||
-              (activeView.scope === "ADMIN_TEMPLATE" && !canManageTemplates)
-            }
-          >
-            Delete
-          </Button>
-        </div>
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant={panelLayout.inspector ? "secondary" : "ghost"}
-            onClick={() => setPanelLayout((prev) => ({ ...prev, inspector: !prev.inspector }))}
-          >
-            Inspector
-          </Button>
-          <Button
-            size="sm"
-            variant={panelLayout.tripInspector ? "secondary" : "ghost"}
-            onClick={() => setPanelLayout((prev) => ({ ...prev, tripInspector: !prev.tripInspector }))}
-          >
-            Trip inspector
-          </Button>
-          <Button
-            size="sm"
-            variant={panelLayout.driverLanes ? "secondary" : "ghost"}
-            onClick={() => setPanelLayout((prev) => ({ ...prev, driverLanes: !prev.driverLanes }))}
-          >
-            Driver lanes
-          </Button>
-          <Button
-            size="sm"
-            variant={panelLayout.exceptions ? "secondary" : "ghost"}
-            onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: !prev.exceptions }))}
-          >
-            Exceptions
-          </Button>
-        </div>
-        <FormField label="Exceptions dock" htmlFor="exceptionsDock">
-          <Select
-            id="exceptionsDock"
-            value={panelLayout.exceptionsDock}
-            onChange={(event) =>
-              setPanelLayout((prev) => ({
-                ...prev,
-                exceptionsDock: event.target.value === "right" ? "right" : "left",
-              }))
-            }
-          >
-            <option value="left">Left</option>
-            <option value="right">Right</option>
-          </Select>
-        </FormField>
-        <div className="text-xs text-[color:var(--color-text-muted)]">
-          Active view: {activeView.name}
-        </div>
       </div>
 
       {selectedCount > 0 ? (
@@ -2589,11 +2660,7 @@ function DispatchPageContent({
           <RefinePanel className="max-h-[62vh] overflow-auto">
             <SectionHeader
               title="Exceptions"
-              subtitle={
-                exceptionsSummary
-                  ? `${exceptionsSummary.open} open · ${exceptionsSummary.acknowledged} acknowledged · ${exceptionsSummary.blockers} blockers`
-                  : "Open issues visible in queue"
-              }
+              subtitle={exceptionSubtitle}
             />
             <div className="mt-2 space-y-2">
               {exceptionRows.length ? (
@@ -2614,21 +2681,23 @@ function DispatchPageContent({
                       </div>
                       <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatExceptionAge(row.createdAt)}</div>
                     </button>
-                    <div className="mt-2 flex gap-2">
-                      {row.status !== "ACKNOWLEDGED" ? (
-                        <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
-                          Ack
+                    {row.actionable ? (
+                      <div className="mt-2 flex gap-2">
+                        {row.status !== "ACKNOWLEDGED" ? (
+                          <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
+                            Ack
+                          </Button>
+                        ) : null}
+                        <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
+                          Resolve
                         </Button>
-                      ) : null}
-                      <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
-                        Resolve
-                      </Button>
-                      {row.status === "ACKNOWLEDGED" ? (
-                        <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
-                          Reopen
-                        </Button>
-                      ) : null}
-                    </div>
+                        {row.status === "ACKNOWLEDGED" ? (
+                          <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
+                            Reopen
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 ))
               ) : (
@@ -2691,11 +2760,7 @@ function DispatchPageContent({
           <RefinePanel className="max-h-[62vh] overflow-auto">
             <SectionHeader
               title="Exceptions"
-              subtitle={
-                exceptionsSummary
-                  ? `${exceptionsSummary.open} open · ${exceptionsSummary.acknowledged} acknowledged · ${exceptionsSummary.blockers} blockers`
-                  : "Open issues visible in queue"
-              }
+              subtitle={exceptionSubtitle}
             />
             <div className="mt-2 space-y-2">
               {exceptionRows.length ? (
@@ -2716,21 +2781,23 @@ function DispatchPageContent({
                       </div>
                       <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatExceptionAge(row.createdAt)}</div>
                     </button>
-                    <div className="mt-2 flex gap-2">
-                      {row.status !== "ACKNOWLEDGED" ? (
-                        <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
-                          Ack
+                    {row.actionable ? (
+                      <div className="mt-2 flex gap-2">
+                        {row.status !== "ACKNOWLEDGED" ? (
+                          <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
+                            Ack
+                          </Button>
+                        ) : null}
+                        <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
+                          Resolve
                         </Button>
-                      ) : null}
-                      <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
-                        Resolve
-                      </Button>
-                      {row.status === "ACKNOWLEDGED" ? (
-                        <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
-                          Reopen
-                        </Button>
-                      ) : null}
-                    </div>
+                        {row.status === "ACKNOWLEDGED" ? (
+                          <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
+                            Reopen
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 ))
               ) : (
