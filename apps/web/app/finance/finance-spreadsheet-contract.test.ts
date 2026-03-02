@@ -26,8 +26,12 @@ assert.ok(
   "finance page must consume app shell activity controls"
 );
 assert.ok(
-  financePage.includes('{activeTab === "spreadsheet" ? <FinanceSpreadsheetPanel /> : null}'),
-  "finance page must render spreadsheet panel for spreadsheet tab"
+  financePage.includes("FinanceSpreadsheetPanel") && financePage.includes("FinanceSummaryRail"),
+  "finance page must compose spreadsheet and summary rail surfaces"
+);
+assert.ok(
+  financePage.includes('activeTab === "spreadsheet"') && financePage.includes("<FinanceSpreadsheetPanel />"),
+  "finance page must render spreadsheet panel when spreadsheet tab is active"
 );
 assert.ok(
   financePage.includes('aria-label="Open activity"'),
@@ -54,11 +58,11 @@ assert.ok(
   "spreadsheet panel must expose spreadsheet title"
 );
 assert.ok(
-  spreadsheetPanel.includes("Rows/page"),
+  spreadsheetPanel.includes("Rows/page") && spreadsheetPanel.includes("Command queue snapshot"),
   "spreadsheet panel must expose rows per page control"
 );
 assert.ok(
-  spreadsheetPanel.includes('const rowPaddingClass = "px-2 py-1.5";'),
+  spreadsheetPanel.includes('const rowPaddingClass = "px-2.5 py-1.5";'),
   "spreadsheet panel must enforce dense row spacing"
 );
 assert.ok(
@@ -70,8 +74,12 @@ assert.ok(
   "spreadsheet panel must include row details inspector"
 );
 assert.ok(
-  spreadsheetPanel.includes("2xl:grid-cols"),
-  "spreadsheet panel should avoid multi-column overflow on common laptop widths"
+  spreadsheetPanel.includes("xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]"),
+  "spreadsheet panel should keep a right-side quick view on standard laptop widths"
+);
+assert.ok(
+  spreadsheetPanel.includes("max-h-[58vh]") && spreadsheetPanel.includes("colgroup"),
+  "spreadsheet panel should keep the table dense and within viewport height"
 );
 
 console.log("finance spreadsheet contract tests passed");

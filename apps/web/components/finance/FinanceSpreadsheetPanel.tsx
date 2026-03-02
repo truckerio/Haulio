@@ -44,6 +44,13 @@ type ReceivablesResponse = {
   rows?: FinanceRow[];
 };
 
+const LANE_LABELS = {
+  GENERATE_INVOICE: "Invoice now",
+  RETRY_QBO_SYNC: "Retry QBO",
+  FOLLOW_UP_COLLECTION: "Collections",
+  GENERATE_SETTLEMENT: "Settlement",
+} as const;
+
 function formatCurrency(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
 }
@@ -126,9 +133,20 @@ export function FinanceSpreadsheetPanel() {
   const pageStart = (normalizedPage - 1) * rowsPerPage;
   const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + rowsPerPage), [pageStart, rows, rowsPerPage]);
   const selected = useMemo(() => rows.find((row) => row.loadId === selectedId) ?? null, [rows, selectedId]);
-  const rowPaddingClass = "px-2 py-1.5";
+  const laneCounts = useMemo(() => {
+    const counts = Object.fromEntries(Object.keys(LANE_LABELS).map((key) => [key, 0])) as Record<string, number>;
+    for (const row of rows) {
+      for (const action of row.actions?.allowedActions ?? []) {
+        if (action in counts) {
+          counts[action] += 1;
+        }
+      }
+    }
+    return counts;
+  }, [rows]);
+  const rowPaddingClass = "px-2.5 py-1.5";
   const tableTextClass = "text-xs";
-  const cardPaddingClass = "!p-3 sm:!p-4";
+  const cardPaddingClass = "!p-2.5 sm:!p-3";
 
   if (!canAccess || restrictedBy403) {
     return (
@@ -149,7 +167,7 @@ export function FinanceSpreadsheetPanel() {
       <Card className={`space-y-2 ${cardPaddingClass}`}>
         <SectionHeader
           title="Spreadsheet filters"
-          subtitle="Filters stay close to finance table controls for fast triage"
+          subtitle="Filters stay attached to table controls for fast triage"
           action={
             <Button variant="secondary" size="sm" onClick={loadRows} disabled={loading}>
               {loading ? "Refreshing..." : "Refresh"}
@@ -180,7 +198,27 @@ export function FinanceSpreadsheetPanel() {
         </div>
       </Card>
 
-      <div className="grid gap-3 2xl:grid-cols-[1.4fr_0.6fr]">
+      <Card className={`space-y-2 ${cardPaddingClass}`}>
+        <SectionHeader title="Command queue snapshot" subtitle="Lane counts from current spreadsheet scope" />
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          {Object.entries(LANE_LABELS).map(([action, label]) => {
+            const count = laneCounts[action] ?? 0;
+            return (
+              <button
+                key={action}
+                type="button"
+                onClick={() => router.push(`/finance?tab=commands`)}
+                className="flex items-center justify-between rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2.5 py-2 text-left text-xs transition hover:bg-[color:var(--color-bg-muted)]"
+              >
+                <span className="font-medium text-ink">{label}</span>
+                <StatusChip tone={count > 0 ? "warning" : "neutral"} label={String(count)} />
+              </button>
+            );
+          })}
+        </div>
+      </Card>
+
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)]">
         <Card className={`space-y-2 ${cardPaddingClass}`}>
           <SectionHeader
             title="Finance spreadsheet"
@@ -189,17 +227,27 @@ export function FinanceSpreadsheetPanel() {
           {loading ? <EmptyState title="Loading finance rows..." /> : null}
           {!loading && rows.length === 0 ? <EmptyState title="No finance rows found." /> : null}
           {!loading && rows.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className={`min-w-[900px] border-separate border-spacing-0 ${tableTextClass}`}>
+            <div className="max-h-[58vh] overflow-auto">
+              <table className={`min-w-[980px] border-separate border-spacing-0 ${tableTextClass}`}>
+                <colgroup>
+                  <col className="w-[160px]" />
+                  <col className="w-[130px]" />
+                  <col className="w-[280px]" />
+                  <col className="w-[120px]" />
+                  <col className="w-[150px]" />
+                  <col className="w-[120px]" />
+                  <col className="w-[130px]" />
+                  <col className="w-[130px]" />
+                </colgroup>
                 <thead className="sticky top-0 z-10 bg-[color:var(--color-bg-muted)] text-[color:var(--color-text-muted)]">
                   <tr>
                     <th className={`sticky left-0 z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] text-left ${rowPaddingClass}`}>Load #</th>
-                    <th className={`sticky left-[150px] z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] text-left ${rowPaddingClass}`}>Stage</th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Stage</th>
                     <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Customer</th>
                     <th className={`border-b border-[color:var(--color-divider)] text-right ${rowPaddingClass}`}>Amount</th>
-                    <th className={`hidden border-b border-[color:var(--color-divider)] text-left lg:table-cell ${rowPaddingClass}`}>Delivered</th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Delivered</th>
                     <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Blockers</th>
-                    <th className={`hidden border-b border-[color:var(--color-divider)] text-left lg:table-cell ${rowPaddingClass}`}>QBO</th>
+                    <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>QBO</th>
                     <th className={`border-b border-[color:var(--color-divider)] text-left ${rowPaddingClass}`}>Next action</th>
                   </tr>
                 </thead>
@@ -216,12 +264,12 @@ export function FinanceSpreadsheetPanel() {
                         <td className={`sticky left-0 z-10 border-b border-[color:var(--color-divider)] font-semibold text-ink ${rowPaddingClass} ${active ? "bg-[color:var(--color-accent-soft)]/20" : "bg-white"}`}>
                           {row.loadNumber}
                         </td>
-                        <td className={`sticky left-[150px] z-10 border-b border-[color:var(--color-divider)] ${rowPaddingClass} ${active ? "bg-[color:var(--color-accent-soft)]/20" : "bg-white"}`}>
+                        <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>
                           <StatusChip tone={stageTone(row.billingStage)} label={stageLabel(row.billingStage)} />
                         </td>
                         <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>{row.customer ?? "-"}</td>
                         <td className={`border-b border-[color:var(--color-divider)] text-right font-semibold text-ink ${rowPaddingClass}`}>{formatCurrency(row.amountCents)}</td>
-                        <td className={`hidden border-b border-[color:var(--color-divider)] lg:table-cell ${rowPaddingClass}`}>{formatDateTime(row.deliveredAt)}</td>
+                        <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>{formatDateTime(row.deliveredAt)}</td>
                         <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>
                           {blockerCount > 0 ? (
                             <StatusChip tone="warning" label={`${blockerCount} blocker(s)`} />
@@ -229,7 +277,7 @@ export function FinanceSpreadsheetPanel() {
                             <StatusChip tone="success" label="Ready" />
                           )}
                         </td>
-                        <td className={`hidden border-b border-[color:var(--color-divider)] lg:table-cell ${rowPaddingClass}`}>{row.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</td>
+                        <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>{row.integrations?.quickbooks?.syncStatus ?? "UNKNOWN"}</td>
                         <td className={`border-b border-[color:var(--color-divider)] ${rowPaddingClass}`}>{actionLabel(row.actions?.primaryAction ?? "VIEW")}</td>
                       </tr>
                     );
@@ -255,7 +303,7 @@ export function FinanceSpreadsheetPanel() {
           ) : null}
         </Card>
 
-        <Card className={`space-y-2 ${cardPaddingClass}`}>
+        <Card className={`space-y-2 ${cardPaddingClass} xl:sticky xl:top-4 xl:h-fit`}>
           <SectionHeader title="Quick view" subtitle={selected ? `${selected.loadNumber} · ${stageLabel(selected.billingStage)}` : "Select a row"} />
           {!selected ? <EmptyState title="Pick a finance row to inspect details." /> : null}
           {selected ? (

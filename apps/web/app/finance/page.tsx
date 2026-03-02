@@ -26,7 +26,7 @@ export default function FinancePage() {
   return (
     <AppShell
       title="Finance"
-      subtitle="Spreadsheet-first receivables and payables in one view"
+      subtitle="Spreadsheet-first command center for receivables and payables"
       hideHeader
       hideTopActivityTrigger
     >
@@ -41,11 +41,11 @@ function FinanceHeaderCard() {
   const activity = useAppShellActivity();
 
   return (
-    <Card className="!p-3 sm:!p-4">
+    <Card className="!p-2.5 sm:!p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="text-[21px] font-semibold text-ink">Finance</h2>
-          <p className="text-sm text-[color:var(--color-text-muted)]">Spreadsheet-first receivables and payables in one view</p>
+          <h2 className="text-[20px] font-semibold text-ink">Finance</h2>
+          <p className="text-xs text-[color:var(--color-text-muted)]">Spreadsheet-first command center for receivables and payables</p>
         </div>
         {activity?.canUseActivity ? (
           <button
@@ -89,11 +89,16 @@ function FinanceContent() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <FinanceHeaderCard />
-      <FinanceSummaryRail />
       <SegmentedControl value={activeTab} options={TAB_OPTIONS} onChange={handleTabChange} />
-      {activeTab === "spreadsheet" ? <FinanceSpreadsheetPanel /> : null}
+      {activeTab === "spreadsheet" ? (
+        <>
+          <FinanceSpreadsheetPanel />
+          <FinanceSummaryRail />
+        </>
+      ) : null}
+      {activeTab !== "spreadsheet" ? <FinanceSummaryRail /> : null}
       {activeTab === "commands" ? <FinanceCommandPanel /> : null}
       {activeTab === "receivables" ? <ReceivablesPanel focusReadiness={focusReadiness} /> : null}
       {activeTab === "payables" ? <PayablesPanel /> : null}

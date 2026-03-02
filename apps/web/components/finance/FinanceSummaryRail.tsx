@@ -100,7 +100,7 @@ export function FinanceSummaryRail() {
     return new Map((state.wallets?.balances ?? []).map((row) => [row.account, row]));
   }, [state.wallets?.balances]);
 
-  const latestPayouts = useMemo(() => (state.journals ?? []).slice(0, 5), [state.journals]);
+  const latestPayouts = useMemo(() => (state.journals ?? []).slice(0, 3), [state.journals]);
 
   const health = useMemo(() => {
     const journals = state.journals ?? [];
@@ -139,24 +139,24 @@ export function FinanceSummaryRail() {
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-1.5">
       {error ? <ErrorBanner message={error} /> : null}
       <SectionHeader
         title="Finance summary rail"
-        subtitle="Read-only wallet state, payout stream, and ledger health"
+        subtitle="Read-only wallet, payout stream, and ledger health"
         action={
           <Button size="sm" variant="secondary" onClick={loadSummary} disabled={loading}>
             {loading ? "Refreshing..." : "Refresh"}
           </Button>
         }
       />
-      <div className="grid gap-2 xl:grid-cols-3">
-        <Card className="space-y-2 !p-3 sm:!p-4">
+      <div className="grid gap-2 lg:grid-cols-3">
+        <Card className="space-y-1.5 !p-2.5 sm:!p-3">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Wallet snapshot</div>
           {loading && !state.wallets ? <EmptyState title="Loading wallets..." /> : null}
           {!loading && !state.wallets ? <EmptyState title="No wallet data available." /> : null}
           {state.wallets ? (
-            <div className="space-y-2 text-sm">
+            <div className="space-y-1.5 text-sm">
               <div className="flex items-center justify-between">
                 <span className="text-[color:var(--color-text-muted)]">Driver payable</span>
                 <span className="font-semibold text-ink">{formatMoney(walletByAccount.get("DRIVER_PAYABLE")?.netCents ?? 0)}</span>
@@ -169,19 +169,19 @@ export function FinanceSummaryRail() {
                 <span className="text-[color:var(--color-text-muted)]">Ledger net</span>
                 <span className="font-semibold text-ink">{formatMoney(state.wallets.totals.netCents ?? 0)}</span>
               </div>
-              <div className="text-xs text-[color:var(--color-text-muted)]">As of {formatDateTime(state.wallets.asOf)}</div>
+              <div className="text-[11px] text-[color:var(--color-text-muted)]">As of {formatDateTime(state.wallets.asOf)}</div>
             </div>
           ) : null}
         </Card>
 
-        <Card className="space-y-2 !p-3 sm:!p-4">
+        <Card className="space-y-1.5 !p-2.5 sm:!p-3">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Latest payouts</div>
           {loading && latestPayouts.length === 0 ? <EmptyState title="Loading payout events..." /> : null}
           {!loading && latestPayouts.length === 0 ? <EmptyState title="No payout events yet." /> : null}
           {latestPayouts.length > 0 ? (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {latestPayouts.map((entry) => (
-                <div key={entry.id} className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-2 text-xs">
+                <div key={entry.id} className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 text-xs">
                   <div className="flex items-center justify-between gap-2">
                     <StatusChip tone={entry.eventType === "SETTLEMENT_PAID" ? "info" : "success"} label={entry.eventType === "SETTLEMENT_PAID" ? "Settlement paid" : "Payable paid"} />
                     <span className="font-semibold text-ink">{formatMoney(entryAmountCents(entry))}</span>
@@ -196,7 +196,7 @@ export function FinanceSummaryRail() {
           ) : null}
         </Card>
 
-        <Card className="space-y-2 !p-3 sm:!p-4">
+        <Card className="space-y-1.5 !p-2.5 sm:!p-3">
           <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Journal health flags</div>
           <div className="flex items-center gap-2">
             <StatusChip tone={health.hasFlags ? "warning" : "success"} label={health.hasFlags ? "Needs review" : "Healthy"} />
