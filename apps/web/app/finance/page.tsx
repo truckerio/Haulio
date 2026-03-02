@@ -6,6 +6,7 @@ import { AppShell, useAppShellActivity } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { FinanceSummaryRail } from "@/components/finance/FinanceSummaryRail";
+import { FinanceCommandPanel } from "@/components/finance/FinanceCommandPanel";
 import { FinanceSpreadsheetPanel } from "@/components/finance/FinanceSpreadsheetPanel";
 import { ReceivablesPanel } from "@/components/finance/ReceivablesPanel";
 import { PayablesPanel } from "@/components/finance/PayablesPanel";
@@ -14,6 +15,7 @@ import { FinanceSettingsPanel } from "@/components/finance/FinanceSettingsPanel"
 
 const TAB_OPTIONS = [
   { label: "Spreadsheet", value: "spreadsheet" },
+  { label: "Commands", value: "commands" },
   { label: "Receivables", value: "receivables" },
   { label: "Payables", value: "payables" },
   { label: "Journals", value: "journals" },
@@ -92,6 +94,7 @@ function FinanceContent() {
       <FinanceSummaryRail />
       <SegmentedControl value={activeTab} options={TAB_OPTIONS} onChange={handleTabChange} />
       {activeTab === "spreadsheet" ? <FinanceSpreadsheetPanel /> : null}
+      {activeTab === "commands" ? <FinanceCommandPanel /> : null}
       {activeTab === "receivables" ? <ReceivablesPanel focusReadiness={focusReadiness} /> : null}
       {activeTab === "payables" ? <PayablesPanel /> : null}
       {activeTab === "journals" ? <FinanceJournalsPanel /> : null}
