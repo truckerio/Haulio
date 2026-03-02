@@ -10,17 +10,37 @@ UPDATE "UserInvite"
 SET "role" = 'HEAD_DISPATCHER'
 WHERE "role"::text = 'OPS_MANAGER';
 
-UPDATE "DispatchView"
-SET "role" = 'HEAD_DISPATCHER'
-WHERE "role"::text = 'OPS_MANAGER';
+DO $$
+BEGIN
+  IF to_regclass('"DispatchView"') IS NOT NULL THEN
+    UPDATE "DispatchView"
+    SET "role" = 'HEAD_DISPATCHER'
+    WHERE "role"::text = 'OPS_MANAGER';
+  END IF;
+END $$;
 
 UPDATE "Task"
 SET "assignedRole" = 'HEAD_DISPATCHER'
 WHERE "assignedRole"::text = 'OPS_MANAGER';
 
 UPDATE "OrgSettings"
-SET "overrideRoles" = array_replace("overrideRoles", 'OPS_MANAGER'::"Role", 'HEAD_DISPATCHER'::"Role")
-WHERE "overrideRoles" @> ARRAY['OPS_MANAGER'::"Role"];
+SET "overrideRoles" = (
+  SELECT COALESCE(
+    array_agg(
+      CASE
+        WHEN role_value::text = 'OPS_MANAGER' THEN 'HEAD_DISPATCHER'::"Role"
+        ELSE role_value
+      END
+    ),
+    ARRAY[]::"Role"[]
+  )
+  FROM unnest("overrideRoles") AS role_value
+)
+WHERE EXISTS (
+  SELECT 1
+  FROM unnest("overrideRoles") AS role_value
+  WHERE role_value::text = 'OPS_MANAGER'
+);
 
 DO $$
 BEGIN
@@ -39,14 +59,21 @@ ALTER TABLE "UserInvite"
   ALTER COLUMN "role" TYPE "Role_new"
   USING ("role"::text::"Role_new");
 
-ALTER TABLE "DispatchView"
-  ALTER COLUMN "role" TYPE "Role_new"
-  USING (
-    CASE
-      WHEN "role" IS NULL THEN NULL
-      ELSE "role"::text::"Role_new"
-    END
-  );
+DO $$
+BEGIN
+  IF to_regclass('"DispatchView"') IS NOT NULL THEN
+    EXECUTE '
+      ALTER TABLE "DispatchView"
+        ALTER COLUMN "role" TYPE "Role_new"
+        USING (
+          CASE
+            WHEN "role" IS NULL THEN NULL
+            ELSE "role"::text::"Role_new"
+          END
+        )
+    ';
+  END IF;
+END $$;
 
 ALTER TABLE "Task"
   ALTER COLUMN "assignedRole" TYPE "Role_new"
