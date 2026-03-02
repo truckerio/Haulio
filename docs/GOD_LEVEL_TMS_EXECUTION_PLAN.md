@@ -1,6 +1,6 @@
 # God-Level TMS OS Execution Plan
 
-Last updated: February 27, 2026  
+Last updated: March 2, 2026  
 Repository: `demo-truckerio1-phase1`
 
 ## 1) Purpose
@@ -40,11 +40,11 @@ Use this table as the top-level PM tracker.
 
 | Workstream | Owner | Start | Due | Status (`Not Started/In Progress/Blocked/Done`) | Evidence |
 |---|---|---|---|---|---|
-| A. Canonical state contract |  |  |  | In Progress | `docs/STATE_KERNEL_SPEC.md`, `docs/STATE_AUTHORITY_MATRIX.md`, `apps/api/src/lib/state-kernel/*` |
-| B. Capability contract + auth parity |  |  |  | In Progress | `apps/api/src/lib/capabilities.ts`, `apps/web/lib/capabilities.ts`, authz/capability tests |
+| A. Canonical state contract |  |  |  | Done | `docs/STATE_KERNEL_SPEC.md`, `docs/STATE_AUTHORITY_MATRIX.md`, `apps/api/src/lib/state-kernel/*`, `pnpm --filter @truckerio/api run test:kernel` |
+| B. Capability contract + auth parity |  |  |  | Done | `apps/api/src/lib/capabilities.ts`, `apps/web/lib/capabilities.ts`, `pnpm --filter @truckerio/api run test:authz`, `pnpm --filter @truckerio/web run test:capabilities` |
 | C. State kernel shadow rollout |  |  |  | Done | `docs/STATE_KERNEL_ROLLOUT.md`, `apps/api/src/index.ts`, `apps/api/scripts/smoke-kernel-first-wave.ts`, `pnpm ci:kernel:phase3` |
 | D. Workbench UI hardening |  |  |  | Done | dispatch/trip/load role-first contracts + tests (`apps/web/lib/navigation.test.ts`, `apps/web/components/dispatch/dispatch-grid-contract.test.ts`, `apps/web/components/dispatch/timeline-utils.test.ts`, `apps/web/app/trips/trip-cockpit-layout.test.ts`, `apps/web/app/loads/load-overview-layout.test.ts`) |
-| E. Enforcement + CI drift gates |  |  |  | In Progress | phase pass docs + ongoing drift cleanup |
+| E. Enforcement + CI drift gates |  |  |  | Done | `scripts/ci/check-role-capability-drift.mjs`, `scripts/ci/check-load-status-mutation-drift.mjs`, `pnpm ci:drift`, `pnpm ci:phase10`, `docs/PHASE10_PASS.md` |
 
 ---
 
@@ -306,9 +306,56 @@ ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm demo:smoke:
 ORG_ID=<ORG_ID> DATABASE_URL=<DATABASE_URL> API_BASE=<API_BASE> pnpm ci:kernel:phasee
 ```
 
+Gate E Status: PASS (March 2, 2026)
+
 ---
 
-## 11) Migration Mechanics (Prod-Local + Recovery)
+## 11) Phase 9: Finance UX Principles Hardening
+
+### Scope
+- UI-only pass on finance spreadsheet workbench.
+- No API contract or workflow changes.
+
+### Delivered
+- Sortable spreadsheet columns for dense triage.
+- Inline top-of-table status metrics (blocked/ready/amount).
+- Recency signal (`Last refresh`) for operator confidence.
+- Sticky stage context and scan-friendly row hierarchy.
+
+### Evidence
+- `docs/PHASE9_START.md`
+- `docs/PHASE9_PASS.md`
+- `apps/web/components/finance/FinanceSpreadsheetPanel.tsx`
+- `apps/web/app/finance/finance-phase9-ux-contract.test.ts`
+- `pnpm ci:phase9`
+
+---
+
+## 12) Phase 10: Final Closeout Gate
+
+### Scope
+- Consolidate remaining checks into one end-state reproducible gate.
+- Lock documentation state for complete handoff.
+
+### Delivered
+- Added closeout scripts:
+  - `demo:smoke:phase10`
+  - `ci:phase10`
+  - `ci:godlevel:complete`
+- Added final phase docs:
+  - `docs/PHASE10_START.md`
+  - `docs/PHASE10_PASS.md`
+
+### Evidence
+- `pnpm ci:phase10`
+- `pnpm ci:phase9`
+
+### Program Status
+- God-level execution plan: complete through closeout phase.
+
+---
+
+## 13) Migration Mechanics (Prod-Local + Recovery)
 
 ### Standard Runbook
 ```bash
@@ -332,7 +379,7 @@ pnpm prod:local:reset-seed
 
 ---
 
-## 12) Role Smoke Matrix (Manual Verification)
+## 14) Role Smoke Matrix (Manual Verification)
 
 | Role | Landing | Must Be Visible | Must Be Restricted |
 |---|---|---|---|
@@ -346,7 +393,7 @@ pnpm prod:local:reset-seed
 
 ---
 
-## 13) Reporting Cadence
+## 15) Reporting Cadence
 - Daily: divergence count, authz incidents, blocked tasks.
 - Weekly: gate status, KPI trend, rollout readiness.
 - Artifacts:
@@ -354,7 +401,7 @@ pnpm prod:local:reset-seed
   - `docs/STATE_KERNEL_ROLLOUT.md`
   - test command outputs and smoke evidence.
 
-## 14) KPI Tracking (Operational Success)
+## 16) KPI Tracking (Operational Success)
 - Dispatch: median time-to-assign, reassign rate, tracking continuity
 - Billing: delivered-to-invoice cycle, manual touches per invoice, dispute rate
 - Driver: task completion latency, failed task retries

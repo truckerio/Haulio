@@ -66,6 +66,9 @@
     "ci:phase7a": "pnpm --filter @truckerio/api run test:finance && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm --filter @truckerio/web run test:finance && pnpm --filter @truckerio/web run typecheck && pnpm demo:smoke:phase7a",
     "ci:phase8": "pnpm --filter @truckerio/web run test:loads && pnpm --filter @truckerio/web run test:trips && pnpm --filter @truckerio/web run typecheck && pnpm demo:smoke:phase8",
     "ci:phase9": "pnpm --filter @truckerio/api run test:finance && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm --filter @truckerio/web run test:finance && pnpm --filter @truckerio/web run typecheck && pnpm demo:smoke:phase9",
+    "demo:smoke:phase10": "pnpm ci:drift && pnpm --filter @truckerio/api run test:authz && pnpm --filter @truckerio/api exec node --import tsx src/modules/dispatch/queue-view.test.ts && pnpm --filter @truckerio/api exec node --import tsx src/lib/state-kernel/state-kernel.test.ts && pnpm --filter @truckerio/api run test:today && pnpm --filter @truckerio/web run test",
+    "ci:phase10": "pnpm demo:smoke:phase10 && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm --filter @truckerio/web run typecheck",
+    "ci:godlevel:complete": "pnpm ci:phase8 && pnpm ci:phase9 && pnpm ci:phase10",
     "ci:kernel:phasee": "pnpm ci:kernel:phase3 && pnpm demo:smoke:roles && pnpm demo:smoke:enforce"
   }
 }
