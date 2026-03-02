@@ -42,6 +42,7 @@
     "demo:smoke:phase5": "pnpm --filter @truckerio/api exec node --import tsx scripts/smoke-phase5-finance-chain.ts",
     "demo:smoke:phase7": "pnpm --filter @truckerio/web run test:finance",
     "demo:smoke:phase7a": "pnpm --filter @truckerio/web run test:finance",
+    "demo:smoke:phase8": "pnpm --filter @truckerio/web run test:loads && pnpm --filter @truckerio/web run test:trips",
     "demo:smoke:enforce": "pnpm --filter @truckerio/api exec tsx scripts/smoke-kernel-enforce-wave.ts",
     "demo:smoke:roles": "pnpm --filter @truckerio/api exec tsx scripts/smoke-role-matrix.ts",
     "demo:kernel:report": "pnpm --filter @truckerio/api exec tsx scripts/kernel-divergence-report.ts",
@@ -62,6 +63,7 @@
     "ci:phase6": "pnpm --filter @truckerio/api run test:finance && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm --filter @truckerio/web run test:finance && pnpm --filter @truckerio/web run typecheck",
     "ci:phase7": "pnpm --filter @truckerio/api run test:finance && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm --filter @truckerio/web run test:finance && pnpm --filter @truckerio/web run typecheck && pnpm demo:smoke:phase7",
     "ci:phase7a": "pnpm --filter @truckerio/api run test:finance && pnpm --filter @truckerio/api exec tsc -p tsconfig.json --noEmit && pnpm --filter @truckerio/web run test:finance && pnpm --filter @truckerio/web run typecheck && pnpm demo:smoke:phase7a",
+    "ci:phase8": "pnpm --filter @truckerio/web run test:loads && pnpm --filter @truckerio/web run test:trips && pnpm --filter @truckerio/web run typecheck && pnpm demo:smoke:phase8",
     "ci:kernel:phasee": "pnpm ci:kernel:phase3 && pnpm demo:smoke:roles && pnpm demo:smoke:enforce"
   }
 }

@@ -17,6 +17,7 @@ import { RefinePanel } from "@/components/ui/refine-panel";
 import { EmptyState } from "@/components/ui/empty-state";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { Badge } from "@/components/ui/badge";
+import { StatusChip } from "@/components/ui/status-chip";
 import { apiFetch, getApiBase } from "@/lib/api";
 import { getRoleCapabilities } from "@/lib/capabilities";
 import { BulkLoadImport } from "@/components/BulkLoadImport";
@@ -212,7 +213,10 @@ function LoadsPageContent() {
   });
 
   const roleCapabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
-  const canImport = roleCapabilities.canEditLoad || roleCapabilities.canDispatchExecution;
+  const canCreateLoad = roleCapabilities.canEditLoad || roleCapabilities.canDispatchExecution;
+  const canImport = canCreateLoad;
+  const isReadHeavyOpsRole =
+    roleCapabilities.canonicalRole === "SAFETY" || roleCapabilities.canonicalRole === "SUPPORT";
   const canSeeAllTeams = Boolean(roleCapabilities.canSeeTeamsOps || user?.canSeeAllTeams);
   const archivedMode = activeChip === "archived";
 
@@ -315,10 +319,11 @@ function LoadsPageContent() {
       .catch(() => setTeams([]));
   }, [canSeeAllTeams]);
   useEffect(() => {
+    if (!canCreateLoad) return;
     if (searchParams?.get("create") === "1") {
       setShowCreate(true);
     }
-  }, [searchParams]);
+  }, [canCreateLoad, searchParams]);
 
   useEffect(() => {
     if (!user || user.role !== "ADMIN") return;
@@ -342,6 +347,12 @@ function LoadsPageContent() {
       setShowImport(false);
     }
   }, [canImport, showImport]);
+
+  useEffect(() => {
+    if (!canCreateLoad && showCreate) {
+      setShowCreate(false);
+    }
+  }, [canCreateLoad, showCreate]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -962,7 +973,10 @@ function LoadsPageContent() {
   };
 
   return (
-    <AppShell title="Loads" subtitle="Create, import, and manage loads">
+    <AppShell
+      title="Loads"
+      subtitle={isReadHeavyOpsRole ? "Read-only operations workspace for safety and support" : "Create, import, and manage loads"}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-sm text-[color:var(--color-text-muted)]">Exception-first load queue</div>
@@ -974,9 +988,11 @@ function LoadsPageContent() {
           ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => setShowCreate((prev) => !prev)}>
-            {showCreate ? "Close create" : "Create load"}
-          </Button>
+          {canCreateLoad ? (
+            <Button onClick={() => setShowCreate((prev) => !prev)}>
+              {showCreate ? "Close create" : "Create load"}
+            </Button>
+          ) : null}
           {canImport ? (
             <Button variant="secondary" onClick={() => setShowImport((prev) => !prev)}>
               {showImport ? "Hide bulk import" : "Bulk import"}
@@ -990,6 +1006,32 @@ function LoadsPageContent() {
           </Button>
         </div>
       </div>
+
+      {isReadHeavyOpsRole ? (
+        <Card className="space-y-2 !p-3 sm:!p-4">
+          <SectionHeader
+            title={roleCapabilities.canonicalRole === "SAFETY" ? "Safety Workspace" : "Support Workspace"}
+            subtitle="Read-only triage slices for tracking, documentation, and delivered billing risk"
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusChip tone="warning" label="Read-only" />
+            <span className="text-xs text-[color:var(--color-text-muted)]">
+              Mutation controls are hidden for this role. Use queue chips and row drilldown to investigate.
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setActiveChip("tracking-off")}>
+              Tracking off
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => setActiveChip("missing-pod")}>
+              Missing POD
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => setActiveChip("delivered-unbilled")}>
+              Delivered-unbilled
+            </Button>
+          </div>
+        </Card>
+      ) : null}
 
       <div className="grid gap-3 lg:grid-cols-[1.6fr,0.8fr]">
         <div>
@@ -1151,7 +1193,7 @@ function LoadsPageContent() {
         </Card>
       ) : null}
 
-      {showCreate ? (
+      {showCreate && canCreateLoad ? (
         blocked || operational === false ? (
           <BlockedScreen
             isAdmin={user?.role === "ADMIN"}
@@ -1858,11 +1900,15 @@ function LoadsPageContent() {
 
       {loads.length === 0 ? (
         <EmptyState
-          title="Create your first load"
-          description="Start with a manual load or import your existing CSVs."
+          title={canCreateLoad ? "Create your first load" : "No loads in this workspace"}
+          description={
+            canCreateLoad
+              ? "Start with a manual load or import your existing CSVs."
+              : "This role has read-only access. Adjust filters or open RC Inbox for investigations."
+          }
           action={
             <div className="flex flex-wrap gap-2">
-              <Button onClick={() => setShowCreate(true)}>Create load</Button>
+              {canCreateLoad ? <Button onClick={() => setShowCreate(true)}>Create load</Button> : null}
               {canImport ? <Button variant="secondary" onClick={() => setShowImport(true)}>Bulk import</Button> : null}
               <Button variant="ghost" onClick={() => (window.location.href = "/loads/confirmations")}>RC Inbox</Button>
             </div>

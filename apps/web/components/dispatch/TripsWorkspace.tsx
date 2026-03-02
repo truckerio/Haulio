@@ -119,6 +119,7 @@ export function TripsWorkspace() {
 
   const tripIdParam = searchParams.get("tripId");
   const [hasAccess, setHasAccess] = useState<boolean | null>(null);
+  const [roleCapabilities, setRoleCapabilities] = useState(() => getRoleCapabilities(undefined));
   const [trips, setTrips] = useState<TripRecord[]>([]);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(tripIdParam);
   const [selectedTrip, setSelectedTrip] = useState<TripRecord | null>(null);
@@ -148,6 +149,9 @@ export function TripsWorkspace() {
   const [cargoPlanState, setCargoPlanState] = useState<CargoPlanPayload | null>(null);
   const [syncingCargoPlan, setSyncingCargoPlan] = useState(false);
   const [splittingLoadId, setSplittingLoadId] = useState<string | null>(null);
+  const canMutateTripExecution = roleCapabilities.canDispatchExecution;
+  const isReadHeavyOpsRole =
+    roleCapabilities.canonicalRole === "SAFETY" || roleCapabilities.canonicalRole === "SUPPORT";
 
   const selectedTripSummary = useMemo(
     () => trips.find((trip) => trip.id === selectedTripId) ?? selectedTrip,
@@ -276,10 +280,21 @@ export function TripsWorkspace() {
     apiFetch<{ user: { role?: string } }>("/auth/me")
       .then((payload) => {
         const role = payload.user?.role ?? "";
-        setHasAccess(getRoleCapabilities(role).canAccessTrips);
+        const nextCaps = getRoleCapabilities(role);
+        setRoleCapabilities(nextCaps);
+        setHasAccess(nextCaps.canAccessTrips);
       })
-      .catch(() => setHasAccess(false));
+      .catch(() => {
+        setRoleCapabilities(getRoleCapabilities(undefined));
+        setHasAccess(false);
+      });
   }, []);
+
+  useEffect(() => {
+    if (!canMutateTripExecution && showCreatePanel) {
+      setShowCreatePanel(false);
+    }
+  }, [canMutateTripExecution, showCreatePanel]);
 
   useEffect(() => {
     if (!hasAccess) return;
@@ -504,7 +519,9 @@ export function TripsWorkspace() {
         <div>
           <div className="text-sm font-semibold text-ink">Trips workspace</div>
           <div className="text-sm text-[color:var(--color-text-muted)]">
-            Plan, assign, and execute trips from one place.
+            {isReadHeavyOpsRole
+              ? "Read-only trip visibility for investigation and escalation."
+              : "Plan, assign, and execute trips from one place."}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -521,13 +538,17 @@ export function TripsWorkspace() {
           >
             Reset filters
           </Button>
-          <Button onClick={() => setShowCreatePanel((prev) => !prev)}>
-            {showCreatePanel ? "Close new trip" : "New trip"}
-          </Button>
+          {canMutateTripExecution ? (
+            <Button onClick={() => setShowCreatePanel((prev) => !prev)}>
+              {showCreatePanel ? "Close new trip" : "New trip"}
+            </Button>
+          ) : (
+            <StatusChip tone="warning" label="Read-only" />
+          )}
         </div>
       </div>
 
-      {showCreatePanel ? (
+      {showCreatePanel && canMutateTripExecution ? (
         <Card className="grid gap-3 lg:grid-cols-[2fr_1fr_auto]">
           <FormField label="Load numbers" htmlFor="createTripLoadNumbers" hint="Comma separated e.g. LD-1001, LD-1002">
             <Input
@@ -646,6 +667,7 @@ export function TripsWorkspace() {
                           id="tripAssignDriver"
                           value={assignForm.driverId}
                           onChange={(event) => setAssignForm((prev) => ({ ...prev, driverId: event.target.value }))}
+                          disabled={!canMutateTripExecution}
                         >
                           <option value="">Unassigned</option>
                           {drivers.map((driver) => (
@@ -660,6 +682,7 @@ export function TripsWorkspace() {
                           id="tripAssignTruck"
                           value={assignForm.truckId}
                           onChange={(event) => setAssignForm((prev) => ({ ...prev, truckId: event.target.value }))}
+                          disabled={!canMutateTripExecution}
                         >
                           <option value="">Unassigned</option>
                           {trucks.map((truck) => (
@@ -674,6 +697,7 @@ export function TripsWorkspace() {
                           id="tripAssignTrailer"
                           value={assignForm.trailerId}
                           onChange={(event) => setAssignForm((prev) => ({ ...prev, trailerId: event.target.value }))}
+                          disabled={!canMutateTripExecution}
                         >
                           <option value="">Unassigned</option>
                           {trailers.map((trailer) => (
@@ -685,9 +709,11 @@ export function TripsWorkspace() {
                       </FormField>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button onClick={saveAssignment} disabled={savingAssign}>
-                        {savingAssign ? "Saving..." : "Save assignment"}
-                      </Button>
+                      {canMutateTripExecution ? (
+                        <Button onClick={saveAssignment} disabled={savingAssign}>
+                          {savingAssign ? "Saving..." : "Save assignment"}
+                        </Button>
+                      ) : null}
                       <Button variant="secondary" onClick={() => router.push(`/trips/${selectedTripSummary.id}`)}>
                         Open trip detail
                       </Button>
@@ -699,6 +725,11 @@ export function TripsWorkspace() {
                         Open in dispatch
                       </Button>
                     </div>
+                    {!canMutateTripExecution ? (
+                      <div className="text-xs text-[color:var(--color-text-muted)]">
+                        Restricted: assignment mutations are disabled for this role.
+                      </div>
+                    ) : null}
                   </Card>
                 ) : null}
 
@@ -711,6 +742,7 @@ export function TripsWorkspace() {
                           id="tripStatusUpdate"
                           value={statusForm}
                           onChange={(event) => setStatusForm(event.target.value as TripStatus)}
+                          disabled={!canMutateTripExecution}
                         >
                           {STATUS_OPTIONS.map((option) => (
                             <option key={option} value={option}>
@@ -720,9 +752,13 @@ export function TripsWorkspace() {
                         </Select>
                       </FormField>
                       <div className="flex items-end">
-                        <Button onClick={saveStatus} disabled={savingStatus}>
-                          {savingStatus ? "Updating..." : "Update status"}
-                        </Button>
+                        {canMutateTripExecution ? (
+                          <Button onClick={saveStatus} disabled={savingStatus}>
+                            {savingStatus ? "Updating..." : "Update status"}
+                          </Button>
+                        ) : (
+                          <StatusChip tone="warning" label="Read-only" />
+                        )}
                       </div>
                     </div>
                   </Card>
@@ -761,7 +797,7 @@ export function TripsWorkspace() {
                           <Button
                             variant="secondary"
                             onClick={syncCargoPlan}
-                            disabled={syncingCargoPlan || Boolean(cargoPlanDisabledReason)}
+                            disabled={syncingCargoPlan || Boolean(cargoPlanDisabledReason) || !canMutateTripExecution}
                           >
                             {syncingCargoPlan
                               ? "Syncing..."
@@ -815,12 +851,17 @@ export function TripsWorkspace() {
                             value={addLoadsText}
                             onChange={(event) => setAddLoadsText(event.target.value)}
                             placeholder="LD-1007, LD-1008"
+                            disabled={!canMutateTripExecution}
                           />
                         </FormField>
                         <div className="flex items-end">
-                          <Button onClick={addLoads} disabled={addingLoads}>
-                            {addingLoads ? "Adding..." : "Add loads"}
-                          </Button>
+                          {canMutateTripExecution ? (
+                            <Button onClick={addLoads} disabled={addingLoads}>
+                              {addingLoads ? "Adding..." : "Add loads"}
+                            </Button>
+                          ) : (
+                            <StatusChip tone="warning" label="Read-only" />
+                          )}
                         </div>
                       </div>
                     </Card>
@@ -848,7 +889,7 @@ export function TripsWorkspace() {
                                   size="sm"
                                   variant="ghost"
                                   onClick={() => splitTripLoad(item.load.id)}
-                                  disabled={splittingLoadId === item.load.id}
+                                  disabled={splittingLoadId === item.load.id || !canMutateTripExecution}
                                 >
                                   {splittingLoadId === item.load.id ? "Splitting..." : "Split out"}
                                 </Button>
