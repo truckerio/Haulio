@@ -7,6 +7,7 @@ Date: March 2, 2026
   - `demo:smoke:phase10`
   - `ci:phase10`
   - `ci:godlevel:complete`
+- Normalized root smoke/kernel scripts to `node --import tsx` execution for more reliable local and constrained-environment runs.
 - Bound final gate to:
   - role/capability drift checks
   - API authz + dispatch + today tests

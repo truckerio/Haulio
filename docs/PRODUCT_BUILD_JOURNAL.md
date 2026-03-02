@@ -67,6 +67,7 @@
     - `demo:smoke:phase10`
     - `ci:phase10`
     - `ci:godlevel:complete`
+  - Normalized root smoke/kernel script runners from `exec tsx` to `exec node --import tsx` for runtime compatibility.
   - Updated master execution tracker to include Phase 9 + Phase 10 with done-state evidence.
   - Added docs:
     - `docs/PHASE10_START.md`
