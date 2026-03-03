@@ -4,6 +4,7 @@ export const dynamic = "force-dynamic";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { createPortal } from "react-dom";
 import { AppShell } from "@/components/app-shell";
 import { useUser } from "@/components/auth/user-context";
 import { Card } from "@/components/ui/card";
@@ -2108,6 +2109,161 @@ function DispatchPageContent({
     ...(showInspectorPanel || showTripInspectorPanel ? ["minmax(360px, 440px)"] : []),
     ...(showExceptionsPanel && panelLayout.exceptionsDock === "right" ? ["minmax(220px, 280px)"] : []),
   ].join(" ");
+  const workbenchMenuOverlay =
+    showWorkbenchMenu && typeof document !== "undefined"
+      ? createPortal(
+          <div className="fixed inset-0 z-[9999]">
+            <button
+              type="button"
+              aria-label="Close dispatch controls menu"
+              onClick={() => setShowWorkbenchMenu(false)}
+              className="absolute inset-0 bg-black/18 backdrop-blur-sm"
+            />
+            <div className="absolute right-4 top-20 z-[10000] w-[min(96vw,640px)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3 shadow-[var(--shadow-elevated)]">
+              <div className="grid gap-3">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Workbench controls</div>
+                <FormField label="View" htmlFor="dispatchViewSelectMenu">
+                  <Select
+                    id="dispatchViewSelectMenu"
+                    value={activeViewId}
+                    onChange={(event) => {
+                      const nextId = event.target.value;
+                      if (nextId === SYSTEM_VIEW.id) {
+                        applyView(SYSTEM_VIEW);
+                        return;
+                      }
+                      const view = allViews.find((entry) => entry.id === nextId);
+                      if (view) applyView(view);
+                    }}
+                  >
+                    <option value={SYSTEM_VIEW.id}>{SYSTEM_VIEW.name}</option>
+                    {templateViews.map((view) => (
+                      <option key={view.id} value={view.id}>
+                        [Template] {view.name}
+                      </option>
+                    ))}
+                    {personalViews.map((view) => (
+                      <option key={view.id} value={view.id}>
+                        [Mine] {view.name}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Button size="sm" variant="secondary" onClick={() => void saveCurrentAsView("PERSONAL")}>
+                    Save as new
+                  </Button>
+                  {canManageTemplates ? (
+                    <Button size="sm" variant="ghost" onClick={() => void saveCurrentAsView("ADMIN_TEMPLATE")}>
+                      Save template
+                    </Button>
+                  ) : null}
+                  <Button size="sm" variant="secondary" onClick={() => void updateCurrentView()}>
+                    Save current
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => void deleteCurrentView()}
+                    disabled={activeViewId === SYSTEM_VIEW.id || (activeView.scope === "ADMIN_TEMPLATE" && !canManageTemplates)}
+                  >
+                    Delete view
+                  </Button>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                  <FormField label="Workflow queue preset" htmlFor="workflowQueuePresetMenu">
+                    <Select
+                      id="workflowQueuePresetMenu"
+                      value={activeWorkflowQueueId}
+                      onChange={(event) => {
+                        const nextValue = event.target.value as WorkflowQueuePresetId | "";
+                        if (!nextValue) {
+                          setActiveWorkflowQueueId("");
+                          return;
+                        }
+                        applyWorkflowQueuePreset(nextValue);
+                      }}
+                    >
+                      <option value="">Workflow queue preset</option>
+                      {WORKFLOW_QUEUE_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </FormField>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void saveCurrentAsView("PERSONAL")}
+                    disabled={!activeWorkflowQueueId}
+                  >
+                    Save
+                  </Button>
+                </div>
+                <div className="grid gap-2">
+                  <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Panels</div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Button
+                      size="sm"
+                      variant={panelLayout.inspector ? "secondary" : "ghost"}
+                      onClick={() => setPanelLayout((prev) => ({ ...prev, inspector: !prev.inspector }))}
+                    >
+                      Inspector
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={panelLayout.tripInspector ? "secondary" : "ghost"}
+                      onClick={() => setPanelLayout((prev) => ({ ...prev, tripInspector: !prev.tripInspector }))}
+                    >
+                      Trip inspector
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={panelLayout.driverLanes ? "secondary" : "ghost"}
+                      onClick={() => setPanelLayout((prev) => ({ ...prev, driverLanes: !prev.driverLanes }))}
+                    >
+                      Driver lanes
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={panelLayout.exceptions ? "secondary" : "ghost"}
+                      onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: !prev.exceptions }))}
+                    >
+                      Exceptions
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <FormField label="Exceptions dock" htmlFor="exceptionsDockMenu">
+                    <Select
+                      id="exceptionsDockMenu"
+                      value={panelLayout.exceptionsDock}
+                      onChange={(event) =>
+                        setPanelLayout((prev) => ({
+                          ...prev,
+                          exceptionsDock: event.target.value === "right" ? "right" : "left",
+                        }))
+                      }
+                    >
+                      <option value="left">Left</option>
+                      <option value="right">Right</option>
+                    </Select>
+                  </FormField>
+                  <div className="flex items-end">
+                    <Button size="sm" variant="secondary" onClick={() => setShowFilters((prev) => !prev)}>
+                      {showFilters ? "Hide refine filters" : "Show refine filters"}
+                    </Button>
+                  </div>
+                </div>
+                <div className="text-[11px] text-[color:var(--color-text-muted)]">Active view: {activeView.name}</div>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )
+      : null;
 
   if (hasAccess === false) {
     return (
@@ -2200,160 +2356,6 @@ function DispatchPageContent({
                   </span>
                 ) : null}
               </button>
-              {showWorkbenchMenu ? (
-                <div className="fixed inset-0 z-[9999]">
-                  <button
-                    type="button"
-                    aria-label="Close dispatch controls menu"
-                    onClick={() => setShowWorkbenchMenu(false)}
-                    className="absolute inset-0 bg-black/18 backdrop-blur-sm"
-                  />
-                  <div className="absolute right-4 top-20 z-[10000] w-[min(96vw,640px)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3 shadow-[var(--shadow-elevated)]">
-                    <div className="grid gap-3">
-                    <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Workbench controls</div>
-                    <FormField label="View" htmlFor="dispatchViewSelectMenu">
-                      <Select
-                        id="dispatchViewSelectMenu"
-                        value={activeViewId}
-                        onChange={(event) => {
-                          const nextId = event.target.value;
-                          if (nextId === SYSTEM_VIEW.id) {
-                            applyView(SYSTEM_VIEW);
-                            return;
-                          }
-                          const view = allViews.find((entry) => entry.id === nextId);
-                          if (view) applyView(view);
-                        }}
-                      >
-                        <option value={SYSTEM_VIEW.id}>{SYSTEM_VIEW.name}</option>
-                        {templateViews.map((view) => (
-                          <option key={view.id} value={view.id}>
-                            [Template] {view.name}
-                          </option>
-                        ))}
-                        {personalViews.map((view) => (
-                          <option key={view.id} value={view.id}>
-                            [Mine] {view.name}
-                          </option>
-                        ))}
-                      </Select>
-                    </FormField>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <Button size="sm" variant="secondary" onClick={() => void saveCurrentAsView("PERSONAL")}>
-                        Save as new
-                      </Button>
-                      {canManageTemplates ? (
-                        <Button size="sm" variant="ghost" onClick={() => void saveCurrentAsView("ADMIN_TEMPLATE")}>
-                          Save template
-                        </Button>
-                      ) : null}
-                      <Button size="sm" variant="secondary" onClick={() => void updateCurrentView()}>
-                        Save current
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => void deleteCurrentView()}
-                        disabled={
-                          activeViewId === SYSTEM_VIEW.id ||
-                          (activeView.scope === "ADMIN_TEMPLATE" && !canManageTemplates)
-                        }
-                      >
-                        Delete view
-                      </Button>
-                    </div>
-                    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-                      <FormField label="Workflow queue preset" htmlFor="workflowQueuePresetMenu">
-                        <Select
-                          id="workflowQueuePresetMenu"
-                          value={activeWorkflowQueueId}
-                          onChange={(event) => {
-                            const nextValue = event.target.value as WorkflowQueuePresetId | "";
-                            if (!nextValue) {
-                              setActiveWorkflowQueueId("");
-                              return;
-                            }
-                            applyWorkflowQueuePreset(nextValue);
-                          }}
-                        >
-                          <option value="">Workflow queue preset</option>
-                          {WORKFLOW_QUEUE_PRESETS.map((preset) => (
-                            <option key={preset.id} value={preset.id}>
-                              {preset.label}
-                            </option>
-                          ))}
-                        </Select>
-                      </FormField>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => void saveCurrentAsView("PERSONAL")}
-                        disabled={!activeWorkflowQueueId}
-                      >
-                        Save
-                      </Button>
-                    </div>
-                    <div className="grid gap-2">
-                      <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Panels</div>
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        <Button
-                          size="sm"
-                          variant={panelLayout.inspector ? "secondary" : "ghost"}
-                          onClick={() => setPanelLayout((prev) => ({ ...prev, inspector: !prev.inspector }))}
-                        >
-                          Inspector
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={panelLayout.tripInspector ? "secondary" : "ghost"}
-                          onClick={() => setPanelLayout((prev) => ({ ...prev, tripInspector: !prev.tripInspector }))}
-                        >
-                          Trip inspector
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={panelLayout.driverLanes ? "secondary" : "ghost"}
-                          onClick={() => setPanelLayout((prev) => ({ ...prev, driverLanes: !prev.driverLanes }))}
-                        >
-                          Driver lanes
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={panelLayout.exceptions ? "secondary" : "ghost"}
-                          onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: !prev.exceptions }))}
-                        >
-                          Exceptions
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <FormField label="Exceptions dock" htmlFor="exceptionsDockMenu">
-                        <Select
-                          id="exceptionsDockMenu"
-                          value={panelLayout.exceptionsDock}
-                          onChange={(event) =>
-                            setPanelLayout((prev) => ({
-                              ...prev,
-                              exceptionsDock: event.target.value === "right" ? "right" : "left",
-                            }))
-                          }
-                        >
-                          <option value="left">Left</option>
-                          <option value="right">Right</option>
-                        </Select>
-                      </FormField>
-                      <div className="flex items-end">
-                        <Button size="sm" variant="secondary" onClick={() => setShowFilters((prev) => !prev)}>
-                          {showFilters ? "Hide refine filters" : "Show refine filters"}
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="text-[11px] text-[color:var(--color-text-muted)]">Active view: {activeView.name}</div>
-                  </div>
-                </div>
-                </div>
-              ) : null}
             </div>
             <SegmentedControl
               value={queueView}
@@ -2837,6 +2839,7 @@ function DispatchPageContent({
         onClose={() => setDocUploadTarget(null)}
         onUploaded={(payload) => void handleDocUploaded({ loadId: payload.loadId, docType: payload.docType })}
       />
+      {workbenchMenuOverlay}
 
     </AppShell>
   );
