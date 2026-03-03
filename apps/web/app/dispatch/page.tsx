@@ -2201,14 +2201,14 @@ function DispatchPageContent({
                 ) : null}
               </button>
               {showWorkbenchMenu ? (
-                <div className="fixed inset-0 z-[120]">
+                <div className="fixed inset-0 z-[9999]">
                   <button
                     type="button"
                     aria-label="Close dispatch controls menu"
                     onClick={() => setShowWorkbenchMenu(false)}
-                    className="absolute inset-0 bg-black/15 backdrop-blur-[1px]"
+                    className="absolute inset-0 bg-black/18 backdrop-blur-sm"
                   />
-                  <div className="absolute right-4 top-20 w-[min(96vw,640px)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 shadow-[var(--shadow-elevated)]">
+                  <div className="absolute right-4 top-20 z-[10000] w-[min(96vw,640px)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3 shadow-[var(--shadow-elevated)]">
                     <div className="grid gap-3">
                     <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Workbench controls</div>
                     <FormField label="View" htmlFor="dispatchViewSelectMenu">
