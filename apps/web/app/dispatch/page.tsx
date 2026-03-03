@@ -529,7 +529,6 @@ function DispatchPageContent({
   const [blocked, setBlocked] = useState<{ message?: string; ctaHref?: string } | null>(null);
   const pendingLoadIdRef = useRef<string | null>(null);
   const appliedIssuePresetRef = useRef<string | null>(null);
-  const workbenchMenuRef = useRef<HTMLDivElement | null>(null);
 
   const loadIdParam = searchParams.get("loadId");
   const queueView = useMemo<QueueView>(() => {
@@ -670,19 +669,12 @@ function DispatchPageContent({
 
   useEffect(() => {
     if (!showWorkbenchMenu) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!workbenchMenuRef.current) return;
-      if (workbenchMenuRef.current.contains(event.target as Node)) return;
-      setShowWorkbenchMenu(false);
-    };
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setShowWorkbenchMenu(false);
     };
-    window.addEventListener("mousedown", onPointerDown);
     window.addEventListener("keydown", onEscape);
     return () => {
-      window.removeEventListener("mousedown", onPointerDown);
       window.removeEventListener("keydown", onEscape);
     };
   }, [showWorkbenchMenu]);
@@ -2184,7 +2176,7 @@ function DispatchPageContent({
                 Create load
               </Button>
             ) : null}
-            <div ref={workbenchMenuRef} className="relative">
+            <div className="relative">
               <button
                 type="button"
                 aria-label={showWorkbenchMenu ? "Close dispatch controls menu" : "Open dispatch controls menu"}
@@ -2209,8 +2201,15 @@ function DispatchPageContent({
                 ) : null}
               </button>
               {showWorkbenchMenu ? (
-                <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[min(92vw,560px)] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 shadow-[var(--shadow-elevated)]">
-                  <div className="grid gap-3">
+                <div className="fixed inset-0 z-[120]">
+                  <button
+                    type="button"
+                    aria-label="Close dispatch controls menu"
+                    onClick={() => setShowWorkbenchMenu(false)}
+                    className="absolute inset-0 bg-black/15 backdrop-blur-[1px]"
+                  />
+                  <div className="absolute right-4 top-20 w-[min(96vw,640px)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 shadow-[var(--shadow-elevated)]">
+                    <div className="grid gap-3">
                     <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Workbench controls</div>
                     <FormField label="View" htmlFor="dispatchViewSelectMenu">
                       <Select
@@ -2352,6 +2351,7 @@ function DispatchPageContent({
                     </div>
                     <div className="text-[11px] text-[color:var(--color-text-muted)]">Active view: {activeView.name}</div>
                   </div>
+                </div>
                 </div>
               ) : null}
             </div>
