@@ -52,6 +52,14 @@ const ACCESSORIAL_STATUS_LABELS: Record<string, string> = {
   APPROVED: "Approved",
   REJECTED: "Rejected",
 };
+const EDIT_REASON_CODES = [
+  "DATA_CORRECTION",
+  "CUSTOMER_CHANGE",
+  "APPOINTMENT_CHANGE",
+  "OPS_OVERRIDE",
+  "BILLING_ADJUSTMENT",
+  "OTHER",
+] as const;
 
 const TIMELINE_STEPS = [
   { key: "DRAFT", label: "Draft" },
@@ -143,6 +151,8 @@ export default function LoadDetailsPage() {
     weightLbs: "",
     paidMiles: "",
   });
+  const [editReasonCode, setEditReasonCode] = useState<(typeof EDIT_REASON_CODES)[number]>("DATA_CORRECTION");
+  const [editReasonNote, setEditReasonNote] = useState("");
   const tabParam = searchParams?.get("tab");
   const docTypeParam = searchParams?.get("docType");
   const roleCapabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
@@ -736,6 +746,11 @@ export default function LoadDetailsPage() {
     if (!loadId) return;
     setFreightSaving(true);
     try {
+      const reasonCode = editReasonCode.trim();
+      const reasonNote = editReasonNote.trim();
+      if (!reasonCode) {
+        throw new Error("Reason code is required for load edits");
+      }
       const payload: Record<string, any> = {
         loadType: freightForm.loadType,
         movementMode: freightForm.movementMode,
@@ -743,8 +758,12 @@ export default function LoadDetailsPage() {
         consigneeReferenceNumber: freightForm.consigneeReferenceNumber,
         palletCount: freightForm.palletCount,
         weightLbs: freightForm.weightLbs,
+        reasonCode,
       };
-      let overrideReason: string | undefined;
+      if (reasonNote) {
+        payload.reasonNote = reasonNote;
+      }
+      let overrideReason: string | undefined = reasonNote || reasonCode;
       if (freightForm.paidMiles.trim()) {
         const paidMiles = Number(freightForm.paidMiles.trim());
         if (Number.isFinite(paidMiles)) {
@@ -753,11 +772,10 @@ export default function LoadDetailsPage() {
           if (plannedMiles > 0) {
             const variancePct = Math.abs(((paidMiles - plannedMiles) / plannedMiles) * 100);
             if (variancePct > 10) {
-              const reason = window.prompt("Paid miles differs by more than 10%. Enter override reason:");
-              if (!reason || !reason.trim()) {
-                throw new Error("Override reason is required when paid miles variance exceeds 10%");
+              if (!reasonNote) {
+                throw new Error("Add reason note when paid miles variance exceeds 10%");
               }
-              overrideReason = reason.trim();
+              overrideReason = reasonNote;
             }
           }
         }
@@ -774,6 +792,8 @@ export default function LoadDetailsPage() {
         body: JSON.stringify(payload),
       });
       setFreightEditing(false);
+      setEditReasonCode("DATA_CORRECTION");
+      setEditReasonNote("");
       loadData();
     } catch (err) {
       if (isForbiddenError(err)) {
@@ -2075,6 +2095,8 @@ export default function LoadDetailsPage() {
                     onClick={() => {
                       if (freightEditing) {
                         setFreightEditing(false);
+                        setEditReasonCode("DATA_CORRECTION");
+                        setEditReasonNote("");
                       } else {
                         setFreightEditing(true);
                       }
@@ -2154,6 +2176,26 @@ export default function LoadDetailsPage() {
                       placeholder={String(load?.miles ?? "0")}
                       value={freightForm.paidMiles}
                       onChange={(e) => setFreightForm({ ...freightForm, paidMiles: e.target.value })}
+                    />
+                  </FormField>
+                  <FormField label="Reason code" htmlFor="freightReasonCode">
+                    <Select
+                      value={editReasonCode}
+                      onChange={(e) => setEditReasonCode(e.target.value as (typeof EDIT_REASON_CODES)[number])}
+                    >
+                      {EDIT_REASON_CODES.map((code) => (
+                        <option key={code} value={code}>
+                          {code}
+                        </option>
+                      ))}
+                    </Select>
+                  </FormField>
+                  <FormField label="Reason note (optional)" htmlFor="freightReasonNote">
+                    <Input
+                      id="freightReasonNote"
+                      placeholder="What changed and why"
+                      value={editReasonNote}
+                      onChange={(e) => setEditReasonNote(e.target.value)}
                     />
                   </FormField>
                   <Button size="sm" onClick={saveFreight} disabled={freightSaving}>

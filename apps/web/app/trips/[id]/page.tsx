@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FormField } from "@/components/ui/form-field";
 import { Select } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { StatusChip } from "@/components/ui/status-chip";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { apiFetch } from "@/lib/api";
@@ -17,6 +18,14 @@ import { buildGroupedTripLoads, isLtlLikeMovementMode } from "../trip-load-group
 
 const NOTE_TYPES = ["OPERATIONAL", "BILLING", "COMPLIANCE", "INTERNAL", "CUSTOMER_VISIBLE"] as const;
 const NOTE_PRIORITIES = ["NORMAL", "IMPORTANT", "ALERT"] as const;
+const TRIP_EDIT_REASON_CODES = [
+  "DATA_CORRECTION",
+  "CUSTOMER_CHANGE",
+  "APPOINTMENT_CHANGE",
+  "ROUTE_CHANGE",
+  "OPS_OVERRIDE",
+  "OTHER",
+] as const;
 
 function formatCents(value?: number | null) {
   if (value === null || value === undefined) return "-";
@@ -26,6 +35,15 @@ function formatCents(value?: number | null) {
 function formatMiles(value?: number | null) {
   if (value === null || value === undefined) return "-";
   return `${value.toFixed(1)} mi`;
+}
+
+function toDateTimeLocal(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offsetMinutes = date.getTimezoneOffset();
+  const localDate = new Date(date.getTime() - offsetMinutes * 60_000);
+  return localDate.toISOString().slice(0, 16);
 }
 
 type TripPayload = {
@@ -119,6 +137,18 @@ export default function TripDetailPage() {
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteStatus, setNoteStatus] = useState<string | null>(null);
   const [noteError, setNoteError] = useState<string | null>(null);
+  const [tripEditing, setTripEditing] = useState(false);
+  const [tripSaving, setTripSaving] = useState(false);
+  const [tripEditError, setTripEditError] = useState<string | null>(null);
+  const [tripReasonCode, setTripReasonCode] = useState<(typeof TRIP_EDIT_REASON_CODES)[number]>("DATA_CORRECTION");
+  const [tripReasonNote, setTripReasonNote] = useState("");
+  const [tripForm, setTripForm] = useState({
+    origin: "",
+    destination: "",
+    plannedDepartureAt: "",
+    plannedArrivalAt: "",
+    movementMode: "FTL",
+  });
 
   const loadData = useCallback(async () => {
     if (!tripId) return;
@@ -185,9 +215,22 @@ export default function TripDetailPage() {
     setExpandedLoadId(trip.loads[0]?.load.id ?? null);
   }, [trip, expandedLoadId]);
 
+  useEffect(() => {
+    if (!trip || tripEditing) return;
+    setTripForm({
+      origin: trip.origin ?? "",
+      destination: trip.destination ?? "",
+      plannedDepartureAt: toDateTimeLocal(trip.plannedDepartureAt),
+      plannedArrivalAt: toDateTimeLocal(trip.plannedArrivalAt),
+      movementMode: trip.movementMode ?? "FTL",
+    });
+  }, [trip, tripEditing]);
+
   const capabilities = useMemo(() => getRoleCapabilities(userRole), [userRole]);
   const canCreateNotes = applyFailClosedCapability(capabilities.canCreateLoadNotes, composerRestricted);
   const canViewSettlementPreview = capabilities.canViewSettlementPreview;
+  const canEditTrip = userRole === "ADMIN" || userRole === "DISPATCHER" || userRole === "HEAD_DISPATCHER";
+  const transitLimitedEdit = trip?.status === "IN_TRANSIT" && userRole !== "ADMIN";
 
   const stopRows = useMemo(() => {
     if (!trip) return [];
@@ -315,6 +358,39 @@ export default function TripDetailPage() {
       }
     } finally {
       setNoteSaving(false);
+    }
+  };
+
+  const saveTripEdits = async () => {
+    if (!trip) return;
+    setTripSaving(true);
+    setTripEditError(null);
+    try {
+      await apiFetch<{ trip: TripPayload }>(`/trips/${trip.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin: tripForm.origin.trim() || null,
+          destination: tripForm.destination.trim() || null,
+          plannedDepartureAt: tripForm.plannedDepartureAt ? new Date(tripForm.plannedDepartureAt).toISOString() : null,
+          plannedArrivalAt: tripForm.plannedArrivalAt ? new Date(tripForm.plannedArrivalAt).toISOString() : null,
+          movementMode: tripForm.movementMode,
+          reasonCode: tripReasonCode,
+          reasonNote: tripReasonNote.trim() || undefined,
+        }),
+      });
+      setTripEditing(false);
+      setTripReasonCode("DATA_CORRECTION");
+      setTripReasonNote("");
+      await loadData();
+    } catch (err) {
+      if (isForbiddenError(err)) {
+        setTripEditError("Restricted: you cannot edit this trip.");
+      } else {
+        setTripEditError((err as Error).message || "Unable to update trip.");
+      }
+    } finally {
+      setTripSaving(false);
     }
   };
 
@@ -471,7 +547,27 @@ export default function TripDetailPage() {
 
         <div className="space-y-4">
           <Card className="space-y-2">
-            <div className="text-sm font-semibold text-ink">Command rail</div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-semibold text-ink">Command rail</div>
+              {canEditTrip ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    if (tripEditing) {
+                      setTripEditing(false);
+                      setTripReasonCode("DATA_CORRECTION");
+                      setTripReasonNote("");
+                      setTripEditError(null);
+                    } else {
+                      setTripEditing(true);
+                    }
+                  }}
+                >
+                  {tripEditing ? "Cancel" : "Edit trip"}
+                </Button>
+              ) : null}
+            </div>
             <div className="text-xs text-[color:var(--color-text-muted)]">
               Driver: {trip.driver?.name ?? "Unassigned"} · Truck: {trip.truck?.unit ?? "-"} · Trailer:{" "}
               {trip.trailer?.unit ?? "-"}
@@ -479,6 +575,84 @@ export default function TripDetailPage() {
             <div className="text-xs text-[color:var(--color-text-muted)]">
               Departure: {formatDateTime(trip.plannedDepartureAt, "-")} · Arrival: {formatDateTime(trip.plannedArrivalAt, "-")}
             </div>
+            {tripEditing ? (
+              <div className="space-y-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] p-3">
+                <FormField label="Origin" htmlFor="tripEditOrigin">
+                  <Input
+                    id="tripEditOrigin"
+                    value={tripForm.origin}
+                    onChange={(event) => setTripForm((prev) => ({ ...prev, origin: event.target.value }))}
+                    disabled={transitLimitedEdit}
+                  />
+                </FormField>
+                <FormField label="Destination" htmlFor="tripEditDestination">
+                  <Input
+                    id="tripEditDestination"
+                    value={tripForm.destination}
+                    onChange={(event) => setTripForm((prev) => ({ ...prev, destination: event.target.value }))}
+                  />
+                </FormField>
+                <FormField label="Planned departure" htmlFor="tripEditPlannedDepartureAt">
+                  <Input
+                    id="tripEditPlannedDepartureAt"
+                    type="datetime-local"
+                    value={tripForm.plannedDepartureAt}
+                    onChange={(event) => setTripForm((prev) => ({ ...prev, plannedDepartureAt: event.target.value }))}
+                    disabled={transitLimitedEdit}
+                  />
+                </FormField>
+                <FormField label="Planned arrival" htmlFor="tripEditPlannedArrivalAt">
+                  <Input
+                    id="tripEditPlannedArrivalAt"
+                    type="datetime-local"
+                    value={tripForm.plannedArrivalAt}
+                    onChange={(event) => setTripForm((prev) => ({ ...prev, plannedArrivalAt: event.target.value }))}
+                  />
+                </FormField>
+                <FormField label="Movement mode" htmlFor="tripEditMovementMode">
+                  <Select
+                    id="tripEditMovementMode"
+                    value={tripForm.movementMode}
+                    onChange={(event) => setTripForm((prev) => ({ ...prev, movementMode: event.target.value }))}
+                    disabled={transitLimitedEdit}
+                  >
+                    <option value="FTL">FTL</option>
+                    <option value="LTL">LTL</option>
+                    <option value="POOL_DISTRIBUTION">POOL_DISTRIBUTION</option>
+                  </Select>
+                </FormField>
+                <FormField label="Reason code" htmlFor="tripEditReasonCode">
+                  <Select
+                    id="tripEditReasonCode"
+                    value={tripReasonCode}
+                    onChange={(event) => setTripReasonCode(event.target.value as (typeof TRIP_EDIT_REASON_CODES)[number])}
+                  >
+                    {TRIP_EDIT_REASON_CODES.map((code) => (
+                      <option key={code} value={code}>
+                        {code}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+                <FormField label="Reason note (optional)" htmlFor="tripEditReasonNote">
+                  <Input
+                    id="tripEditReasonNote"
+                    value={tripReasonNote}
+                    onChange={(event) => setTripReasonNote(event.target.value)}
+                    placeholder="What changed and why"
+                  />
+                </FormField>
+                <Button size="sm" onClick={saveTripEdits} disabled={tripSaving}>
+                  {tripSaving ? "Saving..." : "Save trip edits"}
+                </Button>
+                {tripEditError ? <div className="text-xs text-[color:var(--color-danger)]">{tripEditError}</div> : null}
+                {transitLimitedEdit ? (
+                  <div className="text-xs text-[color:var(--color-text-muted)]">
+                    In transit: only destination and planned arrival are editable.
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </Card>
 
           <Card className="space-y-2">
