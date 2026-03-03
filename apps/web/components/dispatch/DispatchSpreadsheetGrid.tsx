@@ -2133,10 +2133,10 @@ export function DispatchSpreadsheetGrid({
                       column.align === "right" ? "flex items-center justify-end" : "flex items-center",
                       column.key === "select" ? "justify-center" : "",
                       column.frozen
-                        ? "isolate before:pointer-events-none before:absolute before:inset-0 before:backdrop-blur-[3px] before:bg-white/18"
+                        ? "isolate bg-[color:var(--color-bg-muted)]"
                         : "",
                       column.frozen && column.key === lastFrozenColumnKey
-                        ? "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-3 after:bg-gradient-to-r after:from-black/10 after:to-transparent"
+                        ? "shadow-[1px_0_0_0_var(--color-divider)] after:pointer-events-none after:absolute after:inset-y-0 after:right-[-1px] after:w-3 after:backdrop-blur-[2px] after:bg-gradient-to-r after:from-black/10 after:to-transparent"
                         : ""
                     )}
                     style={
@@ -2611,10 +2611,10 @@ export function DispatchSpreadsheetGrid({
                         rowBackgroundClass,
                         isFocusedCell ? "bg-[color:var(--color-bg-muted)]/60" : "",
                         column.frozen
-                          ? "isolate overflow-hidden before:pointer-events-none before:absolute before:inset-0 before:backdrop-blur-[3px] before:bg-white/12"
+                          ? "isolate overflow-hidden"
                           : "",
                         column.frozen && column.key === lastFrozenColumnKey
-                          ? "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-3 after:bg-gradient-to-r after:from-black/10 after:to-transparent"
+                          ? "shadow-[1px_0_0_0_var(--color-divider)] after:pointer-events-none after:absolute after:inset-y-0 after:right-[-1px] after:w-3 after:backdrop-blur-[2px] after:bg-gradient-to-r after:from-black/10 after:to-transparent"
                           : ""
                       );
 
