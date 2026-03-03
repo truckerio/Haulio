@@ -1403,10 +1403,6 @@ export function DispatchSpreadsheetGrid({
     }
     return offsets;
   }, [visibleColumns]);
-  const lastFrozenColumnKey = useMemo(() => {
-    const frozen = visibleColumns.filter((column) => column.frozen);
-    return frozen.length ? frozen[frozen.length - 1].key : null;
-  }, [visibleColumns]);
 
   useEffect(() => {
     const node = viewportRef.current;
@@ -2131,13 +2127,7 @@ export function DispatchSpreadsheetGrid({
                     className={cn(
                       "group relative h-10 border-r border-[color:var(--color-divider)] px-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]",
                       column.align === "right" ? "flex items-center justify-end" : "flex items-center",
-                      column.key === "select" ? "justify-center" : "",
-                      column.frozen
-                        ? "isolate bg-[color:var(--color-bg-muted)]"
-                        : "",
-                      column.frozen && column.key === lastFrozenColumnKey
-                        ? "shadow-[1px_0_0_0_var(--color-divider)] after:pointer-events-none after:absolute after:inset-y-0 after:right-[-1px] after:w-3 after:backdrop-blur-[2px] after:bg-gradient-to-r after:from-black/10 after:to-transparent"
-                        : ""
+                      column.key === "select" ? "justify-center" : ""
                     )}
                     style={
                       column.frozen
@@ -2609,13 +2599,7 @@ export function DispatchSpreadsheetGrid({
                         column.align === "right" ? "justify-end text-right" : "justify-start",
                         column.align === "center" ? "justify-center text-center" : "",
                         rowBackgroundClass,
-                        isFocusedCell ? "bg-[color:var(--color-bg-muted)]/60" : "",
-                        column.frozen
-                          ? "isolate overflow-hidden"
-                          : "",
-                        column.frozen && column.key === lastFrozenColumnKey
-                          ? "shadow-[1px_0_0_0_var(--color-divider)] after:pointer-events-none after:absolute after:inset-y-0 after:right-[-1px] after:w-3 after:backdrop-blur-[2px] after:bg-gradient-to-r after:from-black/10 after:to-transparent"
-                          : ""
+                        isFocusedCell ? "bg-[color:var(--color-bg-muted)]/60" : ""
                       );
 
                       const staticContent = (() => {
