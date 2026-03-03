@@ -2116,7 +2116,7 @@ export function DispatchSpreadsheetGrid({
         tabIndex={0}
       >
         <div style={{ minWidth: totalWidth }}>
-          <div className="sticky top-0 z-20 border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)]/95 backdrop-blur">
+          <div className="sticky top-0 z-40 isolate border-b border-[color:var(--color-divider)] bg-white/95 backdrop-blur-md after:pointer-events-none after:absolute after:inset-x-0 after:bottom-[-10px] after:h-[10px] after:bg-gradient-to-b after:from-white/90 after:to-transparent">
             <div className="grid" style={{ gridTemplateColumns }}>
               {visibleColumns.map((column) => {
                 const stickyLeft = column.frozen ? stickyOffsets.get(column.key) ?? 0 : undefined;
@@ -2135,7 +2135,7 @@ export function DispatchSpreadsheetGrid({
                             position: "sticky",
                             left: stickyLeft,
                             zIndex: 36,
-                            backgroundColor: "var(--color-bg-muted)",
+                            backgroundColor: "rgba(255,255,255,0.95)",
                           }
                         : undefined
                     }
@@ -2565,6 +2565,13 @@ export function DispatchSpreadsheetGrid({
                 : hoveredRowId === row.id
                 ? "bg-[color:var(--color-bg-muted)]/55"
                 : "bg-[color:var(--color-surface)]";
+              const rowBackgroundColor = selected
+                ? "var(--color-surface-hover)"
+                : highlighted
+                ? "var(--color-accent-soft)"
+                : hoveredRowId === row.id
+                ? "var(--color-bg-muted)"
+                : "var(--color-surface)";
               return (
                 <div
                   key={row.id}
@@ -2909,6 +2916,7 @@ export function DispatchSpreadsheetGrid({
                                   position: "sticky",
                                   left: stickyLeft,
                                   zIndex: 18,
+                                  backgroundColor: rowBackgroundColor,
                                 }
                               : undefined
                           }
