@@ -1403,6 +1403,10 @@ export function DispatchSpreadsheetGrid({
     }
     return offsets;
   }, [visibleColumns]);
+  const lastFrozenColumnKey = useMemo(() => {
+    const frozen = visibleColumns.filter((column) => column.frozen);
+    return frozen.length ? frozen[frozen.length - 1].key : null;
+  }, [visibleColumns]);
 
   useEffect(() => {
     const node = viewportRef.current;
@@ -2127,14 +2131,20 @@ export function DispatchSpreadsheetGrid({
                     className={cn(
                       "group relative h-10 border-r border-[color:var(--color-divider)] px-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]",
                       column.align === "right" ? "flex items-center justify-end" : "flex items-center",
-                      column.key === "select" ? "justify-center" : ""
+                      column.key === "select" ? "justify-center" : "",
+                      column.frozen
+                        ? "isolate before:pointer-events-none before:absolute before:inset-0 before:backdrop-blur-[3px] before:bg-white/18"
+                        : "",
+                      column.frozen && column.key === lastFrozenColumnKey
+                        ? "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-3 after:bg-gradient-to-r after:from-black/10 after:to-transparent"
+                        : ""
                     )}
                     style={
                       column.frozen
                         ? {
                             position: "sticky",
                             left: stickyLeft,
-                            zIndex: 30,
+                            zIndex: 36,
                             backgroundColor: "var(--color-bg-muted)",
                           }
                         : undefined
@@ -2599,7 +2609,13 @@ export function DispatchSpreadsheetGrid({
                         column.align === "right" ? "justify-end text-right" : "justify-start",
                         column.align === "center" ? "justify-center text-center" : "",
                         rowBackgroundClass,
-                        isFocusedCell ? "bg-[color:var(--color-bg-muted)]/60" : ""
+                        isFocusedCell ? "bg-[color:var(--color-bg-muted)]/60" : "",
+                        column.frozen
+                          ? "isolate overflow-hidden before:pointer-events-none before:absolute before:inset-0 before:backdrop-blur-[3px] before:bg-white/12"
+                          : "",
+                        column.frozen && column.key === lastFrozenColumnKey
+                          ? "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-3 after:bg-gradient-to-r after:from-black/10 after:to-transparent"
+                          : ""
                       );
 
                       const staticContent = (() => {
@@ -2908,7 +2924,7 @@ export function DispatchSpreadsheetGrid({
                               ? {
                                   position: "sticky",
                                   left: stickyLeft,
-                                  zIndex: 10,
+                                  zIndex: 18,
                                 }
                               : undefined
                           }
