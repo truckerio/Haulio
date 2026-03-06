@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { FinancePaymentMethod } from "@truckerio/db";
 import { createPayoutReceipt } from "./finance-banking-adapter";
 
 process.env.FINANCE_BANKING_ADAPTER = "mock";
@@ -28,9 +29,9 @@ const differentKey = createPayoutReceipt({
 assert.equal(first.adapter, "mock");
 assert.equal(first.payoutId, second.payoutId);
 assert.equal(first.reference, second.reference);
+assert.equal(first.method, FinancePaymentMethod.OTHER);
 assert.equal(first.idempotencyKey, "idem-123");
 assert.notEqual(first.payoutId, differentKey.payoutId);
 assert.ok(first.reference.startsWith("MOCK-SETTLEMENT-"));
 
 console.log("finance banking adapter tests passed");
-

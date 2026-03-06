@@ -28,7 +28,7 @@ export default function NewLoadPage() {
       } catch {
         // ignore, allow redirect to loads
       }
-      router.replace("/loads?create=1");
+      router.replace("/dispatch?workspace=loads&createLoad=1");
     };
     check();
   }, [router]);

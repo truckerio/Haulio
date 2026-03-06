@@ -9,6 +9,7 @@ import { MoneyAmount } from "@/components/driver/money-amount";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { apiFetch } from "@/lib/api";
+import { formatDate as formatDate24 } from "@/lib/date-time";
 
 type SettlementStatus = "DRAFT" | "FINALIZED" | "PAID";
 
@@ -72,9 +73,7 @@ export default function DriverSettlementDetailPage() {
             <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Settlement</div>
             <div className="text-2xl font-semibold">
               {settlement
-                ? `${new Date(settlement.periodStart).toLocaleDateString()} → ${new Date(
-                    settlement.periodEnd
-                  ).toLocaleDateString()}`
+                ? `${formatDate24(settlement.periodStart)} → ${formatDate24(settlement.periodEnd)}`
                 : "Settlement detail"}
             </div>
           </div>
@@ -100,7 +99,7 @@ export default function DriverSettlementDetailPage() {
             </div>
             {settlement.paidAt ? (
               <div className="text-xs text-[color:var(--color-text-muted)]">
-                Paid on {new Date(settlement.paidAt).toLocaleDateString()}
+                Paid on {formatDate24(settlement.paidAt)}
               </div>
             ) : (
               <InlineHelper text="Processing until finalized." />

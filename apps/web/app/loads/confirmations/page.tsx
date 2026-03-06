@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api";
 import { FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
+import { formatDateTime } from "@/lib/date-time";
 
 export default function LoadConfirmationsPage() {
   const [docs, setDocs] = useState<any[]>([]);
@@ -64,7 +65,7 @@ export default function LoadConfirmationsPage() {
             >
               <div>
                 <div className="text-sm font-semibold">{doc.filename}</div>
-                <div className="text-xs text-[color:var(--color-text-muted)]">{doc.status} · {new Date(doc.createdAt).toLocaleString()}</div>
+                <div className="text-xs text-[color:var(--color-text-muted)]">{doc.status} · {formatDateTime(doc.createdAt)}</div>
                 {doc.errorMessage ? <div className="text-xs text-[color:var(--color-danger)]">{doc.errorMessage}</div> : null}
                 {doc.createdLoadId ? (
                   <div className="text-xs text-[color:var(--color-success)]">Created load: {doc.createdLoadId}</div>

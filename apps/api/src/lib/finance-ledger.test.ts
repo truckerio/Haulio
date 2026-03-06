@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { buildPayableRunPaidJournal, buildSettlementPaidJournal, createJournalEntry } from "./finance-ledger";
+import {
+  buildInvoiceIssuedJournal,
+  buildInvoicePaymentReceivedJournal,
+  buildPayableRunPaidJournal,
+  buildSettlementPaidJournal,
+  createJournalEntry,
+} from "./finance-ledger";
 
 const settlementJournal = buildSettlementPaidJournal({
   orgId: "org-1",
@@ -24,6 +30,28 @@ const payableJournal = buildPayableRunPaidJournal({
 assert.equal(payableJournal.eventType, "PAYABLE_RUN_PAID");
 assert.equal(payableJournal.totalDebitCents, 25000);
 assert.equal(payableJournal.totalCreditCents, 25000);
+
+const issuedJournal = buildInvoiceIssuedJournal({
+  orgId: "org-1",
+  invoiceId: "inv-1",
+  amountCents: 320000,
+  idempotencyKey: "idem-issued",
+});
+assert.equal(issuedJournal.eventType, "INVOICE_ISSUED");
+assert.equal(issuedJournal.entityType, "INVOICE");
+assert.equal(issuedJournal.totalDebitCents, 320000);
+assert.equal(issuedJournal.totalCreditCents, 320000);
+
+const paymentJournal = buildInvoicePaymentReceivedJournal({
+  orgId: "org-1",
+  invoiceId: "inv-1",
+  amountCents: 300000,
+  idempotencyKey: "idem-payment",
+});
+assert.equal(paymentJournal.eventType, "INVOICE_PAYMENT_RECEIVED");
+assert.equal(paymentJournal.entityType, "INVOICE");
+assert.equal(paymentJournal.totalDebitCents, 300000);
+assert.equal(paymentJournal.totalCreditCents, 300000);
 
 assert.throws(
   () =>
@@ -55,4 +83,3 @@ assert.throws(
 );
 
 console.log("finance ledger tests passed");
-

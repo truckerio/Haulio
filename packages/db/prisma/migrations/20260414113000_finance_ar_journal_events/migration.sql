@@ -1,0 +1,20 @@
+DO $$
+BEGIN
+  ALTER TYPE "FinanceJournalEntityType" ADD VALUE IF NOT EXISTS 'INVOICE';
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE "FinanceJournalEventType" ADD VALUE IF NOT EXISTS 'INVOICE_ISSUED';
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE "FinanceJournalEventType" ADD VALUE IF NOT EXISTS 'INVOICE_PAYMENT_RECEIVED';
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;

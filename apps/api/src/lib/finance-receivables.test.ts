@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import {
+  AccessorialStatus,
+  AccessorialType,
   BillingStatus,
   DocStatus,
   DocType,
   InvoiceStatus,
+  LoadChargeType,
   LoadStatus,
   LoadType,
   QboSyncJobStatus,
@@ -165,6 +168,31 @@ assert.equal(qboFailedRow.integrations.quickbooks.syncStatus, "FAILED");
 assert.equal(qboFailedRow.nextBestAction, "RETRY_QBO_SYNC");
 assert.equal(qboFailedRow.integrations.quickbooks.lastError, "Validation failed");
 
+const commercialFocusRow = mapLoadToFinanceReceivableRow({
+  load: {
+    ...baseLoad,
+    rate: "0.00",
+    charges: [{ type: LoadChargeType.DETENTION }],
+    accessorials: [
+      {
+        type: AccessorialType.OTHER,
+        status: AccessorialStatus.PROPOSED,
+        requiresProof: true,
+        proofDocumentId: null,
+        notes: "Layover at consignee",
+      },
+    ],
+  },
+  policy: basePolicy,
+  now,
+  quickbooksConnected: true,
+});
+assert.equal(commercialFocusRow.commercial.hasLinehaulCharge, false);
+assert.equal(commercialFocusRow.commercial.hasDetentionSignal, true);
+assert.equal(commercialFocusRow.commercial.hasLayoverSignal, true);
+assert.equal(commercialFocusRow.commercial.unresolvedAccessorialCount, 1);
+assert.equal(commercialFocusRow.commercial.accessorialProofMissingCount, 1);
+
 const factoringRetryRow = mapLoadToFinanceReceivableRow({
   load: {
     ...baseLoad,
@@ -227,6 +255,39 @@ assert.equal(
     readyState: "BLOCKED",
   }),
   true
+);
+assert.equal(
+  applyFinanceReceivableFilters(commercialFocusRow, {
+    stage: undefined,
+    blockerCode: null,
+    agingBucket: undefined,
+    qboSyncStatus: undefined,
+    readyState: undefined,
+    commercialFocus: ["DETENTION"],
+  }),
+  true
+);
+assert.equal(
+  applyFinanceReceivableFilters(commercialFocusRow, {
+    stage: undefined,
+    blockerCode: null,
+    agingBucket: undefined,
+    qboSyncStatus: undefined,
+    readyState: undefined,
+    commercialFocus: ["MISSING_LINEHAUL", "PROOF_GAP"],
+  }),
+  true
+);
+assert.equal(
+  applyFinanceReceivableFilters(readyRow, {
+    stage: undefined,
+    blockerCode: null,
+    agingBucket: undefined,
+    qboSyncStatus: undefined,
+    readyState: undefined,
+    commercialFocus: ["PROOF_GAP"],
+  }),
+  false
 );
 
 console.log("finance receivables tests passed");

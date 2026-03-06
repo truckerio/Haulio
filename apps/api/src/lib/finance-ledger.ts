@@ -7,9 +7,18 @@ export type LedgerAccount =
   | "DRIVER_PAYABLE"
   | "SETTLEMENT_EXPENSE"
   | "AR_CLEARING"
-  | "REVENUE";
+  | "REVENUE"
+  | "VENDOR_PAYABLE"
+  | "FACTORING_RESERVE"
+  | "FACTORING_FEE_EXPENSE";
 
-export type JournalEventType = "SETTLEMENT_PAID" | "PAYABLE_RUN_PAID";
+export type JournalEventType =
+  | "INVOICE_ISSUED"
+  | "INVOICE_PAYMENT_RECEIVED"
+  | "FACTORING_TRANSACTION_POSTED"
+  | "SETTLEMENT_PAID"
+  | "PAYABLE_RUN_PAID"
+  | "VENDOR_BILL_PAID";
 
 export type JournalLine = {
   account: LedgerAccount;
@@ -22,7 +31,7 @@ export type JournalEntry = {
   entryId: string;
   orgId: string;
   eventType: JournalEventType;
-  entityType: "SETTLEMENT" | "PAYABLE_RUN";
+  entityType: "INVOICE" | "FACTORING_TRANSACTION" | "SETTLEMENT" | "PAYABLE_RUN" | "VENDOR_BILL";
   entityId: string;
   idempotencyKey: string;
   createdAt: string;
@@ -34,7 +43,7 @@ export type JournalEntry = {
 type CreateJournalEntryInput = {
   orgId: string;
   eventType: JournalEventType;
-  entityType: "SETTLEMENT" | "PAYABLE_RUN";
+  entityType: "INVOICE" | "FACTORING_TRANSACTION" | "SETTLEMENT" | "PAYABLE_RUN" | "VENDOR_BILL";
   entityId: string;
   idempotencyKey: string;
   lines: JournalLine[];
@@ -43,7 +52,7 @@ type CreateJournalEntryInput = {
 function makeEntryId(input: {
   orgId: string;
   eventType: JournalEventType;
-  entityType: "SETTLEMENT" | "PAYABLE_RUN";
+  entityType: "INVOICE" | "FACTORING_TRANSACTION" | "SETTLEMENT" | "PAYABLE_RUN" | "VENDOR_BILL";
   entityId: string;
   idempotencyKey: string;
 }) {
@@ -154,6 +163,44 @@ export function buildSettlementPaidJournal(params: {
   });
 }
 
+export function buildInvoiceIssuedJournal(params: {
+  orgId: string;
+  invoiceId: string;
+  amountCents: number;
+  idempotencyKey: string;
+}) {
+  return createJournalEntry({
+    orgId: params.orgId,
+    eventType: "INVOICE_ISSUED",
+    entityType: "INVOICE",
+    entityId: params.invoiceId,
+    idempotencyKey: params.idempotencyKey,
+    lines: [
+      { account: "AR_CLEARING", side: "DEBIT", amountCents: params.amountCents, memo: "Invoice issued" },
+      { account: "REVENUE", side: "CREDIT", amountCents: params.amountCents, memo: "Freight revenue recognized" },
+    ],
+  });
+}
+
+export function buildInvoicePaymentReceivedJournal(params: {
+  orgId: string;
+  invoiceId: string;
+  amountCents: number;
+  idempotencyKey: string;
+}) {
+  return createJournalEntry({
+    orgId: params.orgId,
+    eventType: "INVOICE_PAYMENT_RECEIVED",
+    entityType: "INVOICE",
+    entityId: params.invoiceId,
+    idempotencyKey: params.idempotencyKey,
+    lines: [
+      { account: "CASH_CLEARING", side: "DEBIT", amountCents: params.amountCents, memo: "Invoice payment received" },
+      { account: "AR_CLEARING", side: "CREDIT", amountCents: params.amountCents, memo: "Receivable cleared" },
+    ],
+  });
+}
+
 export function buildPayableRunPaidJournal(params: {
   orgId: string;
   payableRunId: string;
@@ -170,5 +217,67 @@ export function buildPayableRunPaidJournal(params: {
       { account: "DRIVER_PAYABLE", side: "DEBIT", amountCents: params.amountCents, memo: "Payable run paid" },
       { account: "CASH_CLEARING", side: "CREDIT", amountCents: params.amountCents, memo: "Cash outflow" },
     ],
+  });
+}
+
+export function buildVendorBillPaidJournal(params: {
+  orgId: string;
+  vendorBillId: string;
+  amountCents: number;
+  idempotencyKey: string;
+}) {
+  return createJournalEntry({
+    orgId: params.orgId,
+    eventType: "VENDOR_BILL_PAID",
+    entityType: "VENDOR_BILL",
+    entityId: params.vendorBillId,
+    idempotencyKey: params.idempotencyKey,
+    lines: [
+      { account: "VENDOR_PAYABLE", side: "DEBIT", amountCents: params.amountCents, memo: "Vendor bill paid" },
+      { account: "CASH_CLEARING", side: "CREDIT", amountCents: params.amountCents, memo: "Cash outflow" },
+    ],
+  });
+}
+
+export function buildFactoringTransactionJournal(params: {
+  orgId: string;
+  transactionId: string;
+  type: "ADVANCE" | "RESERVE_RELEASE" | "FEE" | "RECOURSE" | "ADJUSTMENT";
+  amountCents: number;
+  idempotencyKey: string;
+}) {
+  const lines: JournalLine[] =
+    params.type === "ADVANCE"
+      ? [
+          { account: "CASH_CLEARING", side: "DEBIT", amountCents: params.amountCents, memo: "Factoring advance" },
+          { account: "AR_CLEARING", side: "CREDIT", amountCents: params.amountCents, memo: "Receivable advanced" },
+        ]
+      : params.type === "RESERVE_RELEASE"
+      ? [
+          { account: "CASH_CLEARING", side: "DEBIT", amountCents: params.amountCents, memo: "Factoring reserve release" },
+          { account: "FACTORING_RESERVE", side: "CREDIT", amountCents: params.amountCents, memo: "Reserve cleared" },
+        ]
+      : params.type === "FEE"
+      ? [
+          { account: "FACTORING_FEE_EXPENSE", side: "DEBIT", amountCents: params.amountCents, memo: "Factoring fee" },
+          { account: "CASH_CLEARING", side: "CREDIT", amountCents: params.amountCents, memo: "Fee outflow" },
+        ]
+      : params.type === "RECOURSE"
+      ? [
+          { account: "AR_CLEARING", side: "DEBIT", amountCents: params.amountCents, memo: "Factoring recourse" },
+          { account: "CASH_CLEARING", side: "CREDIT", amountCents: params.amountCents, memo: "Cash clawback" },
+        ]
+      : [
+          { account: "CASH_CLEARING", side: "DEBIT", amountCents: params.amountCents, memo: "Factoring adjustment" },
+          { account: "AR_CLEARING", side: "CREDIT", amountCents: params.amountCents, memo: "Receivable adjustment" },
+        ];
+
+  return createJournalEntry({
+    orgId: params.orgId,
+    eventType: "FACTORING_TRANSACTION_POSTED",
+    entityType: "FACTORING_TRANSACTION",
+    entityId: params.transactionId,
+    idempotencyKey: params.idempotencyKey,
+    lines,
   });
 }

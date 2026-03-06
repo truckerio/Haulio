@@ -139,3 +139,35 @@ export async function enqueueQboSyncRequestedEvent(
     ]),
   });
 }
+
+export async function enqueueFactoringRequestedEvent(
+  db: FinanceDbClient,
+  params: {
+    orgId: string;
+    loadId: string;
+    invoiceId?: string | null;
+    submissionId: string;
+    status: "SENT" | "FAILED";
+    reason?: string | null;
+    dedupeSuffix?: string | null;
+  }
+) {
+  return enqueueFinanceOutboxEvent(db, {
+    orgId: params.orgId,
+    loadId: params.loadId,
+    type: FinanceOutboxEventType.FACTORING_REQUESTED,
+    payload: {
+      loadId: params.loadId,
+      invoiceId: params.invoiceId ?? null,
+      submissionId: params.submissionId,
+      status: params.status,
+      reason: params.reason ?? null,
+    },
+    dedupeKey: buildFinanceOutboxDedupeKey([
+      FinanceOutboxEventType.FACTORING_REQUESTED,
+      params.submissionId,
+      params.status,
+      params.dedupeSuffix ?? "latest",
+    ]),
+  });
+}

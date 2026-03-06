@@ -352,7 +352,7 @@ function OnboardingWizard() {
     setSaving(true);
     setError(null);
     try {
-      await apiFetch("/api/operating-entities", {
+      await apiFetch("/operating-entities", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(entityForm),

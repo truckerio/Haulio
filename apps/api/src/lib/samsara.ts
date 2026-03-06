@@ -1,4 +1,5 @@
 const SAMSARA_BASE = process.env.SAMSARA_API_BASE || "https://api.samsara.com";
+const SAMSARA_OAUTH_TOKEN_URL = process.env.SAMSARA_OAUTH_TOKEN_URL || "https://api.samsara.com/oauth2/token";
 const DEFAULT_TIMEOUT_MS = Number(process.env.SAMSARA_TIMEOUT_MS || "8000");
 const MAX_RETRIES = 2;
 
@@ -47,6 +48,21 @@ function mapStatusToCode(status: number): SamsaraErrorCode {
   if (status === 401 || status === 403) return "UNAUTHORIZED";
   if (status === 429) return "RATE_LIMITED";
   return "REQUEST_FAILED";
+}
+
+async function timedFetch(url: string, init: RequestInit) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if ((error as Error)?.name === "AbortError") {
+      throw new SamsaraError("Temporary network error", { code: "NETWORK_ERROR" });
+    }
+    throw new SamsaraError("Temporary network error", { code: "NETWORK_ERROR" });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function samsaraRequest<T>(token: string, path: string, init?: RequestInit) {
@@ -146,4 +162,73 @@ export async function fetchSamsaraVehicleLocation(token: string, externalId: str
     heading: location.heading ?? null,
     speedMph: location.speed ?? location.speedMilesPerHour ?? null,
   } as const;
+}
+
+type OAuthTokenResponse = {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number | null;
+  scope: string | null;
+  tokenType: string | null;
+};
+
+function normalizeOAuthTokenResponse(payload: any): OAuthTokenResponse {
+  const accessToken = typeof payload?.access_token === "string" ? payload.access_token.trim() : "";
+  const refreshToken = typeof payload?.refresh_token === "string" ? payload.refresh_token.trim() : "";
+  const expiresInRaw = Number(payload?.expires_in);
+  const expiresIn = Number.isFinite(expiresInRaw) ? expiresInRaw : null;
+  const scope = typeof payload?.scope === "string" ? payload.scope : null;
+  const tokenType = typeof payload?.token_type === "string" ? payload.token_type : null;
+  if (!accessToken || !refreshToken) {
+    throw new SamsaraError("Samsara OAuth response missing required tokens.", { code: "REQUEST_FAILED" });
+  }
+  return { accessToken, refreshToken, expiresIn, scope, tokenType };
+}
+
+async function requestOAuthToken(body: URLSearchParams) {
+  const res = await timedFetch(SAMSARA_OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: body.toString(),
+  });
+  const text = await res.text();
+  const payload = safeParseJson(text);
+  if (!res.ok) {
+    const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
+    const code = mapStatusToCode(res.status);
+    const message = payload?.error_description || payload?.message || `Samsara OAuth request failed (${res.status})`;
+    throw new SamsaraError(message, { status: res.status, code, retryAfter });
+  }
+  return normalizeOAuthTokenResponse(payload);
+}
+
+export async function exchangeSamsaraOAuthCode(params: {
+  clientId: string;
+  clientSecret: string;
+  code: string;
+  redirectUri: string;
+}) {
+  const body = new URLSearchParams();
+  body.set("grant_type", "authorization_code");
+  body.set("client_id", params.clientId);
+  body.set("client_secret", params.clientSecret);
+  body.set("code", params.code);
+  body.set("redirect_uri", params.redirectUri);
+  return requestOAuthToken(body);
+}
+
+export async function refreshSamsaraOAuthToken(params: {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}) {
+  const body = new URLSearchParams();
+  body.set("grant_type", "refresh_token");
+  body.set("client_id", params.clientId);
+  body.set("client_secret", params.clientSecret);
+  body.set("refresh_token", params.refreshToken);
+  return requestOAuthToken(body);
 }

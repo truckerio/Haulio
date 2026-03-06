@@ -8,6 +8,7 @@ import { InlineHelper } from "@/components/driver/inline-helper";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { apiFetch } from "@/lib/api";
+import { formatDate as formatDate24 } from "@/lib/date-time";
 
 type SettlementStatus = "DRAFT" | "FINALIZED" | "PAID";
 
@@ -30,7 +31,7 @@ function startOfIsoWeek(date: Date) {
   return copy;
 }
 
-function formatDate(date: Date) {
+function formatIsoDate(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
@@ -79,8 +80,8 @@ function DriverSettlementsContent() {
     }
     const params = new URLSearchParams();
     params.set("status", "PENDING");
-    params.set("from", formatDate(from));
-    params.set("to", formatDate(to));
+    params.set("from", formatIsoDate(from));
+    params.set("to", formatIsoDate(to));
     router.push(`/driver/settlements?${params.toString()}`);
   };
 
@@ -169,8 +170,7 @@ function DriverSettlementsContent() {
                 <div>
                   <div className="font-semibold">{settlement.weekLabel ?? "Pay period"}</div>
                   <div className="text-xs text-[color:var(--color-text-muted)]">
-                    {new Date(settlement.periodStart).toLocaleDateString()} →{" "}
-                    {new Date(settlement.periodEnd).toLocaleDateString()}
+                    {formatDate24(settlement.periodStart)} → {formatDate24(settlement.periodEnd)}
                   </div>
                 </div>
                 <DriverStatusChip status={settlement.status} />
@@ -180,7 +180,7 @@ function DriverSettlementsContent() {
               </div>
               {settlement.paidAt ? (
                 <div className="text-xs text-[color:var(--color-text-muted)]">
-                  Paid on {new Date(settlement.paidAt).toLocaleDateString()}
+                  Paid on {formatDate24(settlement.paidAt)}
                 </div>
               ) : (
                 <InlineHelper text="Why pending?" href="/driver/pay#blockers" className="mt-1 inline-block" />

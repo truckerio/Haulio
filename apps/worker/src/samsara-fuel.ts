@@ -1,4 +1,5 @@
 import { prisma, FuelSummarySource, Prisma, TrackingIntegrationStatus, TrackingProviderType } from "@truckerio/db";
+import { extractSamsaraApiToken } from "../../api/src/lib/samsara-config";
 
 const SAMSARA_BASE = process.env.SAMSARA_API_BASE || "https://api.samsara.com";
 const DEFAULT_TIMEOUT_MS = Number(process.env.SAMSARA_TIMEOUT_MS || "8000");
@@ -90,12 +91,6 @@ async function fetchSamsaraFuelReport(token: string, vehicleIds: string[], start
   return mapFuelRows(payload);
 }
 
-function extractSamsaraToken(config: Prisma.JsonValue | null) {
-  if (!config || typeof config !== "object") return null;
-  const value = (config as { apiToken?: string | null }).apiToken;
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
 function toDecimal(value: number | null) {
   if (value === null || value === undefined) return null;
   return new Prisma.Decimal(value);
@@ -119,7 +114,7 @@ export async function syncSamsaraFuelSummaries(params: { days: number }) {
   periodEnd.setHours(23, 59, 59, 999);
 
   for (const integration of integrations) {
-    const token = extractSamsaraToken(integration.configJson ?? null);
+    const token = extractSamsaraApiToken(integration.configJson ?? null);
     if (!token) continue;
     const mappings = await prisma.truckTelematicsMapping.findMany({
       where: { orgId: integration.orgId, providerType: TrackingProviderType.SAMSARA },

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -136,24 +136,44 @@ function nextSortDirection(key: SortKey): SortDirection {
   return "asc";
 }
 
+function parseLaneFilter(value: string | null): LaneFilter {
+  if (value === "disputes" || value === "shortPay" || value === "qboFailed") return value;
+  return "all";
+}
+
+function countActiveSpreadsheetFilters(params: { search: string; stage: string; readiness: string; laneFilter: LaneFilter }) {
+  let count = 0;
+  if (params.search.trim()) count += 1;
+  if (params.stage) count += 1;
+  if (params.readiness) count += 1;
+  if (params.laneFilter !== "all") count += 1;
+  return count;
+}
+
 export function FinanceSpreadsheetPanel() {
+  const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { user, capabilities } = useUser();
   const canAccess = capabilities.canAccessFinance;
+  const initialSearch = searchParams.get("sheetSearch") ?? "";
+  const initialStage = searchParams.get("sheetStage") ?? "";
+  const initialReadiness = searchParams.get("sheetReadiness") ?? "";
+  const initialLaneFilter = parseLaneFilter(searchParams.get("sheetLane"));
   const [rows, setRows] = useState<FinanceRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [restrictedBy403, setRestrictedBy403] = useState(false);
-  const [search, setSearch] = useState("");
-  const [stage, setStage] = useState("");
-  const [readiness, setReadiness] = useState("");
+  const [search, setSearch] = useState(initialSearch);
+  const [stage, setStage] = useState(initialStage);
+  const [readiness, setReadiness] = useState(initialReadiness);
   const [rowsPerPage, setRowsPerPage] = useState(25);
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isSpreadsheetMaximized, setIsSpreadsheetMaximized] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("deliveredAt");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
-  const [laneFilter, setLaneFilter] = useState<LaneFilter>("all");
+  const [laneFilter, setLaneFilter] = useState<LaneFilter>(initialLaneFilter);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
 
   const loadRows = useCallback(async () => {
@@ -193,6 +213,59 @@ export function FinanceSpreadsheetPanel() {
   useEffect(() => {
     setPage(1);
   }, [laneFilter, rowsPerPage]);
+
+  const clearFilters = useCallback(() => {
+    setSearch("");
+    setStage("");
+    setReadiness("");
+    setLaneFilter("all");
+    setPage(1);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(searchParams.toString());
+    let changed = false;
+    const nextSearch = search.trim();
+    if (nextSearch) {
+      if (params.get("sheetSearch") !== nextSearch) {
+        params.set("sheetSearch", nextSearch);
+        changed = true;
+      }
+    } else if (params.has("sheetSearch")) {
+      params.delete("sheetSearch");
+      changed = true;
+    }
+    if (stage) {
+      if (params.get("sheetStage") !== stage) {
+        params.set("sheetStage", stage);
+        changed = true;
+      }
+    } else if (params.has("sheetStage")) {
+      params.delete("sheetStage");
+      changed = true;
+    }
+    if (readiness) {
+      if (params.get("sheetReadiness") !== readiness) {
+        params.set("sheetReadiness", readiness);
+        changed = true;
+      }
+    } else if (params.has("sheetReadiness")) {
+      params.delete("sheetReadiness");
+      changed = true;
+    }
+    if (laneFilter !== "all") {
+      if (params.get("sheetLane") !== laneFilter) {
+        params.set("sheetLane", laneFilter);
+        changed = true;
+      }
+    } else if (params.has("sheetLane")) {
+      params.delete("sheetLane");
+      changed = true;
+    }
+    if (!changed) return;
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname);
+  }, [laneFilter, pathname, readiness, router, search, searchParams, stage]);
 
   useEffect(() => {
     if (!isSpreadsheetMaximized || typeof window === "undefined") {
@@ -269,6 +342,10 @@ export function FinanceSpreadsheetPanel() {
     }
     return { blocked, ready, totalAmountCents };
   }, [sortedRows]);
+  const activeFilterCount = useMemo(
+    () => countActiveSpreadsheetFilters({ search, stage, readiness, laneFilter }),
+    [laneFilter, readiness, search, stage]
+  );
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
       setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
@@ -333,6 +410,12 @@ export function FinanceSpreadsheetPanel() {
             </Select>
           </div>
         </div>
+        <div className="flex flex-wrap items-center gap-2 border-t border-[color:var(--color-divider)] pt-2 text-xs">
+          <StatusChip tone={activeFilterCount > 0 ? "warning" : "neutral"} label={activeFilterCount > 0 ? `${activeFilterCount} active filter(s)` : "No active filters"} />
+          <Button size="sm" variant="secondary" onClick={clearFilters} disabled={activeFilterCount === 0}>
+            Clear filters
+          </Button>
+        </div>
       </Card>
 
       <Card className={`space-y-2 ${cardPaddingClass}`}>
@@ -344,7 +427,13 @@ export function FinanceSpreadsheetPanel() {
               <button
                 key={action}
                 type="button"
-                onClick={() => router.push(`/finance?tab=commands`)}
+                onClick={() =>
+                  router.push(
+                    capabilities.canBillActions
+                      ? `/finance?tab=receivables&commandLane=${encodeURIComponent(action)}`
+                      : "/finance?tab=receivables&focus=readiness"
+                  )
+                }
                 className="flex items-center justify-between rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2.5 py-2 text-left text-xs transition hover:bg-[color:var(--color-bg-muted)]"
               >
                 <span className="font-medium text-ink">{label}</span>
@@ -428,7 +517,22 @@ export function FinanceSpreadsheetPanel() {
             <span className="ml-auto text-[color:var(--color-text-muted)]">{lastRefreshedAt ? `Last refresh ${formatDateTime(lastRefreshedAt)}` : "Not refreshed yet"}</span>
           </div>
           {loading ? <EmptyState title="Loading finance rows..." /> : null}
-          {!loading && rows.length === 0 ? <EmptyState title="No finance rows found." /> : null}
+          {!loading && rows.length === 0 ? (
+            <EmptyState
+              title="No finance rows found."
+              description="Adjust filters, clear the lane scope, or refresh data."
+              action={
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" onClick={clearFilters} disabled={activeFilterCount === 0}>
+                    Clear filters
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={loadRows} disabled={loading}>
+                    Refresh
+                  </Button>
+                </div>
+              }
+            />
+          ) : null}
           {!loading && rows.length > 0 ? (
             <div className={isSpreadsheetMaximized ? "max-h-[calc(100dvh-16rem)] overflow-auto" : "max-h-[58vh] overflow-auto"}>
               <table className={`min-w-[980px] border-separate border-spacing-0 ${tableTextClass}`}>
@@ -582,14 +686,21 @@ export function FinanceSpreadsheetPanel() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => router.push(`/loads/${selected.loadId}`)}>
-                    Open load
+                  <Button size="sm" variant="secondary" onClick={() => router.push(`/shipments/${selected.loadId}`)}>
+                    Open shipment
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => router.push(`/finance?tab=receivables&search=${encodeURIComponent(selected.loadNumber)}`)}>
                     Open receivables board
                   </Button>
                   {user?.role === "BILLING" || user?.role === "ADMIN" ? (
-                    <Button size="sm" onClick={() => router.push(`/finance?tab=payables&loadId=${selected.loadId}`)}>
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        router.push(
+                          `/finance?tab=payables&loadId=${encodeURIComponent(selected.loadId)}&search=${encodeURIComponent(selected.loadNumber)}`
+                        )
+                      }
+                    >
                       Open payables context
                     </Button>
                   ) : null}

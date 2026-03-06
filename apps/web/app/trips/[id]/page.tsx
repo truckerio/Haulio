@@ -575,6 +575,10 @@ export default function TripDetailPage() {
             <div className="text-xs text-[color:var(--color-text-muted)]">
               Departure: {formatDateTime(trip.plannedDepartureAt, "-")} · Arrival: {formatDateTime(trip.plannedArrivalAt, "-")}
             </div>
+            <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+              Execution updates are managed in <span className="font-medium text-ink">Trip/Dispatch</span>. Billing
+              actions are managed in <span className="font-medium text-ink">Load/Finance</span>.
+            </div>
             {tripEditing ? (
               <div className="space-y-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] p-3">
                 <FormField label="Origin" htmlFor="tripEditOrigin">
@@ -656,20 +660,39 @@ export default function TripDetailPage() {
           </Card>
 
           <Card className="space-y-2">
-            <div className="text-sm font-semibold text-ink">Docs/POD status</div>
+            <div className="text-sm font-semibold text-ink">Execution blockers</div>
+            {blockers.length === 0 ? (
+              <div className="text-xs text-[color:var(--color-text-muted)]">No blockers detected.</div>
+            ) : (
+              <ul className="space-y-1 text-xs text-[color:var(--color-text-muted)]">
+                {blockers.map((item) => (
+                  <li key={item}>• {item}</li>
+                ))}
+              </ul>
+            )}
+          </Card>
+
+          <Card className="space-y-2">
+            <div className="text-sm font-semibold text-ink">Docs handoff</div>
             <div className="text-xs text-[color:var(--color-text-muted)]">
               POD: {docsSummary.pod} · BOL: {docsSummary.bol} · RateCon: {docsSummary.rateCon}
             </div>
             <div className="text-xs text-[color:var(--color-text-muted)]">Total uploaded docs: {docsSummary.totalDocs}</div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">
+              Use load detail documents when dispatch needs billing handoff evidence.
+            </div>
           </Card>
 
           <Card className="space-y-2">
-            <div className="text-sm font-semibold text-ink">Financial snapshot</div>
+            <div className="text-sm font-semibold text-ink">Commercial snapshot (read-only)</div>
             <div className="text-xs text-[color:var(--color-text-muted)]">
               Delivered: {financeSummary.delivered} · Ready: {financeSummary.ready}
             </div>
             <div className="text-xs text-[color:var(--color-text-muted)]">
               Invoiced: {financeSummary.invoiced} · Paid: {financeSummary.paid}
+            </div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">
+              Commercial mutations happen in load billing and finance workspaces.
             </div>
           </Card>
 
@@ -709,18 +732,6 @@ export default function TripDetailPage() {
             </>
           ) : null}
 
-          <Card className="space-y-2">
-            <div className="text-sm font-semibold text-ink">Blockers</div>
-            {blockers.length === 0 ? (
-              <div className="text-xs text-[color:var(--color-text-muted)]">No blockers detected.</div>
-            ) : (
-              <ul className="space-y-1 text-xs text-[color:var(--color-text-muted)]">
-                {blockers.map((item) => (
-                  <li key={item}>• {item}</li>
-                ))}
-              </ul>
-            )}
-          </Card>
         </div>
       </div>
 

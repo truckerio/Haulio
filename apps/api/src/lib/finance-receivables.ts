@@ -1,9 +1,12 @@
 import {
+  AccessorialStatus,
+  AccessorialType,
   BillingStatus,
   BillingSubmissionChannel,
   BillingSubmissionStatus,
   FinanceBlockerOwner,
   InvoiceStatus,
+  LoadChargeType,
   LoadStatus,
   Prisma,
   QboEntityType,
@@ -25,6 +28,12 @@ export const FINANCE_RECEIVABLE_STAGE = {
 export type FinanceReceivableStage = (typeof FINANCE_RECEIVABLE_STAGE)[keyof typeof FINANCE_RECEIVABLE_STAGE];
 export type FinanceAgingBucket = "0_30" | "31_60" | "61_90" | "90_plus" | "unknown";
 export type FinanceQboSyncStatus = "NOT_CONNECTED" | "NOT_SYNCED" | "SYNCING" | "SYNCED" | "FAILED";
+export type FinanceCommercialFocus =
+  | "DETENTION"
+  | "LAYOVER"
+  | "PROOF_GAP"
+  | "ACCESSORIAL_PENDING"
+  | "MISSING_LINEHAUL";
 export type FinanceNextBestAction =
   | "OPEN_LOAD"
   | "UPLOAD_DOCS"
@@ -109,6 +118,16 @@ export type FinanceReceivableRow = {
   blockerOwner: FinanceBlockerOwner | null;
   factorReady: boolean;
   factorReadyReasonCodes: string[];
+  commercial: {
+    chargeLineCount: number;
+    chargeTypes: string[];
+    accessorialCount: number;
+    unresolvedAccessorialCount: number;
+    accessorialProofMissingCount: number;
+    hasLinehaulCharge: boolean;
+    hasDetentionSignal: boolean;
+    hasLayoverSignal: boolean;
+  };
   actions: {
     primaryAction: string;
     allowedActions: string[];
@@ -174,6 +193,7 @@ type ListReceivablesParams = {
   blockerCode?: string | null;
   agingBucket?: FinanceAgingBucket[];
   qboSyncStatus?: FinanceQboSyncStatus[];
+  commercialFocus?: FinanceCommercialFocus[];
 };
 
 const FINANCE_LOAD_STATUSES = [
@@ -194,6 +214,9 @@ const BLOCKER_CODE_MAP: Record<string, { code: string; severity: "error" | "warn
   "Accessorial missing proof": { code: "ACCESSORIAL_PROOF_MISSING", severity: "error" },
   "Billing dispute open": { code: "BILLING_DISPUTE", severity: "warning" },
 };
+
+const LOAD_CHARGE_SEARCH_TYPES = new Set<string>(Object.values(LoadChargeType));
+const ACCESSORIAL_SEARCH_TYPES = new Set<string>(Object.values(AccessorialType));
 
 function toCents(value: Prisma.Decimal | number | string | null | undefined) {
   if (value === null || value === undefined) return 0;
@@ -544,6 +567,23 @@ export function mapLoadToFinanceReceivableRow(params: {
     factorReady: factorReadiness.factorReady,
     factoringFailed: lastSubmission?.status === BillingSubmissionStatus.FAILED,
   });
+  const chargeTypes = Array.from(new Set(load.charges.map((charge) => charge.type))).sort();
+  const accessorialTypes = new Set(load.accessorials.map((item) => item.type));
+  const unresolvedAccessorialCount = load.accessorials.filter(
+    (item) => item.status !== AccessorialStatus.APPROVED && item.status !== AccessorialStatus.REJECTED
+  ).length;
+  const accessorialProofMissingCount = load.accessorials.filter(
+    (item) => item.requiresProof && !item.proofDocumentId
+  ).length;
+  const hasLinehaulCharge = chargeTypes.includes(LoadChargeType.LINEHAUL);
+  const hasNonZeroLoadRate = toCents(load.rate) > 0;
+  const hasDetentionSignal =
+    chargeTypes.includes(LoadChargeType.DETENTION) || accessorialTypes.has(AccessorialType.DETENTION);
+  const hasLayoverSignal =
+    chargeTypes.includes(LoadChargeType.LAYOVER) ||
+    load.accessorials.some(
+      (item) => item.type === AccessorialType.OTHER && String(item.notes ?? "").toLowerCase().includes("layover")
+    );
 
   return {
     loadId: load.id,
@@ -601,11 +641,24 @@ export function mapLoadToFinanceReceivableRow(params: {
     blockerOwner,
     factorReady: factorReadiness.factorReady,
     factorReadyReasonCodes: factorReadiness.factorReadyReasonCodes,
+    commercial: {
+      chargeLineCount: load.charges.length,
+      chargeTypes,
+      accessorialCount: load.accessorials.length,
+      unresolvedAccessorialCount,
+      accessorialProofMissingCount,
+      hasLinehaulCharge: hasLinehaulCharge || hasNonZeroLoadRate,
+      hasDetentionSignal,
+      hasLayoverSignal,
+    },
     actions,
   };
 }
 
-type ReceivablesFilterInput = Pick<ListReceivablesParams, "stage" | "readyState" | "blockerCode" | "agingBucket" | "qboSyncStatus">;
+type ReceivablesFilterInput = Pick<
+  ListReceivablesParams,
+  "stage" | "readyState" | "blockerCode" | "agingBucket" | "qboSyncStatus" | "commercialFocus"
+>;
 
 export function applyFinanceReceivableFilters(row: FinanceReceivableRow, filters: ReceivablesFilterInput) {
   if (filters.stage?.length && !filters.stage.includes(row.billingStage)) {
@@ -628,6 +681,19 @@ export function applyFinanceReceivableFilters(row: FinanceReceivableRow, filters
   }
   if (filters.qboSyncStatus?.length && !filters.qboSyncStatus.includes(row.integrations.quickbooks.syncStatus)) {
     return false;
+  }
+  if (filters.commercialFocus?.length) {
+    const focusMatched = filters.commercialFocus.some((focus) => {
+      if (focus === "DETENTION") return row.commercial.hasDetentionSignal;
+      if (focus === "LAYOVER") return row.commercial.hasLayoverSignal;
+      if (focus === "PROOF_GAP") return row.commercial.accessorialProofMissingCount > 0;
+      if (focus === "ACCESSORIAL_PENDING") return row.commercial.unresolvedAccessorialCount > 0;
+      if (focus === "MISSING_LINEHAUL") return !row.commercial.hasLinehaulCharge;
+      return false;
+    });
+    if (!focusMatched) {
+      return false;
+    }
   }
   return true;
 }
@@ -684,10 +750,28 @@ export async function listFinanceReceivables(params: ListReceivablesParams) {
 
   if (params.search?.trim()) {
     const q = params.search.trim();
+    const token = q.toUpperCase().replace(/[\s-]+/g, "_");
+    const chargeTypeToken = LOAD_CHARGE_SEARCH_TYPES.has(token) ? (token as LoadChargeType) : null;
+    const accessorialTypeToken = ACCESSORIAL_SEARCH_TYPES.has(token) ? (token as AccessorialType) : null;
+    const chargeConditions: Prisma.LoadChargeWhereInput[] = [
+      { description: { contains: q, mode: "insensitive" } },
+    ];
+    if (chargeTypeToken) {
+      chargeConditions.push({ type: chargeTypeToken });
+    }
+    const accessorialConditions: Prisma.AccessorialWhereInput[] = [
+      { notes: { contains: q, mode: "insensitive" } },
+    ];
+    if (accessorialTypeToken) {
+      accessorialConditions.push({ type: accessorialTypeToken });
+    }
     where.OR = [
       { loadNumber: { contains: q, mode: "insensitive" } },
       { customerName: { contains: q, mode: "insensitive" } },
       { customer: { is: { name: { contains: q, mode: "insensitive" } } } },
+      { invoices: { some: { invoiceNumber: { contains: q, mode: "insensitive" } } } },
+      { charges: { some: { OR: chargeConditions } } },
+      { accessorials: { some: { OR: accessorialConditions } } },
     ];
   }
 

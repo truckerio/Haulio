@@ -1,96 +1,113 @@
-import { getRoleCapabilities } from "./capabilities";
+import { getRoleCapabilities, type CanonicalRole } from "./capabilities";
 
 export type NavSection = {
   title: string;
   items: Array<{ href: string; label: string }>;
 };
 
-export const navSections: NavSection[] = [
-  {
-    title: "Home",
-    items: [
-      { href: "/today", label: "Activity" },
-      { href: "/dashboard", label: "Task Inbox" },
-      { href: "/profile", label: "Profile" },
-    ],
-  },
-  {
-    title: "Library",
-    items: [
-      { href: "/loads", label: "Loads" },
-      { href: "/dispatch", label: "Dispatch" },
-      { href: "/trips", label: "Trips" },
-      { href: "/safety", label: "Safety" },
-      { href: "/support", label: "Support" },
-      { href: "/teams", label: "Teams (Ops)" },
-      { href: "/finance", label: "Finance" },
-    ],
-  },
-  {
-    title: "Admin",
-    items: [
-      { href: "/audit", label: "Audit" },
-      { href: "/admin", label: "Admin" },
-    ],
-  },
-];
+const NAV_ITEMS = {
+  today: { href: "/today", label: "Activity" },
+  dashboard: { href: "/dashboard", label: "Task Inbox" },
+  profile: { href: "/profile", label: "Profile" },
+  dispatch: { href: "/dispatch", label: "Dispatch" },
+  teams: { href: "/teams", label: "Teams (Ops)" },
+  finance: { href: "/finance", label: "Finance" },
+  safety: { href: "/safety", label: "Safety" },
+  support: { href: "/support", label: "Support" },
+  audit: { href: "/audit", label: "Audit" },
+  admin: { href: "/admin", label: "Admin" },
+  driver: { href: "/driver", label: "Driver Portal" },
+} as const;
 
-const defaultRoutes = ["/today", "/dashboard", "/loads", "/profile"];
+type NavItemKey = keyof typeof NAV_ITEMS;
+type RoleNavPlan = { primary: NavItemKey[]; more: NavItemKey[] };
 
-const roleRoutes: Record<string, string[]> = {
-  ADMIN: [
-    "/today",
-    "/dashboard",
-    "/dispatch",
-    "/teams",
-    "/finance",
-    "/audit",
-    "/admin",
-    "/profile",
-  ],
-  HEAD_DISPATCHER: ["/dispatch", "/teams", "/finance", "/profile"],
-  DISPATCHER: ["/dispatch", "/finance", "/profile"],
-  BILLING: ["/today", "/dashboard", "/loads", "/trips", "/finance", "/profile"],
-  SAFETY: ["/safety", "/profile"],
-  SUPPORT: ["/support", "/profile"],
-  DRIVER: ["/driver"],
+const ROLE_NAV_PLANS: Record<CanonicalRole, RoleNavPlan> = {
+  ADMIN: {
+    primary: ["today", "dispatch", "finance"],
+    more: ["safety", "support", "teams", "audit", "admin", "dashboard", "profile"],
+  },
+  HEAD_DISPATCHER: {
+    primary: ["dispatch"],
+    more: ["finance", "teams", "today", "dashboard", "profile"],
+  },
+  DISPATCHER: {
+    primary: ["dispatch"],
+    more: ["finance", "today", "dashboard", "profile"],
+  },
+  BILLING: {
+    primary: ["finance"],
+    more: ["today", "dashboard", "profile"],
+  },
+  SAFETY: {
+    primary: ["safety"],
+    more: ["today", "dashboard", "profile"],
+  },
+  SUPPORT: {
+    primary: ["support"],
+    more: ["today", "dashboard", "profile"],
+  },
+  DRIVER: {
+    primary: ["driver"],
+    more: [],
+  },
 };
 
-export const driverSections: NavSection[] = [
-  {
-    title: "Driver",
-    items: [{ href: "/driver", label: "Driver Portal" }],
-  },
-];
+const DEFAULT_PLAN: RoleNavPlan = {
+  primary: ["today"],
+  more: ["profile"],
+};
+
+function isHrefAllowedByCapability(href: string, capabilities: ReturnType<typeof getRoleCapabilities>) {
+  if (href.startsWith("/dispatch") || href.startsWith("/loads") || href.startsWith("/trips") || href.startsWith("/teams")) {
+    return capabilities.canAccessDispatch;
+  }
+  if (href.startsWith("/finance") || href.startsWith("/billing") || href.startsWith("/settlements")) {
+    return capabilities.canAccessFinance;
+  }
+  if (href.startsWith("/safety")) return capabilities.canAccessSafety;
+  if (href.startsWith("/support")) return capabilities.canAccessSupport;
+  if (href.startsWith("/admin") || href.startsWith("/audit")) return capabilities.canAccessAdmin;
+  if (href.startsWith("/driver")) return capabilities.canAccessDriver;
+  return true;
+}
+
+function buildRoleItems(
+  keys: NavItemKey[],
+  capabilities: ReturnType<typeof getRoleCapabilities>,
+  options?: { showTeamsOps?: boolean }
+) {
+  const seen = new Set<string>();
+  const items = keys
+    .map((key) => NAV_ITEMS[key])
+    .filter((item) => {
+      if (!item) return false;
+      if (item.href === "/teams" && !options?.showTeamsOps) return false;
+      if (!isHrefAllowedByCapability(item.href, capabilities)) return false;
+      if (seen.has(item.href)) return false;
+      seen.add(item.href);
+      return true;
+    });
+  return items;
+}
+
+export const driverSections: NavSection[] = [{ title: "Driver", items: [NAV_ITEMS.driver] }];
 
 export function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean }) {
-  const roleCapabilities = getRoleCapabilities(role);
-  if (roleCapabilities.canonicalRole === "DRIVER") return driverSections;
-  const allowed = roleRoutes[role ?? ""] ?? defaultRoutes;
-  const isDispatchRole =
-    roleCapabilities.canonicalRole === "DISPATCHER" || roleCapabilities.canonicalRole === "HEAD_DISPATCHER";
-  const secondaryDispatchRoutes = new Set(["/today", "/dashboard"]);
-  const sections = navSections
-    .map((section) => ({
-      ...section,
-      items: section.items.filter((item) => {
-        if (isDispatchRole && secondaryDispatchRoutes.has(item.href)) {
-          return false;
-        }
-        if (item.href === "/teams") {
-          return allowed.includes(item.href) && Boolean(options?.showTeamsOps);
-        }
-        return allowed.includes(item.href);
-      }),
-    }))
-    .filter((section) => section.items.length > 0);
+  const capabilities = getRoleCapabilities(role);
+  const canonicalRole = capabilities.canonicalRole;
+  if (canonicalRole === "DRIVER") return driverSections;
 
-  if (isDispatchRole) {
-    const secondaryItems = navSections[0].items.filter((item) => secondaryDispatchRoutes.has(item.href));
-    if (secondaryItems.length > 0) {
-      sections.push({ title: "More", items: secondaryItems });
-    }
-  }
+  const rolePlan = canonicalRole ? ROLE_NAV_PLANS[canonicalRole] : DEFAULT_PLAN;
+  const primaryItems = buildRoleItems(rolePlan.primary, capabilities, options);
+  const moreItems = buildRoleItems(
+    rolePlan.more.filter((key) => !rolePlan.primary.includes(key)),
+    capabilities,
+    options
+  );
 
+  const sections: NavSection[] = [];
+  if (primaryItems.length > 0) sections.push({ title: "Workspace", items: primaryItems });
+  if (moreItems.length > 0) sections.push({ title: "More", items: moreItems });
   return sections;
 }

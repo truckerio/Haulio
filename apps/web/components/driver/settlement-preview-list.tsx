@@ -1,5 +1,6 @@
 import { DriverStatusChip } from "@/components/driver/driver-status-chip";
 import { MoneyAmount } from "@/components/driver/money-amount";
+import { formatDate as formatDate24 } from "@/lib/date-time";
 
 type SettlementStatus = "DRAFT" | "FINALIZED" | "PAID";
 
@@ -32,8 +33,7 @@ export function SettlementPreviewList({ settlements }: SettlementPreviewListProp
           <div>
             <div className="font-semibold text-ink">{settlement.weekLabel ?? "Pay period"}</div>
             <div className="text-xs text-[color:var(--color-text-muted)]">
-              {new Date(settlement.periodStart).toLocaleDateString()} →{" "}
-              {new Date(settlement.periodEnd).toLocaleDateString()}
+              {formatDate24(settlement.periodStart)} → {formatDate24(settlement.periodEnd)}
             </div>
           </div>
           <div className="flex flex-col items-end gap-1">

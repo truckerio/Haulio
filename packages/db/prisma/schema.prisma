@@ -502,6 +502,23 @@ enum FinanceOutboxEventStatus {
   FAILED
 }
 
+enum ShipmentWebhookEventType {
+  SHIPMENT_CREATED
+  SHIPMENT_EXECUTION_UPDATED
+  SHIPMENT_COMMERCIAL_UPDATED
+  SHIPMENT_HANDOFF_QUEUED
+  SHIPMENT_SPLIT
+  SHIPMENT_MERGED
+  SHIPMENT_TEST
+}
+
+enum ShipmentWebhookDeliveryStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+}
+
 enum QboEntityType {
   CUSTOMER
   INVOICE
@@ -574,14 +591,81 @@ enum PayableHoldOwner {
   SYSTEM
 }
 
+enum MoveContractStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum MoveContractTemplate {
+  CPM
+  FLAT_TRIP
+  REVENUE_SHARE
+  HOURLY
+  HYBRID_BEST_OF
+}
+
+enum ARCaseType {
+  DISPUTE
+  SHORT_PAY
+  MISSING_DOCS
+  EDI_REJECT
+  FACTORING_REJECT
+  DUPLICATE_INVOICE
+  RATE_DISPUTE
+}
+
+enum ARCaseStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum CashApplicationBatchStatus {
+  IMPORTED
+  POSTED
+}
+
+enum CashApplicationMatchStatus {
+  SUGGESTED
+  MATCHED
+  POSTED
+  REJECTED
+}
+
+enum VendorBillStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  SCHEDULED
+  PAID
+  REJECTED
+}
+
+enum FactoringTransactionType {
+  ADVANCE
+  RESERVE_RELEASE
+  FEE
+  RECOURSE
+  ADJUSTMENT
+}
+
 enum FinanceJournalEntityType {
+  INVOICE
+  FACTORING_TRANSACTION
   PAYABLE_RUN
   SETTLEMENT
+  VENDOR_BILL
 }
 
 enum FinanceJournalEventType {
+  INVOICE_ISSUED
+  INVOICE_PAYMENT_RECEIVED
+  FACTORING_TRANSACTION_POSTED
   PAYABLE_RUN_PAID
   SETTLEMENT_PAID
+  VENDOR_BILL_PAID
 }
 
 enum FinanceJournalLineSide {
@@ -595,6 +679,9 @@ enum FinanceLedgerAccount {
   SETTLEMENT_EXPENSE
   AR_CLEARING
   REVENUE
+  VENDOR_PAYABLE
+  FACTORING_RESERVE
+  FACTORING_FEE_EXPENSE
 }
 
 enum LoadNoteVisibility {
@@ -688,6 +775,7 @@ model Organization {
   trackingIntegrations             TrackingIntegration[]
   fuelSummaries                    FuelSummary[]
   truckTelematicsMappings          TruckTelematicsMapping[]
+  samsaraWebhookReceipts           SamsaraWebhookReceipt[]
   trackingSessions                 LoadTrackingSession[]
   locationPings                    LocationPing[]
   legs                             LoadLeg[]
@@ -705,10 +793,22 @@ model Organization {
   assignmentSuggestionLogs         AssignmentSuggestionLog[]
   driverStats                      DriverStats[]
   billingSubmissions               BillingSubmission[]
+  arCases                          ARCase[]
+  arCaseComments                   ARCaseComment[]
+  vendors                          Vendor[]
+  vendorBills                      VendorBill[]
+  vendorBillLines                  VendorBillLine[]
+  cashApplicationBatches           CashApplicationBatch[]
+  cashApplicationMatches           CashApplicationMatch[]
+  factoringTransactions            FactoringTransaction[]
   payableRuns                      PayableRun[]
   payableLineItems                 PayableLineItem[]
+  moveContracts                    MoveContract[]
+  moveContractVersions             MoveContractVersion[]
   settlementPolicyVersions         SettlementPolicyVersion[]
   financeOutboxEvents              FinanceOutboxEvent[]
+  shipmentWebhookSubscriptions     ShipmentWebhookSubscription[]
+  shipmentWebhookDeliveries        ShipmentWebhookDelivery[]
   qboSyncJobs                      QboSyncJob[]
   invoicePayments                  InvoicePayment[]
   financeJournalEntries            FinanceJournalEntry[]
@@ -727,7 +827,7 @@ model SetupCode {
   consumedAt DateTime?
   createdAt  DateTime  @default(now())
 
-  org Organization? @relation(fields: [orgId], references: [id])
+  org Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
 
   @@index([consumedAt])
 }
@@ -849,8 +949,19 @@ model User {
   assignmentSuggestionLogs        AssignmentSuggestionLog[]  @relation("AssignmentSuggestionDispatcher")
   billingSubmissions              BillingSubmission[]        @relation("BillingSubmissionCreatedBy")
   invoicePaymentsCreated          InvoicePayment[]           @relation("InvoicePaymentCreatedBy")
+  arCasesOwned                    ARCase[]                   @relation("ARCaseOwner")
+  arCasesCreated                  ARCase[]                   @relation("ARCaseCreatedBy")
+  arCaseCommentsCreated           ARCaseComment[]            @relation("ARCaseCommentCreatedBy")
+  vendorsCreated                  Vendor[]                   @relation("VendorCreatedBy")
+  vendorBillsCreated              VendorBill[]               @relation("VendorBillCreatedBy")
+  vendorBillsApproved             VendorBill[]               @relation("VendorBillApprovedBy")
+  cashApplicationBatchesCreated   CashApplicationBatch[]     @relation("CashAppBatchCreatedBy")
+  cashApplicationMatchesResolved  CashApplicationMatch[]     @relation("CashAppMatchResolvedBy")
+  factoringTransactionsCreated    FactoringTransaction[]     @relation("FactoringTransactionCreatedBy")
   payableRunsCreated              PayableRun[]               @relation("PayableRunCreatedBy")
   financeJournalEntriesCreated    FinanceJournalEntry[]      @relation("FinanceJournalCreatedBy")
+  moveContractsCreated            MoveContract[]             @relation("MoveContractCreatedBy")
+  moveContractVersionsCreated     MoveContractVersion[]      @relation("MoveContractVersionCreatedBy")
   settlementPolicyVersionsCreated SettlementPolicyVersion[]  @relation("SettlementPolicyVersionCreatedBy")
   loadNotesCreated                Note[]                     @relation("LoadNoteCreatedBy")
   loadNotesUpdated                Note[]                     @relation("LoadNoteUpdatedBy")
@@ -1101,6 +1212,10 @@ model Load {
   charges                   LoadCharge[]
   assignmentMembers         LoadAssignmentMember[]
   billingSubmissions        BillingSubmission[]
+  arCases                   ARCase[]
+  vendorBills               VendorBill[]
+  factoringTransactions     FactoringTransaction[]
+  cashMatches               CashApplicationMatch[]
   invoicePayments           InvoicePayment[]
   payableLineItems          PayableLineItem[]
   financeOutboxEvents       FinanceOutboxEvent[]
@@ -1937,6 +2052,10 @@ model OrgSettings {
   factoringAttachmentMode      FactoringAttachmentMode            @default(LINK_ONLY)
   inboundRateconEmailEnabled   Boolean                            @default(false)
   quickbooksCompanyId          String?
+  shipmentWebhooksEnabled      Boolean                            @default(false)
+  shipmentWebhooksVersion      String                             @default("v1")
+  shipmentProjectionLagEnabled Boolean                            @default(false)
+  shipmentProjectionLagSeconds Int                                @default(120)
   defaultPaymentTermsDays      Int?
   trackingPreference           TrackingPreference                 @default(MANUAL)
   settlementSchedule           SettlementSchedule                 @default(WEEKLY)
@@ -1981,6 +2100,9 @@ model Invoice {
   Task               Task[]
   billingSubmissions BillingSubmission[]
   payments           InvoicePayment[]
+  arCases            ARCase[]
+  cashMatches        CashApplicationMatch[]
+  factoringTransactions FactoringTransaction[]
 
   @@unique([orgId, invoiceNumber])
 }
@@ -2019,6 +2141,7 @@ model BillingSubmission {
   load      Load         @relation(fields: [loadId], references: [id])
   invoice   Invoice?     @relation(fields: [invoiceId], references: [id])
   createdBy User         @relation("BillingSubmissionCreatedBy", fields: [createdById], references: [id])
+  factoringTransactions FactoringTransaction[]
 
   @@index([orgId, loadId, createdAt])
   @@index([orgId, channel, status, createdAt])
@@ -2046,6 +2169,189 @@ model InvoicePayment {
   @@index([invoiceId, createdAt])
 }
 
+model ARCase {
+  id            String       @id @default(cuid())
+  orgId         String
+  loadId        String?
+  invoiceId     String?
+  type          ARCaseType
+  status        ARCaseStatus @default(OPEN)
+  title         String
+  summary       String?
+  ownerUserId   String?
+  slaDueAt      DateTime?
+  resolution    String?
+  resolvedAt    DateTime?
+  createdById   String
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  org       Organization   @relation(fields: [orgId], references: [id])
+  load      Load?          @relation(fields: [loadId], references: [id])
+  invoice   Invoice?       @relation(fields: [invoiceId], references: [id])
+  ownerUser User?          @relation("ARCaseOwner", fields: [ownerUserId], references: [id])
+  createdBy User           @relation("ARCaseCreatedBy", fields: [createdById], references: [id])
+  comments  ARCaseComment[]
+
+  @@index([orgId, status, type, createdAt])
+  @@index([orgId, loadId, createdAt])
+  @@index([orgId, invoiceId, createdAt])
+  @@index([orgId, ownerUserId, status])
+}
+
+model ARCaseComment {
+  id          String   @id @default(cuid())
+  orgId       String
+  caseId      String
+  body        String
+  createdById String
+  createdAt   DateTime @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  arCase    ARCase       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  createdBy User         @relation("ARCaseCommentCreatedBy", fields: [createdById], references: [id])
+
+  @@index([orgId, caseId, createdAt])
+}
+
+model Vendor {
+  id             String               @id @default(cuid())
+  orgId          String
+  code           String
+  name           String
+  active         Boolean              @default(true)
+  paymentMethod  FinancePaymentMethod @default(ACH)
+  termsDays      Int?
+  email          String?
+  phone          String?
+  remitToAddress String?
+  createdById    String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  createdBy User?        @relation("VendorCreatedBy", fields: [createdById], references: [id])
+  bills     VendorBill[]
+
+  @@unique([orgId, code])
+  @@index([orgId, active, name])
+}
+
+model VendorBill {
+  id            String           @id @default(cuid())
+  orgId         String
+  vendorId      String
+  loadId        String?
+  status        VendorBillStatus @default(DRAFT)
+  invoiceNumber String
+  amountCents   Int
+  dueDate       DateTime?
+  scheduledAt   DateTime?
+  paidAt        DateTime?
+  reference     String?
+  notes         String?
+  createdById   String
+  approvedById  String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  org        Organization    @relation(fields: [orgId], references: [id])
+  vendor     Vendor          @relation(fields: [vendorId], references: [id])
+  load       Load?           @relation(fields: [loadId], references: [id])
+  createdBy  User            @relation("VendorBillCreatedBy", fields: [createdById], references: [id])
+  approvedBy User?           @relation("VendorBillApprovedBy", fields: [approvedById], references: [id])
+  lineItems  VendorBillLine[]
+
+  @@index([orgId, status, createdAt])
+  @@index([orgId, vendorId, status])
+  @@index([orgId, loadId, status])
+}
+
+model VendorBillLine {
+  id          String   @id @default(cuid())
+  orgId       String
+  vendorBillId String
+  description String
+  amountCents Int
+  glCode      String?
+  createdAt   DateTime @default(now())
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  vendorBill VendorBill   @relation(fields: [vendorBillId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, vendorBillId])
+}
+
+model CashApplicationBatch {
+  id             String                     @id @default(cuid())
+  orgId          String
+  sourceFileName String?
+  status         CashApplicationBatchStatus @default(IMPORTED)
+  importedAt     DateTime                   @default(now())
+  postedAt       DateTime?
+  createdById    String
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+
+  org       Organization         @relation(fields: [orgId], references: [id])
+  createdBy User                 @relation("CashAppBatchCreatedBy", fields: [createdById], references: [id])
+  matches   CashApplicationMatch[]
+
+  @@index([orgId, status, importedAt])
+}
+
+model CashApplicationMatch {
+  id               String                     @id @default(cuid())
+  orgId            String
+  batchId          String
+  invoiceId        String?
+  loadId           String?
+  amountCents      Int
+  confidence       Decimal                    @db.Decimal(5, 2)
+  status           CashApplicationMatchStatus @default(SUGGESTED)
+  remittanceRef    String?
+  notes            String?
+  resolvedById     String?
+  resolvedAt       DateTime?
+  postedPaymentId  String?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+
+  org        Organization          @relation(fields: [orgId], references: [id])
+  batch      CashApplicationBatch  @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  invoice    Invoice?              @relation(fields: [invoiceId], references: [id])
+  load       Load?                 @relation(fields: [loadId], references: [id])
+  resolvedBy User?                 @relation("CashAppMatchResolvedBy", fields: [resolvedById], references: [id])
+
+  @@index([orgId, batchId, status])
+  @@index([orgId, invoiceId, status])
+}
+
+model FactoringTransaction {
+  id           String                   @id @default(cuid())
+  orgId        String
+  loadId       String
+  invoiceId    String?
+  submissionId String?
+  type         FactoringTransactionType
+  amountCents  Int
+  occurredAt   DateTime
+  reference    String?
+  notes        String?
+  createdById  String
+  createdAt    DateTime                 @default(now())
+
+  org        Organization      @relation(fields: [orgId], references: [id])
+  load       Load              @relation(fields: [loadId], references: [id])
+  invoice    Invoice?          @relation(fields: [invoiceId], references: [id])
+  submission BillingSubmission? @relation(fields: [submissionId], references: [id])
+  createdBy  User              @relation("FactoringTransactionCreatedBy", fields: [createdById], references: [id])
+
+  @@index([orgId, loadId, occurredAt])
+  @@index([orgId, invoiceId, occurredAt])
+  @@index([orgId, submissionId, occurredAt])
+}
+
 model FinanceOutboxEvent {
   id            String                   @id @default(cuid())
   orgId         String
@@ -2066,6 +2372,79 @@ model FinanceOutboxEvent {
   @@unique([orgId, dedupeKey])
   @@index([status, nextAttemptAt, createdAt])
   @@index([orgId, status, nextAttemptAt])
+}
+
+model ShipmentWebhookSubscription {
+  id            String                   @id @default(cuid())
+  orgId         String
+  version       String                   @default("v1")
+  endpointUrl   String
+  signingSecret String
+  eventTypes    ShipmentWebhookEventType[] @default([])
+  enabled       Boolean                  @default(true)
+  timeoutMs     Int                      @default(8000)
+  lastError     String?
+  lastDeliveryAt DateTime?
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+
+  org        Organization            @relation(fields: [orgId], references: [id])
+  deliveries ShipmentWebhookDelivery[]
+
+  @@unique([orgId, endpointUrl, version])
+  @@index([orgId, enabled, updatedAt])
+}
+
+model ShipmentWebhookDelivery {
+  id             String                        @id @default(cuid())
+  orgId          String
+  subscriptionId String
+  eventId        String
+  eventType      ShipmentWebhookEventType
+  eventVersion   String                        @default("v1")
+  payload        Json
+  status         ShipmentWebhookDeliveryStatus @default(PENDING)
+  attemptCount   Int                           @default(0)
+  nextAttemptAt  DateTime                      @default(now())
+  lastHttpStatus Int?
+  lastError      String?
+  deliveredAt    DateTime?
+  createdAt      DateTime                      @default(now())
+  updatedAt      DateTime                      @updatedAt
+
+  org          Organization                @relation(fields: [orgId], references: [id])
+  subscription ShipmentWebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriptionId, eventId])
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([orgId, status, nextAttemptAt])
+  @@index([orgId, eventType, createdAt])
+}
+
+model SamsaraWebhookReceipt {
+  id                 String               @id @default(cuid())
+  orgId              String?
+  providerType       TrackingProviderType @default(SAMSARA)
+  requestId          String?
+  eventId            String?
+  eventType          String?
+  orgExternalId      String?
+  signatureTimestamp String?
+  verified           Boolean              @default(false)
+  replay             Boolean              @default(false)
+  reason             String?
+  payload            Json?
+  headers            Json?
+  receivedAt         DateTime             @default(now())
+  createdAt          DateTime             @default(now())
+
+  org Organization? @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, providerType, requestId])
+  @@unique([orgId, providerType, eventId])
+  @@index([orgId, receivedAt])
+  @@index([providerType, receivedAt])
+  @@index([orgId, providerType, verified, replay, receivedAt])
 }
 
 model QboSyncJob {
@@ -2228,6 +2607,50 @@ model FinanceWalletSnapshot {
   @@unique([orgId, idempotencyKey, account])
   @@index([orgId, account, createdAt])
   @@index([orgId, eventType, createdAt])
+}
+
+model MoveContract {
+  id            String               @id @default(cuid())
+  orgId         String
+  code          String
+  name          String
+  status        MoveContractStatus   @default(DRAFT)
+  template      MoveContractTemplate
+  description   String?
+  currentVersion Int                 @default(1)
+  createdById   String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  org       Organization         @relation(fields: [orgId], references: [id])
+  createdBy User?                @relation("MoveContractCreatedBy", fields: [createdById], references: [id])
+  versions  MoveContractVersion[]
+
+  @@unique([orgId, code])
+  @@index([orgId, status, template])
+  @@index([orgId, createdAt])
+}
+
+model MoveContractVersion {
+  id               String   @id @default(cuid())
+  orgId            String
+  contractId       String
+  version          Int
+  effectiveFrom    DateTime
+  effectiveTo      DateTime?
+  scopeJson        Json
+  rulesJson        Json
+  previewSampleJson Json?
+  createdById      String?
+  createdAt        DateTime @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  contract  MoveContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  createdBy User?        @relation("MoveContractVersionCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([contractId, version])
+  @@index([orgId, contractId, effectiveFrom])
+  @@index([orgId, effectiveFrom, effectiveTo])
 }
 
 model SettlementPolicyVersion {

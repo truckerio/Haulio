@@ -5,9 +5,15 @@ import type { JournalEntry } from "./finance-ledger";
 type FinanceJournalEntryWithLines = {
   id: string;
   orgId: string;
-  entityType: "PAYABLE_RUN" | "SETTLEMENT";
+  entityType: "INVOICE" | "FACTORING_TRANSACTION" | "PAYABLE_RUN" | "SETTLEMENT" | "VENDOR_BILL";
   entityId: string;
-  eventType: "PAYABLE_RUN_PAID" | "SETTLEMENT_PAID";
+  eventType:
+    | "INVOICE_ISSUED"
+    | "INVOICE_PAYMENT_RECEIVED"
+    | "FACTORING_TRANSACTION_POSTED"
+    | "PAYABLE_RUN_PAID"
+    | "SETTLEMENT_PAID"
+    | "VENDOR_BILL_PAID";
   idempotencyKey: string;
   totalDebitCents: number;
   totalCreditCents: number;

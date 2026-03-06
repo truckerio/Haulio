@@ -4,7 +4,11 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { apiFetch } from "@/lib/api";
-import { getRoleLandingPath } from "@/lib/capabilities";
+import {
+  canRoleResumeWorkspace,
+  getRoleLandingPath,
+  getRoleLastWorkspaceStorageKey,
+} from "@/lib/capabilities";
 
 export default function PostLoginPage() {
   const router = useRouter();
@@ -16,7 +20,19 @@ export default function PostLoginPage() {
       try {
         const data = await apiFetch<{ user: { role: string } }>("/auth/me");
         if (!mounted) return;
-        router.replace(getRoleLandingPath(data.user?.role));
+        const role = data.user?.role ?? null;
+        const defaultLanding = getRoleLandingPath(role);
+        const storageKey = getRoleLastWorkspaceStorageKey(role);
+        if (!storageKey || typeof window === "undefined") {
+          router.replace(defaultLanding);
+          return;
+        }
+        const resumeTarget = window.localStorage.getItem(storageKey);
+        if (resumeTarget && canRoleResumeWorkspace(role, resumeTarget)) {
+          router.replace(resumeTarget);
+          return;
+        }
+        router.replace(defaultLanding);
       } catch (err) {
         if (!mounted) return;
         setError((err as Error).message || "Unable to continue.");

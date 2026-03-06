@@ -143,7 +143,16 @@ export function WorkbenchRightPane({
   legDrawerContent,
   legAddedNote,
   canStartTracking,
+  canUploadDocs,
+  canVerifyDocs,
+  canAccessFinance,
+  canBillActions,
+  onOpenDocUpload,
   yardOsLaunch,
+  onOptimizeTrip,
+  optimizingTrip,
+  onCreateDispatchPack,
+  creatingDispatchPack,
   teamAssignment,
   focusSection,
   focusNonce,
@@ -166,10 +175,19 @@ export function WorkbenchRightPane({
   legDrawerContent?: ReactNode;
   legAddedNote?: string | null;
   canStartTracking: boolean;
+  canUploadDocs?: boolean;
+  canVerifyDocs?: boolean;
+  canAccessFinance?: boolean;
+  canBillActions?: boolean;
+  onOpenDocUpload?: () => void;
   yardOsLaunch?: {
     href: string;
     onOpen: () => void;
   };
+  onOptimizeTrip?: () => Promise<void> | void;
+  optimizingTrip?: boolean;
+  onCreateDispatchPack?: () => Promise<void> | void;
+  creatingDispatchPack?: boolean;
   focusSection?: DispatchInspectorFocusSection | null;
   focusNonce?: number;
   teamAssignment?: {
@@ -195,6 +213,11 @@ export function WorkbenchRightPane({
   const [notePriority, setNotePriority] = useState<(typeof NOTE_PRIORITY_OPTIONS)[number]>("NORMAL");
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteStatus, setNoteStatus] = useState<string | null>(null);
+  const [docActionLoadingId, setDocActionLoadingId] = useState<string | null>(null);
+  const [docActionStatus, setDocActionStatus] = useState<string | null>(null);
+  const [docActionError, setDocActionError] = useState<string | null>(null);
+  const canVerifyDocuments = Boolean(canVerifyDocs && !readOnly);
+  const canUploadDocuments = Boolean(canUploadDocs && onOpenDocUpload && !readOnly);
   const readOnlyHint = readOnly ? "Read-only in History view" : undefined;
   const primaryTrip = load?.tripLoads?.[0]?.trip ?? null;
   const assignmentAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -213,6 +236,33 @@ export function WorkbenchRightPane({
 
   const isAssigned = Boolean(assignedSummary.driverName || assignedSummary.truckUnit || assignedSummary.trailerUnit);
   const driverLabel = assignedSummary.driverName ?? "Driver";
+  const financeSearchToken = loadSummary?.loadNumber ?? load?.loadNumber ?? "";
+  const financeReceivablesHref = financeSearchToken
+    ? `/finance?tab=receivables&search=${encodeURIComponent(financeSearchToken)}`
+    : "/finance?tab=receivables";
+  const financePreflightHref = `/loads/${encodeURIComponent(loadSummary?.id ?? load.id)}?tab=billing#billing-commercial`;
+  const financePayablesHref = `/finance?tab=payables&loadId=${encodeURIComponent(loadSummary?.id ?? load.id)}${
+    financeSearchToken ? `&search=${encodeURIComponent(financeSearchToken)}` : ""
+  }`;
+  const handoffStages = ["Delivered", "Docs review", "Ready", "Invoiced", "Collected", "Settled"] as const;
+  const latestInvoiceStatus = load?.invoices?.[0]?.status ?? null;
+  const settlementStatus = load?.settlementStatus ?? null;
+  let handoffStageIndex = 0;
+  if (load?.deliveredAt || ["DELIVERED", "POD_RECEIVED", "READY_TO_INVOICE", "INVOICED", "PAID"].includes(load?.status)) {
+    handoffStageIndex = 1;
+  }
+  if (load?.billingStatus === "READY" || load?.status === "READY_TO_INVOICE") {
+    handoffStageIndex = 2;
+  }
+  if (load?.status === "INVOICED" || load?.billingStatus === "INVOICED" || Boolean(latestInvoiceStatus)) {
+    handoffStageIndex = 3;
+  }
+  if (latestInvoiceStatus === "PAID" || latestInvoiceStatus === "SHORT_PAID" || load?.status === "PAID") {
+    handoffStageIndex = 4;
+  }
+  if (settlementStatus === "FINALIZED" || settlementStatus === "PAID") {
+    handoffStageIndex = 5;
+  }
   const driverUnavailableSelected =
     Boolean(assignment.form.driverId) && !assignment.availableDrivers.find((driver) => driver.id === assignment.form.driverId);
   const truckUnavailableSelected =
@@ -259,6 +309,11 @@ export function WorkbenchRightPane({
       scrollToRef(exceptionsAnchorRef);
       return;
     }
+    if (focusSection === "timeline") {
+      setActiveTab("timeline");
+      scrollToRef(timelineAnchorRef);
+      return;
+    }
     setActiveTab("stops");
     scrollToRef(stopsAnchorRef);
   }, [focusNonce, focusSection, load?.id]);
@@ -272,6 +327,9 @@ export function WorkbenchRightPane({
     setNoteType("OPERATIONAL");
     setNotePriority("NORMAL");
     setNoteStatus(null);
+    setDocActionLoadingId(null);
+    setDocActionStatus(null);
+    setDocActionError(null);
   }, [timelineLoadId]);
 
   const loadTimeline = useCallback(async () => {
@@ -287,6 +345,59 @@ export function WorkbenchRightPane({
       setTimelineLoading(false);
     }
   }, [timelineLoadId]);
+
+  const openTimelineComposer = useCallback(
+    (preset: { type: (typeof NOTE_TYPE_OPTIONS)[number]; priority: (typeof NOTE_PRIORITY_OPTIONS)[number]; prefix: string }) => {
+      setAssignmentExpanded(false);
+      setActiveTab("timeline");
+      setNoteType(preset.type);
+      setNotePriority(preset.priority);
+      setNoteBody((prev) => (prev.trim() ? prev : preset.prefix));
+      window.requestAnimationFrame(() => {
+        timelineAnchorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      });
+    },
+    []
+  );
+
+  const handleAssignAction = useCallback(() => {
+    setActiveTab("stops");
+    setAssignmentExpanded(true);
+    window.requestAnimationFrame(() => {
+      assignmentAnchorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }, []);
+
+  const handleStopActionsAction = useCallback(() => {
+    setActiveTab("stops");
+    setAssignmentExpanded(false);
+    onToggleStopActions();
+    window.requestAnimationFrame(() => {
+      stopsAnchorRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }, [onToggleStopActions]);
+
+  const copyShipmentLink = useCallback(async () => {
+    const shipmentId = loadSummary?.id ?? load?.id ?? null;
+    if (!shipmentId) {
+      setNoteStatus("No shipment selected.");
+      return;
+    }
+    const url =
+      typeof window !== "undefined"
+        ? `${window.location.origin}/shipments/${shipmentId}`
+        : `/shipments/${shipmentId}`;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        setNoteStatus("Shipment link copied.");
+      } else {
+        setNoteStatus(url);
+      }
+    } catch {
+      setNoteStatus(url);
+    }
+  }, [load?.id, loadSummary?.id]);
 
   useEffect(() => {
     if (activeTab !== "timeline") return;
@@ -315,7 +426,7 @@ export function WorkbenchRightPane({
 
   const hasPod = (load?.docs ?? []).some((doc: any) => doc.type === "POD");
   const actionChips = [
-    loadSummary?.riskFlags?.needsAssignment ? "Needs assignment" : null,
+    loadSummary?.status !== "DELIVERED" && loadSummary?.riskFlags?.needsAssignment ? "Needs assignment" : null,
     loadSummary?.riskFlags?.atRisk ? "At risk" : null,
     loadSummary?.riskFlags?.trackingOffInTransit || trackingState === "OFF" ? "Tracking off" : null,
     !hasPod ? "Missing POD" : null,
@@ -366,9 +477,78 @@ export function WorkbenchRightPane({
     }
   }, [loadTimeline, noteBody, notePriority, noteType, onRefresh, timelineLoadId]);
 
+  const verifyDocument = useCallback(
+    async (doc: any) => {
+      if (!doc?.id || !canVerifyDocuments) return;
+      const pagesInput = window.prompt("Pages in document", String(Math.max(1, Number(doc.pages ?? doc.pageCount ?? 1))));
+      if (pagesInput === null) return;
+      const pages = Number.parseInt(pagesInput, 10);
+      if (!Number.isFinite(pages) || pages < 1) {
+        setDocActionError("Pages must be a whole number greater than 0.");
+        return;
+      }
+      const requireSignature = window.confirm("Confirm signature is present?");
+      const requirePrintedName = window.confirm("Confirm printed name is present?");
+      const requireDeliveryDate = window.confirm("Confirm delivery date is present?");
+      setDocActionLoadingId(doc.id);
+      setDocActionError(null);
+      setDocActionStatus(null);
+      try {
+        await apiFetch(`/docs/${doc.id}/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requireSignature,
+            requirePrintedName,
+            requireDeliveryDate,
+            pages,
+          }),
+        });
+        setDocActionStatus(`${doc.type ?? "Document"} verified.`);
+        onRefresh();
+        if (activeTab === "timeline" || activeTab === "documents") {
+          await loadTimeline();
+        }
+      } catch (error) {
+        setDocActionError((error as Error).message);
+      } finally {
+        setDocActionLoadingId(null);
+      }
+    },
+    [activeTab, canVerifyDocuments, loadTimeline, onRefresh]
+  );
+
+  const rejectDocument = useCallback(
+    async (doc: any) => {
+      if (!doc?.id || !canVerifyDocuments) return;
+      const reason = window.prompt("Reject reason", doc.rejectReason ?? "Document invalid");
+      if (!reason || reason.trim().length < 2) return;
+      setDocActionLoadingId(doc.id);
+      setDocActionError(null);
+      setDocActionStatus(null);
+      try {
+        await apiFetch(`/docs/${doc.id}/reject`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rejectReason: reason.trim() }),
+        });
+        setDocActionStatus(`${doc.type ?? "Document"} rejected.`);
+        onRefresh();
+        if (activeTab === "timeline" || activeTab === "documents") {
+          await loadTimeline();
+        }
+      } catch (error) {
+        setDocActionError((error as Error).message);
+      } finally {
+        setDocActionLoadingId(null);
+      }
+    },
+    [activeTab, canVerifyDocuments, loadTimeline, onRefresh]
+  );
+
   return (
     <div className="relative">
-      <div className="sticky top-0 z-10 space-y-3 border-b border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)]/95 px-4 py-4 backdrop-blur">
+      <div className="sticky top-0 z-10 space-y-3 border-b border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)]/95 px-4 py-3 backdrop-blur">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">
@@ -383,72 +563,150 @@ export function WorkbenchRightPane({
                   className="bg-[color:var(--color-bg-muted)]/70"
                 />
               ) : null}
-          </div>
-          <div className="text-sm text-[color:var(--color-text-muted)]">{laneLabel}</div>
-          <div className="text-xs text-[color:var(--color-text-muted)]">{loadSummary?.customerName ?? "Customer"}</div>
-          {teamAssignment?.enabled ? (
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Team</div>
-              <Select
-                value={teamAssignment.value}
-                onChange={(event) => teamAssignment.onChange(event.target.value)}
-                className="w-auto min-w-[160px]"
-                disabled={teamAssignment.loading}
-              >
-                <option value="">{teamAssignment.loading ? "Loading..." : "Assign team"}</option>
-                {teamAssignment.teams.map((team) => (
-                  <option key={team.id} value={team.id}>
-                    {team.name}
-                  </option>
-                ))}
-              </Select>
-              {teamAssignment.error ? (
-                <div className="text-xs text-[color:var(--color-danger)]">{teamAssignment.error}</div>
-              ) : null}
             </div>
-          ) : null}
-        </div>
+            <div className="text-sm text-[color:var(--color-text-muted)]">{laneLabel}</div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">{loadSummary?.customerName ?? "Customer"}</div>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => setAssignmentExpanded(true)}
+              onClick={handleAssignAction}
               disabled={readOnly}
               title={readOnlyHint}
             >
               {primaryTrip ? "Assign trip" : "Assign"}
             </Button>
-            <Button size="sm" variant="secondary" onClick={onOpenLegDrawer} disabled={readOnly} title={readOnlyHint}>
-              Add leg
-            </Button>
             {stops.length ? (
-              <Button size="sm" variant="secondary" onClick={onToggleStopActions} disabled={readOnly} title={readOnlyHint}>
+              <Button size="sm" variant="secondary" onClick={handleStopActionsAction} disabled={readOnly} title={readOnlyHint}>
                 {showStopActions ? "Hide stop actions" : "Update stop"}
               </Button>
             ) : null}
-            <Link href={`/loads/${loadSummary?.id ?? load.id}`}>
-              <Button size="sm">View full load</Button>
+            <Button size="sm" variant="secondary" onClick={onOpenLegDrawer} disabled={readOnly} title={readOnlyHint}>
+              Add leg
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() =>
+                openTimelineComposer({
+                  type: "CUSTOMER_VISIBLE",
+                  priority: "NORMAL",
+                  prefix: "Dispatch update sent to driver/customer: ",
+                })
+              }
+            >
+              Message
+            </Button>
+            <Link href={`/shipments/${loadSummary?.id ?? load.id}`}>
+              <Button size="sm">View shipment</Button>
             </Link>
-            {primaryTrip?.id ? (
-              <Link href={`/dispatch?tab=trips&tripId=${primaryTrip.id}`}>
-                <Button size="sm" variant="secondary">
-                  Open trip
-                </Button>
-              </Link>
-            ) : null}
-            {yardOsLaunch ? (
-              <Button size="sm" variant="secondary" onClick={yardOsLaunch.onOpen} title={yardOsLaunch.href}>
-                Open in Yard OS
-              </Button>
-            ) : null}
             <Button size="sm" variant="ghost" onClick={onClose}>
               Close
             </Button>
           </div>
         </div>
+      </div>
+
+      <div className="px-4 py-4">
+        {teamAssignment?.enabled ? (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Team</div>
+            <Select
+              value={teamAssignment.value}
+              onChange={(event) => teamAssignment.onChange(event.target.value)}
+              className="w-auto min-w-[180px]"
+              disabled={teamAssignment.loading}
+            >
+              <option value="">{teamAssignment.loading ? "Loading..." : "Assign team"}</option>
+              {teamAssignment.teams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </Select>
+            {teamAssignment.error ? (
+              <div className="text-xs text-[color:var(--color-danger)]">{teamAssignment.error}</div>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() =>
+              openTimelineComposer({
+                type: "INTERNAL",
+                priority: "ALERT",
+                prefix: "Escalation: ",
+              })
+            }
+          >
+            Escalate
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => void copyShipmentLink()}>
+            Copy shipment link
+          </Button>
+          {primaryTrip?.id ? (
+            <Link href={`/trips?tripId=${primaryTrip.id}`}>
+              <Button size="sm" variant="secondary">
+                Open trip
+              </Button>
+            </Link>
+          ) : null}
+          {canAccessFinance ? (
+            <Link href={financeReceivablesHref}>
+              <Button size="sm" variant="secondary">
+                Open receivables
+              </Button>
+            </Link>
+          ) : null}
+          {canAccessFinance ? (
+            <Link href={financePreflightHref}>
+              <Button size="sm" variant="secondary">
+                Open billing preflight
+              </Button>
+            </Link>
+          ) : null}
+          {canBillActions ? (
+            <Link href={financePayablesHref}>
+              <Button size="sm" variant="secondary">
+                Open payables context
+              </Button>
+            </Link>
+          ) : null}
+          {primaryTrip?.id && onOptimizeTrip ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void onOptimizeTrip()}
+              disabled={readOnly || Boolean(optimizingTrip)}
+              title={readOnlyHint}
+            >
+              {optimizingTrip ? "Optimizing..." : "Optimize trip"}
+            </Button>
+          ) : null}
+          {onCreateDispatchPack ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void onCreateDispatchPack()}
+              disabled={readOnly || Boolean(creatingDispatchPack)}
+              title={readOnlyHint}
+            >
+              {creatingDispatchPack ? "Creating pack..." : "Dispatch pack"}
+            </Button>
+          ) : null}
+          {yardOsLaunch ? (
+            <Button size="sm" variant="secondary" onClick={yardOsLaunch.onOpen} title={yardOsLaunch.href}>
+              Open in Yard OS
+            </Button>
+          ) : null}
+        </div>
 
         {actionChips.length ? (
-          <div className="flex flex-wrap gap-2">
+          <div className="mb-3 flex flex-wrap gap-2">
             {actionChips.map((chip) => (
               <Badge key={chip} className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">
                 {chip}
@@ -457,7 +715,24 @@ export function WorkbenchRightPane({
           </div>
         ) : null}
 
-        <div ref={assignmentAnchorRef} className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
+        <div className="mb-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+          Execution authority: <span className="font-medium text-ink">Trip/Dispatch</span> · Commercial authority:{" "}
+          <span className="font-medium text-ink">Load/Finance</span>
+        </div>
+        <div className="mb-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2">
+          <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Dispatch to finance handoff</div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {handoffStages.map((stage, index) => (
+              <StatusChip
+                key={`${loadSummary?.id ?? load?.id ?? "load"}-handoff-${stage}`}
+                tone={index <= handoffStageIndex ? "success" : "neutral"}
+                label={stage}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div ref={assignmentAnchorRef} className="scroll-mt-24 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Trip assignment</div>
@@ -656,9 +931,7 @@ export function WorkbenchRightPane({
             </div>
           ) : null}
         </div>
-      </div>
 
-      <div className="px-4 py-4">
         <SegmentedControl
           value={activeTab}
           options={[
@@ -763,6 +1036,13 @@ export function WorkbenchRightPane({
         {activeTab === "documents" ? (
           <div ref={docsAnchorRef} className="mt-4 space-y-3">
             <SectionHeader title="Documents" subtitle="POD and RateCon status" />
+            {canUploadDocuments ? (
+              <div className="flex justify-end">
+                <Button size="sm" variant="secondary" onClick={onOpenDocUpload}>
+                  Upload document
+                </Button>
+              </div>
+            ) : null}
             <div className="grid gap-2">
               {(load?.docs ?? []).map((doc: any) => (
                 <Card key={doc.id} className="flex items-center justify-between gap-3">
@@ -770,14 +1050,38 @@ export function WorkbenchRightPane({
                     <div className="text-sm font-semibold text-ink">{doc.type}</div>
                     <div className="text-xs text-[color:var(--color-text-muted)]">{formatDocStatusLabel(doc.status)}</div>
                   </div>
-                  <Link href={`/loads/${loadSummary?.id ?? load.id}?tab=documents`}>
-                    <Button size="sm" variant="secondary">View</Button>
-                  </Link>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {canVerifyDocuments && doc.status !== "VERIFIED" ? (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={docActionLoadingId === doc.id}
+                        onClick={() => void verifyDocument(doc)}
+                      >
+                        {docActionLoadingId === doc.id ? "Verifying..." : "Verify"}
+                      </Button>
+                    ) : null}
+                    {canVerifyDocuments && doc.status !== "REJECTED" ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={docActionLoadingId === doc.id}
+                        onClick={() => void rejectDocument(doc)}
+                      >
+                        Reject
+                      </Button>
+                    ) : null}
+                    <Link href={`/shipments/${loadSummary?.id ?? load.id}?focus=documents`}>
+                      <Button size="sm" variant="secondary">View</Button>
+                    </Link>
+                  </div>
                 </Card>
               ))}
               {(load?.docs ?? []).length === 0 ? <EmptyState title="No documents yet." /> : null}
             </div>
-            <Link href={`/loads/${loadSummary?.id ?? load.id}?tab=documents`}>
+            {docActionStatus ? <div className="text-xs text-[color:var(--color-success)]">{docActionStatus}</div> : null}
+            {docActionError ? <div className="text-xs text-[color:var(--color-danger)]">{docActionError}</div> : null}
+            <Link href={`/shipments/${loadSummary?.id ?? load.id}?focus=documents`}>
               <Button variant="secondary">Open full document view</Button>
             </Link>
           </div>

@@ -17,6 +17,7 @@ import { ErrorBanner } from "@/components/ui/error-banner";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Textarea } from "@/components/ui/textarea";
 import { apiFetch, getApiBase } from "@/lib/api";
+import { formatDate as formatDate24, formatDateTime as formatDateTime24 } from "@/lib/date-time";
 
 const DOC_TYPES = [
   { value: "INSURANCE", label: "Insurance" },
@@ -86,17 +87,11 @@ type Filters = {
 };
 
 const formatDate = (value?: string | null) => {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleDateString();
+  return formatDate24(value, "—");
 };
 
 const formatDateTime = (value?: string | null) => {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString();
+  return formatDateTime24(value, "—");
 };
 
 const formatStatusLabel = (value: string) => {

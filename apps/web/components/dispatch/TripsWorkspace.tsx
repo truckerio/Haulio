@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { NoAccess } from "@/components/rbac/no-access";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -14,9 +15,17 @@ import { Select } from "@/components/ui/select";
 import { StatusChip } from "@/components/ui/status-chip";
 import {
   TripSpreadsheetGrid,
+  TRIP_FROZEN_COLUMNS,
+  TRIP_GRID_COLUMNS,
+  TRIP_OPTIONAL_COLUMNS,
+  type TripGridColumnKey,
   type TripGridRow,
   type TripGridSortMode,
 } from "@/components/dispatch/TripSpreadsheetGrid";
+import {
+  TRIPS_WORKSPACE_COLUMN_CATALOG,
+  filterWorkspaceColumnCatalog,
+} from "@/components/dispatch/workspace-column-registry";
 import { apiFetch } from "@/lib/api";
 import { getRoleCapabilities } from "@/lib/capabilities";
 import { toneFromSemantic } from "@/lib/status-semantics";
@@ -85,6 +94,22 @@ type AssetRecord = { id: string; name?: string | null; unit?: string | null };
 const STATUS_OPTIONS: TripStatus[] = ["PLANNED", "ASSIGNED", "IN_TRANSIT", "ARRIVED", "COMPLETE", "CANCELLED"];
 const MOVEMENT_OPTIONS: MovementMode[] = ["FTL", "LTL", "POOL_DISTRIBUTION"];
 
+function parseTripStatusParam(value: string | null) {
+  if (!value) return "";
+  return STATUS_OPTIONS.includes(value as TripStatus) ? value : "";
+}
+
+function parseMovementModeParam(value: string | null) {
+  if (!value) return "";
+  return MOVEMENT_OPTIONS.includes(value as MovementMode) ? value : "";
+}
+
+function parsePrimaryIdentifierParam(value: string | null): TripPrimaryIdentifier | null {
+  if (value === "trip") return "trip";
+  if (value === "load") return "load";
+  return null;
+}
+
 const statusTone = (status: TripStatus) => {
   if (status === "COMPLETE" || status === "ARRIVED") return toneFromSemantic("complete");
   if (status === "IN_TRANSIT") return toneFromSemantic("info");
@@ -113,20 +138,189 @@ function countActiveTripFilters(params: { search: string; status: string; moveme
   return count;
 }
 
-export function TripsWorkspace() {
+type TripPrimaryIdentifier = "trip" | "load";
+const DEFAULT_TRIP_COLUMN_ORDER: TripGridColumnKey[] = TRIP_GRID_COLUMNS.map((column) => column.key);
+const DEFAULT_TRIP_COLUMN_VISIBILITY: Partial<Record<TripGridColumnKey, boolean>> =
+  TRIP_OPTIONAL_COLUMNS.reduce((acc, key) => ({ ...acc, [key]: true }), {});
+type TripsWorkspacePreferences = {
+  primaryIdentifier: TripPrimaryIdentifier;
+  columnVisibility: Partial<Record<TripGridColumnKey, boolean>>;
+  columnOrder: TripGridColumnKey[];
+};
+
+function normalizeTripColumnOrder(order?: TripGridColumnKey[]) {
+  const allowed = new Set<TripGridColumnKey>(TRIP_GRID_COLUMNS.map((column) => column.key));
+  const seen = new Set<TripGridColumnKey>();
+  const normalized: TripGridColumnKey[] = [];
+  for (const key of order ?? []) {
+    if (!allowed.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(key);
+  }
+  for (const column of TRIP_GRID_COLUMNS) {
+    if (seen.has(column.key)) continue;
+    seen.add(column.key);
+    normalized.push(column.key);
+  }
+  return normalized;
+}
+
+function normalizeTripColumnVisibility(
+  visibility?: Partial<Record<TripGridColumnKey, boolean>>
+): Partial<Record<TripGridColumnKey, boolean>> {
+  const allowed = new Set<TripGridColumnKey>(TRIP_GRID_COLUMNS.map((column) => column.key));
+  const required = new Set<TripGridColumnKey>(TRIP_FROZEN_COLUMNS);
+  const next: Partial<Record<TripGridColumnKey, boolean>> = {
+    ...DEFAULT_TRIP_COLUMN_VISIBILITY,
+    ...(visibility ?? {}),
+  };
+  for (const key of Object.keys(next) as TripGridColumnKey[]) {
+    if (!allowed.has(key)) {
+      delete next[key];
+      continue;
+    }
+    if (required.has(key)) {
+      next[key] = true;
+      continue;
+    }
+    next[key] = next[key] !== false;
+  }
+  for (const key of required) {
+    next[key] = true;
+  }
+  return next;
+}
+
+function buildTripsRoleDefaults(canonicalRole: string | null): TripsWorkspacePreferences {
+  const fullVisibility = normalizeTripColumnVisibility(DEFAULT_TRIP_COLUMN_VISIBILITY);
+  const makeVisibility = (visibleOptionalColumns: TripGridColumnKey[]) => {
+    const next: Partial<Record<TripGridColumnKey, boolean>> = {};
+    for (const key of TRIP_OPTIONAL_COLUMNS) {
+      next[key] = visibleOptionalColumns.includes(key);
+    }
+    return normalizeTripColumnVisibility(next);
+  };
+  if (canonicalRole === "DISPATCHER") {
+    return {
+      primaryIdentifier: "trip",
+      columnVisibility: makeVisibility([
+        "movementMode",
+        "loadsCount",
+        "origin",
+        "destination",
+        "plannedDepartureAt",
+        "plannedArrivalAt",
+        "assignment",
+        "updatedAt",
+      ]),
+      columnOrder: normalizeTripColumnOrder([
+        "select",
+        "tripNumber",
+        "status",
+        "loadsCount",
+        "movementMode",
+        "origin",
+        "destination",
+        "plannedDepartureAt",
+        "plannedArrivalAt",
+        "assignment",
+        "updatedAt",
+        "cargo",
+      ]),
+    };
+  }
+  if (canonicalRole === "BILLING") {
+    return {
+      primaryIdentifier: "trip",
+      columnVisibility: makeVisibility([
+        "movementMode",
+        "loadsCount",
+        "origin",
+        "destination",
+        "plannedArrivalAt",
+        "updatedAt",
+      ]),
+      columnOrder: normalizeTripColumnOrder([
+        "select",
+        "tripNumber",
+        "status",
+        "loadsCount",
+        "origin",
+        "destination",
+        "plannedArrivalAt",
+        "movementMode",
+        "updatedAt",
+        "plannedDepartureAt",
+        "assignment",
+        "cargo",
+      ]),
+    };
+  }
+  if (canonicalRole === "SAFETY" || canonicalRole === "SUPPORT") {
+    return {
+      primaryIdentifier: "trip",
+      columnVisibility: makeVisibility([
+        "movementMode",
+        "loadsCount",
+        "origin",
+        "destination",
+        "plannedDepartureAt",
+        "plannedArrivalAt",
+        "assignment",
+        "updatedAt",
+      ]),
+      columnOrder: normalizeTripColumnOrder([
+        "select",
+        "tripNumber",
+        "status",
+        "movementMode",
+        "origin",
+        "destination",
+        "plannedDepartureAt",
+        "plannedArrivalAt",
+        "assignment",
+        "loadsCount",
+        "updatedAt",
+        "cargo",
+      ]),
+    };
+  }
+  if (canonicalRole === "HEAD_DISPATCHER" || canonicalRole === "ADMIN") {
+    return {
+      primaryIdentifier: "trip",
+      columnVisibility: fullVisibility,
+      columnOrder: normalizeTripColumnOrder(DEFAULT_TRIP_COLUMN_ORDER),
+    };
+  }
+  return {
+    primaryIdentifier: "trip",
+    columnVisibility: fullVisibility,
+    columnOrder: normalizeTripColumnOrder(DEFAULT_TRIP_COLUMN_ORDER),
+  };
+}
+
+type TripsWorkspaceProps = {
+  inspectorVisible?: boolean;
+};
+
+export function TripsWorkspace({ inspectorVisible = true }: TripsWorkspaceProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
   const tripIdParam = searchParams.get("tripId");
+  const urlSearch = searchParams.get("search") ?? "";
+  const urlStatus = parseTripStatusParam(searchParams.get("status"));
+  const urlMovementMode = parseMovementModeParam(searchParams.get("movementMode"));
+  const urlPrimaryIdentifier = parsePrimaryIdentifierParam(searchParams.get("primary"));
   const [hasAccess, setHasAccess] = useState<boolean | null>(null);
   const [roleCapabilities, setRoleCapabilities] = useState(() => getRoleCapabilities(undefined));
   const [trips, setTrips] = useState<TripRecord[]>([]);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(tripIdParam);
   const [selectedTrip, setSelectedTrip] = useState<TripRecord | null>(null);
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
-  const [movementMode, setMovementMode] = useState("");
+  const [search, setSearch] = useState(urlSearch);
+  const [status, setStatus] = useState(urlStatus);
+  const [movementMode, setMovementMode] = useState(urlMovementMode);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<AssetRecord[]>([]);
@@ -139,7 +333,17 @@ export function TripsWorkspace() {
   const [formError, setFormError] = useState<string | null>(null);
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [showCreatePanel, setShowCreatePanel] = useState(false);
+  const [showGridSetup, setShowGridSetup] = useState(false);
   const [sortMode, setSortMode] = useState<TripGridSortMode>("newest");
+  const [primaryIdentifier, setPrimaryIdentifier] = useState<TripPrimaryIdentifier>(urlPrimaryIdentifier ?? "trip");
+  const [tripColumnSearch, setTripColumnSearch] = useState("");
+  const [columnVisibility, setColumnVisibility] =
+    useState<Partial<Record<TripGridColumnKey, boolean>>>(normalizeTripColumnVisibility(DEFAULT_TRIP_COLUMN_VISIBILITY));
+  const [columnOrder, setColumnOrder] = useState<TripGridColumnKey[]>(DEFAULT_TRIP_COLUMN_ORDER);
+  const [draggingTripColumn, setDraggingTripColumn] = useState<TripGridColumnKey | null>(null);
+  const [workspacePrefsHydrated, setWorkspacePrefsHydrated] = useState(false);
+  const [workspacePrefsSaving, setWorkspacePrefsSaving] = useState(false);
+  const [workspacePrefsSaveError, setWorkspacePrefsSaveError] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("assignment");
   const [selectedGridRows, setSelectedGridRows] = useState<Set<string>>(new Set());
   const [newTripLoadNumbers, setNewTripLoadNumbers] = useState("");
@@ -150,6 +354,7 @@ export function TripsWorkspace() {
   const [cargoPlanState, setCargoPlanState] = useState<CargoPlanPayload | null>(null);
   const [syncingCargoPlan, setSyncingCargoPlan] = useState(false);
   const [splittingLoadId, setSplittingLoadId] = useState<string | null>(null);
+  const lastSavedPrefsRef = useRef<string>("");
   const canMutateTripExecution = roleCapabilities.canDispatchExecution;
   const isReadHeavyOpsRole =
     roleCapabilities.canonicalRole === "SAFETY" || roleCapabilities.canonicalRole === "SUPPORT";
@@ -172,6 +377,75 @@ export function TripsWorkspace() {
     () => countActiveTripFilters({ search, status, movementMode }),
     [search, status, movementMode]
   );
+  const tripColumnLabelByKey = useMemo(
+    () => new Map<TripGridColumnKey, string>(TRIP_GRID_COLUMNS.map((column) => [column.key, column.label])),
+    []
+  );
+  const tripColumnCatalog = useMemo(() => TRIPS_WORKSPACE_COLUMN_CATALOG, []);
+  const filteredTripColumnCatalog = useMemo(() => {
+    return filterWorkspaceColumnCatalog(tripColumnCatalog, tripColumnLabelByKey, tripColumnSearch);
+  }, [tripColumnCatalog, tripColumnLabelByKey, tripColumnSearch]);
+  const normalizedColumnOrder = useMemo(() => normalizeTripColumnOrder(columnOrder), [columnOrder]);
+  const movableColumnOrder = useMemo(
+    () => normalizedColumnOrder.filter((column) => !TRIP_FROZEN_COLUMNS.includes(column)),
+    [normalizedColumnOrder]
+  );
+  const canMoveTripColumn = useCallback(
+    (column: TripGridColumnKey, direction: -1 | 1) => {
+      const index = movableColumnOrder.indexOf(column);
+      const nextIndex = index + direction;
+      return index >= 0 && nextIndex >= 0 && nextIndex < movableColumnOrder.length;
+    },
+    [movableColumnOrder]
+  );
+  const moveTripColumn = useCallback((column: TripGridColumnKey, direction: -1 | 1) => {
+    setColumnOrder((prev) => {
+      const base = normalizeTripColumnOrder(prev);
+      const movable = base.filter((key) => !TRIP_FROZEN_COLUMNS.includes(key));
+      const index = movable.indexOf(column);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= movable.length) return prev;
+      const nextMovable = [...movable];
+      const [moved] = nextMovable.splice(index, 1);
+      nextMovable.splice(nextIndex, 0, moved);
+      let pointer = 0;
+      return base.map((key) => {
+        if (TRIP_FROZEN_COLUMNS.includes(key)) return key;
+        const replacement = nextMovable[pointer];
+        pointer += 1;
+        return replacement;
+      });
+    });
+  }, []);
+  const moveTripColumnToTarget = useCallback((column: TripGridColumnKey, target: TripGridColumnKey) => {
+    if (column === target) return;
+    setColumnOrder((prev) => {
+      const base = normalizeTripColumnOrder(prev);
+      const movable = base.filter((key) => !TRIP_FROZEN_COLUMNS.includes(key));
+      const fromIndex = movable.indexOf(column);
+      const targetIndex = movable.indexOf(target);
+      if (fromIndex < 0 || targetIndex < 0) return prev;
+      const nextMovable = [...movable];
+      const [moved] = nextMovable.splice(fromIndex, 1);
+      const insertIndex = nextMovable.indexOf(target);
+      if (insertIndex < 0) return prev;
+      nextMovable.splice(insertIndex, 0, moved);
+      let pointer = 0;
+      return base.map((key) => {
+        if (TRIP_FROZEN_COLUMNS.includes(key)) return key;
+        const replacement = nextMovable[pointer];
+        pointer += 1;
+        return replacement;
+      });
+    });
+  }, []);
+  const applyRoleDefaults = useCallback(() => {
+    const defaults = buildTripsRoleDefaults(roleCapabilities.canonicalRole);
+    setPrimaryIdentifier(defaults.primaryIdentifier);
+    setColumnVisibility(defaults.columnVisibility);
+    setColumnOrder(defaults.columnOrder);
+    setWorkspacePrefsSaveError(null);
+  }, [roleCapabilities.canonicalRole]);
   const sortedTrips = useMemo(() => {
     const list = [...trips];
     if (sortMode === "loads") {
@@ -199,29 +473,33 @@ export function TripsWorkspace() {
   }, [trips, sortMode]);
   const spreadsheetRows = useMemo<TripGridRow[]>(
     () =>
-      sortedTrips.map((trip) => ({
-        id: trip.id,
-        tripNumber: trip.tripNumber,
-        status: trip.status,
-        movementMode: trip.movementMode,
-        loadsCount: trip.loads.length,
-        origin: trip.origin ?? trip.sourceManifest?.origin ?? "-",
-        destination: trip.destination ?? trip.sourceManifest?.destination ?? "-",
-        plannedDepartureAt: trip.plannedDepartureAt ?? null,
-        plannedArrivalAt: trip.plannedArrivalAt ?? null,
-        assignment: {
-          driverName: trip.driver?.name ?? "No driver",
-          truckUnit: `Truck ${trip.truck?.unit ?? "-"}`,
-          trailerUnit: `Trailer ${trip.trailer?.unit ?? "-"}`,
-        },
-        cargo:
-          isConsolidationMode(trip.movementMode)
-            ? trip.sourceManifest
-              ? "LINKED"
-              : "UNLINKED"
-            : "N/A",
-        updatedAt: trip.createdAt ?? null,
-      })),
+      sortedTrips.map((trip) => {
+        const orderedLoads = [...trip.loads].sort((left, right) => left.sequence - right.sequence);
+        return {
+          id: trip.id,
+          tripNumber: trip.tripNumber,
+          primaryLoadNumber: orderedLoads[0]?.load?.loadNumber ?? null,
+          status: trip.status,
+          movementMode: trip.movementMode,
+          loadsCount: orderedLoads.length,
+          origin: trip.origin ?? trip.sourceManifest?.origin ?? "-",
+          destination: trip.destination ?? trip.sourceManifest?.destination ?? "-",
+          plannedDepartureAt: trip.plannedDepartureAt ?? null,
+          plannedArrivalAt: trip.plannedArrivalAt ?? null,
+          assignment: {
+            driverName: trip.driver?.name ?? "No driver",
+            truckUnit: `Truck ${trip.truck?.unit ?? "-"}`,
+            trailerUnit: `Trailer ${trip.trailer?.unit ?? "-"}`,
+          },
+          cargo:
+            isConsolidationMode(trip.movementMode)
+              ? trip.sourceManifest
+                ? "LINKED"
+                : "UNLINKED"
+              : "N/A",
+          updatedAt: trip.createdAt ?? null,
+        };
+      }),
     [sortedTrips]
   );
 
@@ -238,6 +516,12 @@ export function TripsWorkspace() {
     },
     [pathname, router, searchParams]
   );
+
+  const clearTripFilters = useCallback(() => {
+    setSearch("");
+    setStatus("");
+    setMovementMode("");
+  }, []);
 
   const loadTrips = useCallback(async () => {
     setLoading(true);
@@ -298,6 +582,100 @@ export function TripsWorkspace() {
   }, [canMutateTripExecution, showCreatePanel]);
 
   useEffect(() => {
+    const params = new URLSearchParams(searchParams.toString());
+    let changed = false;
+    const nextSearch = search.trim();
+    if (nextSearch) {
+      if (params.get("search") !== nextSearch) {
+        params.set("search", nextSearch);
+        changed = true;
+      }
+    } else if (params.has("search")) {
+      params.delete("search");
+      changed = true;
+    }
+    if (status) {
+      if (params.get("status") !== status) {
+        params.set("status", status);
+        changed = true;
+      }
+    } else if (params.has("status")) {
+      params.delete("status");
+      changed = true;
+    }
+    if (movementMode) {
+      if (params.get("movementMode") !== movementMode) {
+        params.set("movementMode", movementMode);
+        changed = true;
+      }
+    } else if (params.has("movementMode")) {
+      params.delete("movementMode");
+      changed = true;
+    }
+    if (primaryIdentifier === "load") {
+      if (params.get("primary") !== "load") {
+        params.set("primary", "load");
+        changed = true;
+      }
+    } else if (params.has("primary")) {
+      params.delete("primary");
+      changed = true;
+    }
+    if (!changed) return;
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname);
+  }, [movementMode, pathname, primaryIdentifier, router, search, searchParams, status]);
+
+  useEffect(() => {
+    if (!hasAccess) return;
+    let active = true;
+    apiFetch<{
+      preferences?: {
+        primaryIdentifier?: "trip" | "load";
+        columnVisibility?: Partial<Record<TripGridColumnKey, boolean>>;
+        columnOrder?: TripGridColumnKey[];
+      } | null;
+      updatedAt?: string | null;
+    }>("/dispatch/trips-workspace")
+      .then((payload) => {
+        if (!active) return;
+        const incoming = payload.preferences ?? null;
+        const roleDefaults = buildTripsRoleDefaults(roleCapabilities.canonicalRole);
+        const useRoleDefaults = !payload.updatedAt;
+        const nextPrimary: TripPrimaryIdentifier = urlPrimaryIdentifier
+          ? urlPrimaryIdentifier
+          : useRoleDefaults
+            ? roleDefaults.primaryIdentifier
+            : incoming?.primaryIdentifier === "load"
+              ? "load"
+              : "trip";
+        const nextVisibility = normalizeTripColumnVisibility(
+          useRoleDefaults ? roleDefaults.columnVisibility : incoming?.columnVisibility ?? DEFAULT_TRIP_COLUMN_VISIBILITY
+        );
+        const nextOrder = normalizeTripColumnOrder(
+          useRoleDefaults ? roleDefaults.columnOrder : incoming?.columnOrder ?? DEFAULT_TRIP_COLUMN_ORDER
+        );
+        setPrimaryIdentifier(nextPrimary);
+        setColumnVisibility(nextVisibility);
+        setColumnOrder(nextOrder);
+        lastSavedPrefsRef.current = JSON.stringify({
+          primaryIdentifier: nextPrimary,
+          columnVisibility: nextVisibility,
+          columnOrder: nextOrder,
+        });
+        setWorkspacePrefsSaveError(null);
+        setWorkspacePrefsHydrated(true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setWorkspacePrefsHydrated(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [hasAccess, roleCapabilities.canonicalRole, urlPrimaryIdentifier]);
+
+  useEffect(() => {
     if (!hasAccess) return;
     loadTrips();
   }, [hasAccess, loadTrips]);
@@ -312,6 +690,42 @@ export function TripsWorkspace() {
       setCargoPlanState(null);
     }
   }, [tripIdParam, selectedTripId]);
+
+  useEffect(() => {
+    if (!urlPrimaryIdentifier) return;
+    setPrimaryIdentifier(urlPrimaryIdentifier);
+  }, [urlPrimaryIdentifier]);
+
+  useEffect(() => {
+    if (!hasAccess || !workspacePrefsHydrated) return;
+    const payload = {
+      primaryIdentifier,
+      columnVisibility: normalizeTripColumnVisibility(columnVisibility),
+      columnOrder: normalizeTripColumnOrder(columnOrder),
+    };
+    const snapshot = JSON.stringify(payload);
+    if (snapshot === lastSavedPrefsRef.current) return;
+    const timer = window.setTimeout(() => {
+      setWorkspacePrefsSaving(true);
+      setWorkspacePrefsSaveError(null);
+      apiFetch("/dispatch/trips-workspace", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preferences: payload }),
+      })
+        .then(() => {
+          lastSavedPrefsRef.current = snapshot;
+          setWorkspacePrefsSaving(false);
+        })
+        .catch((err) => {
+          setWorkspacePrefsSaving(false);
+          setWorkspacePrefsSaveError((err as Error).message || "Unable to save trips workspace preferences.");
+        });
+    }, 500);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [columnOrder, columnVisibility, hasAccess, primaryIdentifier, workspacePrefsHydrated]);
 
   useEffect(() => {
     if (!selectedTripId || !hasAccess) return;
@@ -382,20 +796,40 @@ export function TripsWorkspace() {
 
   const saveAssignment = async () => {
     if (!selectedTripId) return;
+    const shipmentId = selectedTrip?.loads?.[0]?.load?.id ?? null;
+    const isLtlShipmentCommand = selectedTrip?.movementMode === "LTL";
     setSavingAssign(true);
     setFormError(null);
     setStatusNote(null);
     try {
-      await apiFetch(`/trips/${selectedTripId}/assign`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          driverId: assignForm.driverId || null,
-          truckId: assignForm.truckId || null,
-          trailerId: assignForm.trailerId || null,
-          status: statusForm,
-        }),
-      });
+      if (isLtlShipmentCommand) {
+        if (!shipmentId) {
+          setFormError("This LTL trip has no loads attached, so shipment execution cannot be updated yet.");
+          return;
+        }
+        await apiFetch(`/shipments/${shipmentId}/execution`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            driverId: assignForm.driverId || null,
+            truckId: assignForm.truckId || null,
+            trailerId: assignForm.trailerId || null,
+            status: statusForm,
+            reasonCode: "TRIP_ASSIGNMENT_EDIT",
+          }),
+        });
+      } else {
+        await apiFetch(`/trips/${selectedTripId}/assign`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            driverId: assignForm.driverId || null,
+            truckId: assignForm.truckId || null,
+            trailerId: assignForm.trailerId || null,
+            status: statusForm,
+          }),
+        });
+      }
       await loadTrips();
       await loadTripDetail(selectedTripId);
       await loadCargoPlan(selectedTripId);
@@ -408,15 +842,34 @@ export function TripsWorkspace() {
 
   const saveStatus = async () => {
     if (!selectedTripId) return;
+    const shipmentId = selectedTrip?.loads?.[0]?.load?.id ?? null;
+    const isLtlShipmentCommand = selectedTrip?.movementMode === "LTL";
     setSavingStatus(true);
     setFormError(null);
     setStatusNote(null);
     try {
-      await apiFetch(`/trips/${selectedTripId}/status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: statusForm }),
-      });
+      if (isLtlShipmentCommand) {
+        if (!shipmentId) {
+          setFormError("This LTL trip has no loads attached, so shipment execution cannot be updated yet.");
+          return;
+        }
+        await apiFetch(`/shipments/${shipmentId}/execution`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: statusForm,
+            reasonCode: "TRIP_STATUS_EDIT",
+          }),
+        });
+      } else {
+        await apiFetch(`/trips/${selectedTripId}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: statusForm,
+          }),
+        });
+      }
       await loadTrips();
       await loadTripDetail(selectedTripId);
       await loadCargoPlan(selectedTripId);
@@ -516,36 +969,47 @@ export function TripsWorkspace() {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold text-ink">Trips workspace</div>
-          <div className="text-sm text-[color:var(--color-text-muted)]">
-            {isReadHeavyOpsRole
-              ? "Read-only trip visibility for investigation and escalation."
-              : "Plan, assign, and execute trips from one place."}
+      <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[color:var(--color-text-muted)]">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-ink">Trips workspace</span>
+            <span>
+              {isReadHeavyOpsRole
+                ? "Read-only trip visibility for investigation and escalation."
+                : "Plan, assign, and execute trips from one place."}
+            </span>
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button variant="secondary" onClick={loadTrips} disabled={loading}>
-            {loading ? "Refreshing..." : "Refresh"}
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => {
-              setSearch("");
-              setStatus("");
-              setMovementMode("");
-            }}
-          >
-            Reset filters
-          </Button>
-          {canMutateTripExecution ? (
-            <Button onClick={() => setShowCreatePanel((prev) => !prev)}>
-              {showCreatePanel ? "Close new trip" : "New trip"}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-[color:var(--color-text-subtle)]">
+              {workspacePrefsSaving
+                ? "Saving layout..."
+                : workspacePrefsSaveError
+                  ? "Layout save failed"
+                  : workspacePrefsHydrated
+                    ? "Layout saved"
+                    : "Loading layout..."}
+            </span>
+            <Button size="sm" variant="secondary" onClick={loadTrips} disabled={loading}>
+              {loading ? "Refreshing..." : "Refresh"}
             </Button>
-          ) : (
-            <StatusChip tone="warning" label="Read-only" />
-          )}
+            <Button size="sm" variant="secondary" onClick={clearTripFilters}>
+              Clear filters
+            </Button>
+            <Button
+              size="sm"
+              variant={showGridSetup ? "secondary" : "ghost"}
+              onClick={() => setShowGridSetup((prev) => !prev)}
+            >
+              {showGridSetup ? "Hide grid setup" : "Grid setup"}
+            </Button>
+            {canMutateTripExecution ? (
+              <Button size="sm" onClick={() => setShowCreatePanel((prev) => !prev)}>
+                {showCreatePanel ? "Close new trip" : "New trip"}
+              </Button>
+            ) : (
+              <StatusChip tone="warning" label="Read-only" />
+            )}
+          </div>
         </div>
       </div>
 
@@ -580,6 +1044,155 @@ export function TripsWorkspace() {
         </Card>
       ) : null}
 
+      {showGridSetup ? (
+        <Card className="space-y-3">
+          <SectionHeader
+            title="Trips grid setup"
+            subtitle="Switch primary identifier and organize non-frozen columns."
+          />
+          <FormField label="Primary identifier" htmlFor="tripPrimaryIdentifier">
+            <Select
+              id="tripPrimaryIdentifier"
+              value={primaryIdentifier}
+              onChange={(event) =>
+                setPrimaryIdentifier(event.target.value === "load" ? "load" : "trip")
+              }
+            >
+              <option value="trip">Trip # first</option>
+              <option value="load">Load # first</option>
+            </Select>
+          </FormField>
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-[color:var(--color-text-muted)]">Field catalog</div>
+            <Input
+              value={tripColumnSearch}
+              onChange={(event) => setTripColumnSearch(event.target.value)}
+              placeholder="Search fields"
+              className="h-8"
+            />
+            <div className="space-y-2">
+              {filteredTripColumnCatalog.length === 0 ? (
+                <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-2 text-xs text-[color:var(--color-text-muted)]">
+                  No fields match your search.
+                </div>
+              ) : (
+                filteredTripColumnCatalog.map((group) => (
+                  <div key={group.id} className="space-y-1">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[color:var(--color-text-muted)]">
+                      {group.label}
+                    </div>
+                    {group.columns.map((column) => {
+                      const isLocked = TRIP_FROZEN_COLUMNS.includes(column);
+                      return (
+                        <label
+                          key={column}
+                          className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-xs"
+                        >
+                          <span>{tripColumnLabelByKey.get(column) ?? column}</span>
+                          {isLocked ? (
+                            <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">Locked</Badge>
+                          ) : (
+                            <input
+                              type="checkbox"
+                              checked={columnVisibility[column] !== false}
+                              onChange={(event) =>
+                                setColumnVisibility((prev) => ({
+                                  ...prev,
+                                  [column]: event.target.checked,
+                                }))
+                              }
+                            />
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-[color:var(--color-text-muted)]">Column order</div>
+            <div className="text-xs text-[color:var(--color-text-muted)]">Drag rows to reorder grid columns.</div>
+            <div className="space-y-1">
+              {movableColumnOrder.map((column) => (
+                <div
+                  key={column}
+                  className={`flex items-center justify-between gap-2 rounded-[var(--radius-control)] border px-2 py-1.5 text-xs ${
+                    draggingTripColumn === column
+                      ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)]/20"
+                      : "border-[color:var(--color-divider)]"
+                  }`}
+                  draggable
+                  onDragStart={(event) => {
+                    setDraggingTripColumn(column);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", column);
+                  }}
+                  onDragOver={(event) => {
+                    if (!draggingTripColumn || draggingTripColumn === column) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (!draggingTripColumn || draggingTripColumn === column) return;
+                    moveTripColumnToTarget(draggingTripColumn, column);
+                    setDraggingTripColumn(null);
+                  }}
+                  onDragEnd={() => setDraggingTripColumn(null)}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="cursor-grab select-none text-[color:var(--color-text-muted)]">::</span>
+                    {TRIP_GRID_COLUMNS.find((entry) => entry.key === column)?.label ?? column}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2"
+                      onClick={() => moveTripColumn(column, -1)}
+                      disabled={!canMoveTripColumn(column, -1)}
+                    >
+                      Up
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2"
+                      onClick={() => moveTripColumn(column, 1)}
+                      disabled={!canMoveTripColumn(column, 1)}
+                    >
+                      Down
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={applyRoleDefaults}
+            >
+              Reset to role default
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setPrimaryIdentifier("trip");
+                setColumnOrder(DEFAULT_TRIP_COLUMN_ORDER);
+                setColumnVisibility(normalizeTripColumnVisibility(DEFAULT_TRIP_COLUMN_VISIBILITY));
+              }}
+            >
+              Reset to system default
+            </Button>
+          </div>
+        </Card>
+      ) : null}
+
       {error ? (
         <Card className="border border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] text-sm text-[color:var(--color-warning)]">
           {error}
@@ -595,11 +1208,24 @@ export function TripsWorkspace() {
           {statusNote}
         </Card>
       ) : null}
+      {!inspectorVisible ? (
+        <Card className="border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-xs text-[color:var(--color-text-muted)]">
+          Trip inspector is hidden. Open it from <span className="font-medium text-ink">Panels → Trip inspector</span>.
+        </Card>
+      ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(28rem,1fr)]">
+      <div
+        className={`grid gap-4 ${
+          inspectorVisible ? "xl:grid-cols-[minmax(0,1.45fr)_minmax(28rem,1fr)]" : "xl:grid-cols-1"
+        }`}
+      >
         <TripSpreadsheetGrid
           rows={spreadsheetRows}
           loading={loading}
+          primaryIdentifier={primaryIdentifier}
+          columnVisibility={columnVisibility}
+          columnOrder={normalizedColumnOrder}
+          onColumnOrderChange={setColumnOrder}
           selectedTripId={selectedTripId}
           selectedRows={selectedGridRows}
           search={search}
@@ -611,6 +1237,7 @@ export function TripsWorkspace() {
           onStatusChange={setStatus}
           onMovementModeChange={setMovementMode}
           onSortModeChange={setSortMode}
+          onClearFilters={clearTripFilters}
           onSelectTrip={(tripId) => {
             chooseTrip(tripId);
           }}
@@ -636,7 +1263,7 @@ export function TripsWorkspace() {
           }}
         />
 
-        <Card className="min-h-[62vh] space-y-4">
+        {inspectorVisible ? <Card className="min-h-[62vh] space-y-4">
           {selectedTripSummary ? (
             <>
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -657,6 +1284,11 @@ export function TripsWorkspace() {
                 ]}
                 onChange={(value) => setDetailTab(value as DetailTab)}
               />
+
+              <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+                Execution authority: <span className="font-medium text-ink">Trip/Dispatch</span> · Commercial authority:{" "}
+                <span className="font-medium text-ink">Load/Finance</span>
+              </div>
 
               <div className="max-h-[64vh] space-y-3 overflow-y-auto pr-1">
                 {detailTab === "assignment" ? (
@@ -715,8 +1347,8 @@ export function TripsWorkspace() {
                           {savingAssign ? "Saving..." : "Save assignment"}
                         </Button>
                       ) : null}
-                      <Button variant="secondary" onClick={() => router.push(`/trips/${selectedTripSummary.id}`)}>
-                        Open trip detail
+                      <Button variant="secondary" onClick={() => setDetailTab("status")}>
+                        Update status
                       </Button>
                       <Button
                         variant="secondary"
@@ -724,6 +1356,9 @@ export function TripsWorkspace() {
                         disabled={!selectedTripSummary.loads.length}
                       >
                         Open in dispatch
+                      </Button>
+                      <Button variant="secondary" onClick={() => router.push(`/trips/${selectedTripSummary.id}`)}>
+                        Open trip detail
                       </Button>
                     </div>
                     {!canMutateTripExecution ? (
@@ -907,7 +1542,7 @@ export function TripsWorkspace() {
           ) : (
             <EmptyState title="Select a trip" description="Choose a trip from the list to manage assignment and execution." />
           )}
-        </Card>
+        </Card> : null}
       </div>
     </div>
   );

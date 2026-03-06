@@ -11,6 +11,7 @@ import { Select } from "@/components/ui/select";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { StatusChip } from "@/components/ui/status-chip";
 import { apiFetch } from "@/lib/api";
+import { formatDateTime as formatDateTime24 } from "@/lib/date-time";
 
 type FuelRow = {
   id: string;
@@ -47,10 +48,7 @@ const formatNumber = (value?: number | null, decimals = 1) => {
 };
 
 const formatDateTime = (value?: string | null) => {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString();
+  return formatDateTime24(value, "—");
 };
 
 export default function FuelSummaryPage() {

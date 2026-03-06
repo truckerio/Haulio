@@ -10,8 +10,13 @@ assert.ok(
   "finance page must include spreadsheet tab option"
 );
 assert.ok(
-  financePage.includes('const tab = searchParams.get("tab") ?? "spreadsheet";'),
-  "finance page must default to spreadsheet tab"
+  financePage.includes("const visibleTabOptions = useMemo(() => {") &&
+    financePage.includes('if (option.value === "payables" || option.value === "settings")'),
+  "finance page must compute role-aware tab visibility for mutation-heavy surfaces"
+);
+assert.ok(
+  financePage.includes("const fallbackTab: FinanceTab = useMemo(() => {"),
+  "finance page must compute deterministic fallback tab when requested tab is unavailable"
 );
 assert.ok(
   financePage.includes("hideHeader"),
@@ -60,6 +65,14 @@ assert.ok(
 assert.ok(
   spreadsheetPanel.includes("Rows/page") && spreadsheetPanel.includes("Command queue snapshot"),
   "spreadsheet panel must expose rows per page control"
+);
+assert.ok(
+  spreadsheetPanel.includes("`/finance?tab=receivables&commandLane=${encodeURIComponent(action)}`"),
+  "spreadsheet panel must deep-link command lane cards to receivables command lane context"
+);
+assert.ok(
+  spreadsheetPanel.includes('"/finance?tab=receivables&focus=readiness"'),
+  "spreadsheet panel must route read-only users to receivables readiness context instead of hidden commands"
 );
 assert.ok(
   spreadsheetPanel.includes('const rowPaddingClass = "px-2.5 py-1.5";'),

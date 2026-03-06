@@ -5,29 +5,24 @@ import path from "node:path";
 const loadsPage = fs.readFileSync(path.resolve(process.cwd(), "app/loads/page.tsx"), "utf8");
 
 assert.ok(
-  loadsPage.includes("formatLoadsRefreshTime(lastRefreshedAt)"),
-  "phase14 loads workspace should show refresh-state visibility"
+  loadsPage.includes("buildDispatchLoadsPath(searchParams)"),
+  "phase14 loads compatibility route must normalize legacy params into dispatch workspace state"
 );
 assert.ok(
-  loadsPage.includes("Partial sync warning:"),
-  "phase14 loads workspace should expose partial-failure state"
+  loadsPage.includes('params.set(\"workspace\", \"loads\");'),
+  "phase14 loads compatibility route must keep loads workspace targeting explicit"
 );
 assert.ok(
-  loadsPage.includes("Retry queue refresh"),
-  "phase14 loads workspace should offer recoverable retry action"
+  loadsPage.includes('params.set(\"createLoad\", \"1\");'),
+  "phase14 loads compatibility route must preserve create intent for dispatch modal open"
 );
 assert.ok(
-  loadsPage.includes("Loading loads workspace..."),
-  "phase14 loads workspace should expose explicit loading state"
+  loadsPage.includes("Redirecting to Dispatch…"),
+  "phase14 loads compatibility route should expose explicit redirect-state feedback"
 );
 assert.ok(
-  loadsPage.includes("No access to Loads"),
-  "phase14 loads workspace should fail closed for non-load roles"
-);
-assert.ok(
-  loadsPage.includes("readHeavySummary.trackingOff") && loadsPage.includes("readHeavySummary.missingPod"),
-  "phase14 loads workspace should expose read-heavy triage snapshot cards for safety/support"
+  loadsPage.includes("router.replace(targetPath);"),
+  "phase14 loads compatibility route must perform redirect to dispatch workbench"
 );
 
 console.log("loads phase14 read-heavy contract tests passed");
-

@@ -52,6 +52,15 @@ const ACCESSORIAL_STATUS_LABELS: Record<string, string> = {
   APPROVED: "Approved",
   REJECTED: "Rejected",
 };
+type CommercialFocusFilter = "ALL" | "DETENTION" | "LAYOVER" | "LUMPER" | "PENDING" | "PROOF";
+const COMMERCIAL_FOCUS_OPTIONS: Array<{ value: CommercialFocusFilter; label: string }> = [
+  { value: "ALL", label: "All" },
+  { value: "DETENTION", label: "Detention" },
+  { value: "LAYOVER", label: "Layover" },
+  { value: "LUMPER", label: "Lumper" },
+  { value: "PENDING", label: "Pending" },
+  { value: "PROOF", label: "Needs proof" },
+];
 const EDIT_REASON_CODES = [
   "DATA_CORRECTION",
   "CUSTOMER_CHANGE",
@@ -72,6 +81,32 @@ const TIMELINE_STEPS = [
   { key: "INVOICED", label: "Invoiced" },
   { key: "PAID", label: "Paid" },
 ];
+
+type InvoicePreflightSnapshot = {
+  ok: boolean;
+  blockingReasons: string[];
+  warnings: string[];
+  metrics: {
+    detentionMinutesTotal: number;
+    chargeLineCount: number;
+    accessorialCount: number;
+    unresolvedAccessorialCount: number;
+    proofMissingAccessorialCount: number;
+    hasLinehaulCharge: boolean;
+  };
+};
+
+function normalizeTextValue(value: unknown) {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+}
+
+function normalizeNumberish(value: unknown) {
+  if (value === null || value === undefined || value === "") return "";
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) return String(parsed);
+  return normalizeTextValue(value);
+}
 
 export default function LoadDetailsPage() {
   const params = useParams();
@@ -125,6 +160,11 @@ export default function LoadDetailsPage() {
   const [proofTargetId, setProofTargetId] = useState<string | null>(null);
   const proofInputRef = useRef<HTMLInputElement | null>(null);
   const [billingActionError, setBillingActionError] = useState<string | null>(null);
+  const [billingActionNote, setBillingActionNote] = useState<string | null>(null);
+  const [invoicePreflight, setInvoicePreflight] = useState<InvoicePreflightSnapshot | null>(null);
+  const [commercialSearch, setCommercialSearch] = useState("");
+  const [commercialFocus, setCommercialFocus] = useState<CommercialFocusFilter>("ALL");
+  const [commercialReviewConfirmed, setCommercialReviewConfirmed] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteType, setNoteType] = useState<(typeof NOTE_TYPES)[number]>("INTERNAL");
   const [notePriority, setNotePriority] = useState<(typeof NOTE_PRIORITIES)[number]>("NORMAL");
@@ -174,12 +214,13 @@ export default function LoadDetailsPage() {
   const loadData = useCallback(async () => {
     if (!loadId) return;
     try {
-      const [loadData, timelineData, trackingData, meData, chargesData] = await Promise.all([
+      const [loadData, timelineData, trackingData, meData, chargesData, preflightData] = await Promise.all([
         apiFetch<{ load: any; settings: any | null }>(`/loads/${loadId}`),
         apiFetch<{ load: any; timeline: any[] }>(`/loads/${loadId}/timeline`),
         apiFetch<{ session: any | null; ping: any | null }>(`/tracking/load/${loadId}/latest`),
         apiFetch<{ user: any }>("/auth/me"),
         apiFetch<{ charges: any[] }>(`/loads/${loadId}/charges`),
+        apiFetch<InvoicePreflightSnapshot>(`/billing/invoices/${loadId}/preflight`).catch(() => null),
       ]);
       setLoad(loadData.load);
       setSettings(loadData.settings ?? null);
@@ -187,6 +228,7 @@ export default function LoadDetailsPage() {
       setTracking(trackingData);
       setUser(meData.user);
       setCharges(chargesData.charges ?? []);
+      setInvoicePreflight(preflightData);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -250,9 +292,20 @@ export default function LoadDetailsPage() {
       setNoteError((err as Error).message || "Failed to save note.");
     } finally {
       setNoteSaving(false);
-      window.setTimeout(() => setNoteStatus(null), 2000);
     }
   };
+
+  useEffect(() => {
+    if (!noteStatus) return;
+    const timer = window.setTimeout(() => setNoteStatus(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [noteStatus]);
+
+  useEffect(() => {
+    if (!billingActionNote) return;
+    const timer = window.setTimeout(() => setBillingActionNote(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [billingActionNote]);
 
   useEffect(() => {
     loadData();
@@ -425,10 +478,156 @@ export default function LoadDetailsPage() {
   const invoiceBeforeReadyOnlyBlocker =
     billingBlockingReasons.length > 0 &&
     billingBlockingReasons.every((reason) => reason === "Invoice required before ready");
-  const canGenerateInvoice = Boolean(
+  const canGenerateInvoiceBase = Boolean(
     (load?.status === "READY_TO_INVOICE" && billingStatus === "READY") || invoiceBeforeReadyOnlyBlocker
   );
+  const invoice = load?.invoices?.[0] ?? null;
   const accessorials = load?.accessorials ?? [];
+  const pendingAccessorials = accessorials.filter(
+    (item: any) => item.status !== "APPROVED" && item.status !== "REJECTED"
+  );
+  const proofMissingAccessorials = accessorials.filter((item: any) => item.requiresProof && !item.proofDocumentId);
+  const detentionMinutesTotal = (load?.stops ?? []).reduce((sum: number, stop: any) => {
+    const detention = Number(stop?.detentionMinutes ?? 0);
+    if (!Number.isFinite(detention) || detention <= 0) return sum;
+    return sum + detention;
+  }, 0);
+  const hasDetentionCommercialLine = displayCharges.some((charge) => charge.type === "DETENTION") || accessorials.some((item: any) => item.type === "DETENTION");
+  const hasCommercialBaseCharge = displayCharges.some((charge) => charge.type === "LINEHAUL");
+
+  const commercialSearchQuery = commercialSearch.trim().toLowerCase();
+  const filteredAccessorials = useMemo(() => {
+    return accessorials.filter((item: any) => {
+      if (commercialFocus === "DETENTION" && item.type !== "DETENTION") return false;
+      if (commercialFocus === "LUMPER" && item.type !== "LUMPER") return false;
+      if (commercialFocus === "LAYOVER") return false;
+      if (commercialFocus === "PENDING" && (item.status === "APPROVED" || item.status === "REJECTED")) return false;
+      if (commercialFocus === "PROOF" && !(item.requiresProof && !item.proofDocumentId)) return false;
+      if (!commercialSearchQuery) return true;
+      const blob = [
+        ACCESSORIAL_LABELS[item.type] ?? item.type,
+        item.type,
+        item.notes ?? "",
+        item.status ?? "",
+        item.requiresProof ? "requires proof" : "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return blob.includes(commercialSearchQuery);
+    });
+  }, [accessorials, commercialFocus, commercialSearchQuery]);
+
+  const filteredCharges = useMemo(() => {
+    return displayCharges.filter((charge) => {
+      if (commercialFocus === "DETENTION" && charge.type !== "DETENTION") return false;
+      if (commercialFocus === "LAYOVER" && charge.type !== "LAYOVER") return false;
+      if (commercialFocus === "LUMPER" && charge.type !== "LUMPER") return false;
+      if (commercialFocus === "PENDING" || commercialFocus === "PROOF") return false;
+      if (!commercialSearchQuery) return true;
+      const blob = [
+        CHARGE_LABELS[charge.type] ?? charge.type,
+        charge.type,
+        charge.description ?? "",
+        String(charge.amountCents ?? ""),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return blob.includes(commercialSearchQuery);
+    });
+  }, [displayCharges, commercialFocus, commercialSearchQuery]);
+
+  const commercialPreflightSignals = useMemo(() => {
+    if (invoicePreflight) {
+      const backendSignals: Array<{ id: string; message: string; tone: "warning" | "danger" }> = [];
+      for (const reason of invoicePreflight.blockingReasons ?? []) {
+        backendSignals.push({
+          id: `backend-blocker-${reason}`,
+          message: reason,
+          tone: "danger",
+        });
+      }
+      for (const warning of invoicePreflight.warnings ?? []) {
+        backendSignals.push({
+          id: `backend-warning-${warning}`,
+          message: warning,
+          tone: "warning",
+        });
+      }
+      return backendSignals;
+    }
+    const signals: Array<{ id: string; message: string; tone: "warning" | "danger" }> = [];
+    if (!hasCommercialBaseCharge && (linehaulCentsFromRate === null || linehaulCentsFromRate <= 0)) {
+      signals.push({
+        id: "base-charge",
+        message: "No linehaul charge or load rate found. Confirm base charge before invoicing.",
+        tone: "danger",
+      });
+    }
+    if (detentionMinutesTotal > 0 && !hasDetentionCommercialLine) {
+      signals.push({
+        id: "detention-capture",
+        message: `Detention recorded (${Math.round(detentionMinutesTotal)} min) but no detention commercial line exists.`,
+        tone: "warning",
+      });
+    }
+    if (pendingAccessorials.length > 0) {
+      signals.push({
+        id: "pending-accessorials",
+        message: `${pendingAccessorials.length} accessorial(s) are pending approval.`,
+        tone: "warning",
+      });
+    }
+    if (proofMissingAccessorials.length > 0) {
+      signals.push({
+        id: "proof-missing",
+        message: `${proofMissingAccessorials.length} accessorial(s) are missing proof.`,
+        tone: "danger",
+      });
+    }
+    return signals;
+  }, [
+    invoicePreflight,
+    detentionMinutesTotal,
+    hasCommercialBaseCharge,
+    hasDetentionCommercialLine,
+    linehaulCentsFromRate,
+    pendingAccessorials.length,
+    proofMissingAccessorials.length,
+  ]);
+  const commercialBlockingSignals = useMemo(
+    () => commercialPreflightSignals.filter((signal) => signal.tone === "danger"),
+    [commercialPreflightSignals]
+  );
+  const commercialWarningSignals = useMemo(
+    () => commercialPreflightSignals.filter((signal) => signal.tone === "warning"),
+    [commercialPreflightSignals]
+  );
+
+  const requiresCommercialPreflight = !invoice;
+  const canGenerateInvoice = Boolean(
+    canGenerateInvoiceBase &&
+      (!requiresCommercialPreflight || (commercialBlockingSignals.length === 0 && commercialReviewConfirmed))
+  );
+  const commercialGateReasons = useMemo(() => {
+    if (!requiresCommercialPreflight) return [];
+    const reasons = commercialBlockingSignals.map((signal) => signal.message);
+    if (!commercialReviewConfirmed) {
+      reasons.push("Confirm commercial review checklist before generating invoice.");
+    }
+    return reasons;
+  }, [commercialBlockingSignals, commercialReviewConfirmed, requiresCommercialPreflight]);
+
+  useEffect(() => {
+    if (!requiresCommercialPreflight) return;
+    setCommercialReviewConfirmed(false);
+  }, [
+    requiresCommercialPreflight,
+    displayCharges.length,
+    accessorials.length,
+    pendingAccessorials.length,
+    proofMissingAccessorials.length,
+    detentionMinutesTotal,
+  ]);
 
   const openDoc = (doc: any) => {
     const name = doc.filename?.split("/").pop();
@@ -449,6 +648,7 @@ export default function LoadDetailsPage() {
           pages: Number(checklist.pages || 1),
         }),
       });
+      setUploadNote("Document verified.");
       loadData();
     } catch (err) {
       if (isForbiddenError(err)) {
@@ -467,6 +667,7 @@ export default function LoadDetailsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rejectReason: reason }),
       });
+      setUploadNote("Document rejected.");
       loadData();
     } catch (err) {
       if (isForbiddenError(err)) {
@@ -723,8 +924,10 @@ export default function LoadDetailsPage() {
   const markInvoiced = async () => {
     if (!loadId) return;
     setBillingActionError(null);
+    setBillingActionNote(null);
     try {
       await apiFetch(`/billing/readiness/${loadId}/mark-invoiced`, { method: "POST" });
+      setBillingActionNote("Load marked as invoiced.");
       loadData();
     } catch (err) {
       setBillingActionError((err as Error).message);
@@ -734,8 +937,10 @@ export default function LoadDetailsPage() {
   const sendToQuickbooks = async () => {
     if (!loadId) return;
     setBillingActionError(null);
+    setBillingActionNote(null);
     try {
       await apiFetch(`/billing/readiness/${loadId}/quickbooks`, { method: "POST" });
+      setBillingActionNote("QuickBooks sync submitted.");
       loadData();
     } catch (err) {
       setBillingActionError((err as Error).message);
@@ -807,11 +1012,16 @@ export default function LoadDetailsPage() {
 
   const generateInvoice = async () => {
     if (!loadId) return;
-    await apiFetch(`/billing/invoices/${loadId}/generate`, { method: "POST" });
-    loadData();
+    setBillingActionError(null);
+    setBillingActionNote(null);
+    try {
+      await apiFetch(`/billing/invoices/${loadId}/generate`, { method: "POST" });
+      setBillingActionNote("Invoice generation started.");
+      loadData();
+    } catch (err) {
+      setBillingActionError((err as Error).message || "Invoice generation failed.");
+    }
   };
-
-  const invoice = load?.invoices?.[0] ?? null;
 
   const downloadInvoicePdf = useCallback(() => {
     if (!invoice?.id) {
@@ -911,6 +1121,66 @@ export default function LoadDetailsPage() {
       replies: repliesByParent.get(root.id) ?? [],
     }));
   }, [load?.loadNotes]);
+
+  const noteFormDirty = useMemo(
+    () =>
+      noteText.trim().length > 0 ||
+      noteType !== "INTERNAL" ||
+      notePriority !== "NORMAL" ||
+      Boolean(noteReplyTargetId),
+    [noteText, noteType, notePriority, noteReplyTargetId]
+  );
+
+  const noteFormStatus = useMemo(() => {
+    if (noteSaving) return { label: "Saving...", tone: "info" as const };
+    if (noteStatus) return { label: noteStatus, tone: "success" as const };
+    if (noteFormDirty) return { label: "Unsaved changes", tone: "warning" as const };
+    return { label: "No unsaved changes", tone: "neutral" as const };
+  }, [noteFormDirty, noteSaving, noteStatus]);
+
+  const uploadNoteTone = useMemo(() => {
+    const message = uploadNote?.toLowerCase() ?? "";
+    if (!message) return "neutral" as const;
+    if (
+      message.includes("uploaded") ||
+      message.includes("verified") ||
+      message.includes("rejected")
+    ) {
+      return "success" as const;
+    }
+    if (message.includes("restricted") || message.includes("forbidden")) {
+      return "warning" as const;
+    }
+    return "danger" as const;
+  }, [uploadNote]);
+
+  const freightHasChanges = useMemo(() => {
+    if (!load) return false;
+    return (
+      normalizeTextValue(freightForm.loadType) !== normalizeTextValue(load.loadType ?? "COMPANY") ||
+      normalizeTextValue(freightForm.movementMode) !== normalizeTextValue(load.movementMode ?? "FTL") ||
+      normalizeTextValue(freightForm.operatingEntityId) !== normalizeTextValue(load.operatingEntityId ?? "") ||
+      normalizeTextValue(freightForm.shipperReferenceNumber) !== normalizeTextValue(load.shipperReferenceNumber ?? "") ||
+      normalizeTextValue(freightForm.consigneeReferenceNumber) !== normalizeTextValue(load.consigneeReferenceNumber ?? "") ||
+      normalizeNumberish(freightForm.palletCount) !== normalizeNumberish(load.palletCount ?? "") ||
+      normalizeNumberish(freightForm.weightLbs) !== normalizeNumberish(load.weightLbs ?? "") ||
+      normalizeNumberish(freightForm.paidMiles) !== normalizeNumberish(load.paidMiles ?? "") ||
+      editReasonCode !== "DATA_CORRECTION" ||
+      editReasonNote.trim().length > 0
+    );
+  }, [
+    load,
+    freightForm.loadType,
+    freightForm.movementMode,
+    freightForm.operatingEntityId,
+    freightForm.shipperReferenceNumber,
+    freightForm.consigneeReferenceNumber,
+    freightForm.palletCount,
+    freightForm.weightLbs,
+    freightForm.paidMiles,
+    editReasonCode,
+    editReasonNote,
+  ]);
 
   const formatDateTime = (value?: string | null) => {
     return formatDateTime24(value, "-");
@@ -1442,7 +1712,7 @@ export default function LoadDetailsPage() {
                       <Button size="sm" onClick={handleCreateNote} disabled={noteSaving}>
                         {noteSaving ? "Saving..." : "Save note"}
                       </Button>
-                      {noteStatus ? <div className="text-xs text-[color:var(--color-text-muted)]">{noteStatus}</div> : null}
+                      <StatusChip label={noteFormStatus.label} tone={noteFormStatus.tone} />
                     </div>
                   </div>
                 ) : (
@@ -1659,11 +1929,118 @@ export default function LoadDetailsPage() {
                   )}
                 </div>
               ) : null}
+              <div id="billing-commercial" className="space-y-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Commercial preflight</div>
+                    <div className="text-xs text-[color:var(--color-text-muted)]">
+                      Review detention, layover, lumper, and accessorial proof before invoice generation.
+                    </div>
+                  </div>
+                  <StatusChip
+                    tone={commercialBlockingSignals.length === 0 ? "success" : "warning"}
+                    label={
+                      commercialBlockingSignals.length === 0
+                        ? commercialWarningSignals.length > 0
+                          ? `${commercialWarningSignals.length} warning(s) to review`
+                          : "Commercial review ready"
+                        : `${commercialBlockingSignals.length} blocker(s) to clear`
+                    }
+                  />
+                </div>
+                <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto]">
+                  <Input
+                    placeholder="Search detention, layover, lumper, proof, notes"
+                    value={commercialSearch}
+                    onChange={(event) => setCommercialSearch(event.target.value)}
+                  />
+                  <div className="flex flex-wrap gap-1">
+                    {COMMERCIAL_FOCUS_OPTIONS.map((option) => (
+                      <Button
+                        key={option.value}
+                        size="sm"
+                        variant={commercialFocus === option.value ? "primary" : "secondary"}
+                        onClick={() => setCommercialFocus(option.value)}
+                      >
+                        {option.label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setChargeForm((prev) => ({ ...prev, type: "DETENTION" }));
+                      setPendingAnchor("billing-charges-form");
+                    }}
+                  >
+                    Add detention charge
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setChargeForm((prev) => ({ ...prev, type: "LAYOVER" }));
+                      setPendingAnchor("billing-charges-form");
+                    }}
+                  >
+                    Add layover charge
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      const requiresProof = ACCESSORIAL_REQUIRES_PROOF.has("DETENTION");
+                      setAccessorialForm((prev) => ({ ...prev, type: "DETENTION", requiresProof }));
+                      setPendingAnchor("billing-accessorials-form");
+                    }}
+                  >
+                    Add detention accessorial
+                  </Button>
+                </div>
+                {invoicePreflight ? (
+                  <div className="grid gap-1 text-xs text-[color:var(--color-text-muted)] sm:grid-cols-2">
+                    <div>Charge lines: {invoicePreflight.metrics.chargeLineCount}</div>
+                    <div>Accessorials: {invoicePreflight.metrics.accessorialCount}</div>
+                    <div>Pending accessorials: {invoicePreflight.metrics.unresolvedAccessorialCount}</div>
+                    <div>Proof missing: {invoicePreflight.metrics.proofMissingAccessorialCount}</div>
+                    <div>Detention minutes: {invoicePreflight.metrics.detentionMinutesTotal}</div>
+                    <div>{invoicePreflight.metrics.hasLinehaulCharge ? "Linehaul charge present" : "Linehaul charge missing"}</div>
+                  </div>
+                ) : null}
+                {commercialPreflightSignals.length > 0 ? (
+                  <div className="space-y-1 text-xs text-[color:var(--color-text-muted)]">
+                    {commercialPreflightSignals.map((signal) => (
+                      <div key={signal.id} className="flex items-start gap-2">
+                        <StatusChip
+                          tone={signal.tone === "danger" ? "danger" : "warning"}
+                          label={signal.tone === "danger" ? "Required" : "Review"}
+                        />
+                        <span>{signal.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-[color:var(--color-text-muted)]">
+                    Commercial lines look complete for invoice generation.
+                  </div>
+                )}
+                {requiresCommercialPreflight ? (
+                  <CheckboxField
+                    id="commercialReviewConfirmed"
+                    label="I have reviewed all charge lines and accessorials before generating invoice."
+                    checked={commercialReviewConfirmed}
+                    onChange={(event) => setCommercialReviewConfirmed(event.target.checked)}
+                  />
+                ) : null}
+              </div>
               <div className="text-sm text-[color:var(--color-text-muted)]">
                 Invoice status: {invoice?.status ? formatInvoiceStatusLabel(invoice.status) : "Not generated"}
               </div>
               <div className="flex flex-wrap gap-2">
-                {canVerify && canGenerateInvoice ? (
+                {canVerify && canGenerateInvoiceBase ? (
                   <Button onClick={generateInvoice} disabled={!canGenerateInvoice}>
                     Generate invoice
                   </Button>
@@ -1694,8 +2071,22 @@ export default function LoadDetailsPage() {
                   </Button>
                 ) : null}
               </div>
-              {billingActionError ? (
-                <div className="text-xs text-[color:var(--color-danger)]">{billingActionError}</div>
+              {billingActionNote ? (
+                <div className="flex items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
+                  <StatusChip label="Saved" tone="success" />
+                  <span>{billingActionNote}</span>
+                </div>
+              ) : null}
+              {billingActionError ? <ErrorBanner message={billingActionError} /> : null}
+              {canGenerateInvoiceBase && commercialGateReasons.length > 0 ? (
+                <div className="rounded-[var(--radius-card)] border border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] px-3 py-2 text-xs text-[color:var(--color-warning)]">
+                  <div className="font-medium text-ink">Complete pre-invoice review before generating invoice:</div>
+                  <ul className="mt-1 space-y-1">
+                    {commercialGateReasons.map((reason) => (
+                      <li key={reason}>• {reason}</li>
+                    ))}
+                  </ul>
+                </div>
               ) : null}
               {billingStatus !== "READY" && !invoiceBeforeReadyOnlyBlocker ? (
                 <div className="text-xs text-[color:var(--color-text-muted)]">
@@ -1715,10 +2106,12 @@ export default function LoadDetailsPage() {
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Accessorials</div>
-                  <div className="text-xs text-[color:var(--color-text-muted)]">{accessorials.length} total</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">
+                    {filteredAccessorials.length} shown / {accessorials.length} total
+                  </div>
                 </div>
                 <div className="grid gap-2">
-                  {accessorials.map((item: any) => (
+                  {filteredAccessorials.map((item: any) => (
                     <div
                       key={item.id}
                       className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-sm"
@@ -1770,13 +2163,17 @@ export default function LoadDetailsPage() {
                       </div>
                     </div>
                   ))}
-                  {accessorials.length === 0 ? <EmptyState title="No accessorials yet." /> : null}
+                  {filteredAccessorials.length === 0 ? (
+                    <EmptyState
+                      title={accessorials.length === 0 ? "No accessorials yet." : "No accessorials match your search/filter."}
+                    />
+                  ) : null}
                 </div>
                 {accessorialError ? (
                   <div className="text-xs text-[color:var(--color-danger)]">{accessorialError}</div>
                 ) : null}
                 {canManageAccessorials ? (
-                  <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
+                  <div id="billing-accessorials-form" className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
                     <div className="grid gap-3 lg:grid-cols-4">
                       <FormField label="Type" htmlFor="accessorialType">
                         <Select
@@ -1841,10 +2238,12 @@ export default function LoadDetailsPage() {
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Charges</div>
-                    <div className="text-sm font-semibold text-ink">Total ${formatAmount(chargesTotalCents)}</div>
+                    <div className="text-sm font-semibold text-ink">
+                      Total ${formatAmount(chargesTotalCents)} · {filteredCharges.length} shown / {displayCharges.length}
+                    </div>
                   </div>
                   <div className="grid gap-2">
-                    {displayCharges.map((charge) => (
+                    {filteredCharges.map((charge) => (
                       <div
                         key={charge.id}
                         className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-sm"
@@ -1872,10 +2271,12 @@ export default function LoadDetailsPage() {
                         </div>
                       </div>
                     ))}
-                    {displayCharges.length === 0 ? <EmptyState title="No charges yet." /> : null}
+                    {filteredCharges.length === 0 ? (
+                      <EmptyState title={displayCharges.length === 0 ? "No charges yet." : "No charges match your search/filter."} />
+                    ) : null}
                   </div>
                   {canEditCharges ? (
-                    <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
+                    <div id="billing-charges-form" className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3">
                       <div className="grid gap-3 lg:grid-cols-3">
                         <FormField label="Charge type" htmlFor="chargeType">
                           <Select
@@ -1974,6 +2375,81 @@ export default function LoadDetailsPage() {
               )}
             </Card>
 
+            <Card className="space-y-2">
+              <div className="text-xs text-[color:var(--color-text-muted)]">
+                Execution authority: <span className="font-medium text-ink">Trip/Dispatch</span>
+              </div>
+              <div className="text-xs text-[color:var(--color-text-muted)]">
+                Commercial authority: <span className="font-medium text-ink">Load/Finance</span>
+              </div>
+            </Card>
+
+            <Card className="space-y-3">
+              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Dispatch readiness</div>
+              {dispatchBlockers.length > 0 ? (
+                <div className="space-y-2">
+                  {dispatchBlockers.map((blocker) => (
+                    <BlockerCard
+                      key={blocker.title}
+                      title={blocker.title}
+                      subtitle={blocker.subtitle}
+                      ctaLabel={blocker.ctaLabel}
+                      onClick={() => router.push(blocker.href)}
+                      tone={blocker.tone ?? "info"}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-[color:var(--color-text-muted)]">Dispatch requirements satisfied.</div>
+              )}
+            </Card>
+
+            <Card id="tracking" className="space-y-2">
+              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Tracking</div>
+              <div className="text-sm text-[color:var(--color-text-muted)]">Status: {trackingState}</div>
+              <div className="text-sm text-[color:var(--color-text-muted)]">
+                Last ping: {lastPingAt ? `${formatDateTime(lastPingAt)}${lastPingAge ? ` - ${lastPingAge}` : ""}` : "-"}
+              </div>
+              {trackingState === "OFF" && canStartTracking ? (
+                <Button
+                  size="sm"
+                  onClick={async () => {
+                    if (!loadId) return;
+                    try {
+                      await apiFetch(`/tracking/load/${loadId}/start`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ providerType: "PHONE" }),
+                      });
+                      loadData();
+                    } catch (err) {
+                      if (isForbiddenError(err)) {
+                        markActionRestricted("startTracking");
+                      }
+                      setError((err as Error).message);
+                    }
+                  }}
+                >
+                  Start tracking
+                </Button>
+              ) : trackingState === "OFF" ? (
+                <div className="text-xs text-[color:var(--color-text-muted)]">Restricted: tracking controls are unavailable.</div>
+              ) : null}
+              {!pingStale && mapLink ? (
+                <div className="space-y-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] px-3 py-3 text-xs text-[color:var(--color-text-muted)]">
+                  Map preview available
+                  <Button size="sm" variant="secondary" onClick={() => window.open(mapLink, "_blank")}>
+                    Open map
+                  </Button>
+                </div>
+              ) : (
+                <div className="text-xs text-[color:var(--color-text-muted)]">
+                  {lastPingAt ? "Ping stale." : "No recent pings."}
+                </div>
+              )}
+              <div className="text-xs text-[color:var(--color-text-muted)]">Keep the page open for best results.</div>
+            </Card>
+
             <Card className="space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Documents & POD</div>
@@ -2032,57 +2508,41 @@ export default function LoadDetailsPage() {
                       }}
                     />
                   </FormField>
-                  {uploadNote ? <div className="text-xs text-[color:var(--color-text-muted)]">{uploadNote}</div> : null}
+                  {uploadNote ? (
+                    <div className="flex items-center gap-2 text-xs text-[color:var(--color-text-muted)]">
+                      <StatusChip tone={uploadNoteTone} label={uploadNoteTone === "success" ? "Saved" : "Notice"} />
+                      <span>{uploadNote}</span>
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 <div className="text-xs text-[color:var(--color-text-muted)]">Restricted: document upload is not available.</div>
               )}
             </Card>
 
-            <Card id="tracking" className="space-y-2">
-              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Tracking</div>
-              <div className="text-sm text-[color:var(--color-text-muted)]">Status: {trackingState}</div>
+            <Card className="space-y-2">
+              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Billing</div>
               <div className="text-sm text-[color:var(--color-text-muted)]">
-                Last ping: {lastPingAt ? `${formatDateTime(lastPingAt)}${lastPingAge ? ` - ${lastPingAge}` : ""}` : "-"}
+                Invoice: {invoice?.status ? formatInvoiceStatusLabel(invoice.status) : "Not generated"}
               </div>
-              {trackingState === "OFF" && canStartTracking ? (
-                <Button
-                  size="sm"
-                  onClick={async () => {
-                    if (!loadId) return;
-                    try {
-                      await apiFetch(`/tracking/load/${loadId}/start`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ providerType: "PHONE" }),
-                      });
-                      loadData();
-                    } catch (err) {
-                      if (isForbiddenError(err)) {
-                        markActionRestricted("startTracking");
-                      }
-                      setError((err as Error).message);
-                    }
-                  }}
-                >
-                  Start tracking
+              <div className="text-xs text-[color:var(--color-text-muted)]">
+                Commercial mutations are owned in load billing and finance workflows.
+              </div>
+              {canVerify && canGenerateInvoice ? (
+                <Button size="sm" onClick={generateInvoice}>
+                  Generate invoice
                 </Button>
-              ) : trackingState === "OFF" ? (
-                <div className="text-xs text-[color:var(--color-text-muted)]">Restricted: tracking controls are unavailable.</div>
               ) : null}
-              {!pingStale && mapLink ? (
-                <div className="space-y-2 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-panel)] px-3 py-3 text-xs text-[color:var(--color-text-muted)]">
-                  Map preview available
-                  <Button size="sm" variant="secondary" onClick={() => window.open(mapLink, "_blank")}>
-                    Open map
-                  </Button>
-                </div>
-              ) : (
-                <div className="text-xs text-[color:var(--color-text-muted)]">
-                  {lastPingAt ? "Ping stale." : "No recent pings."}
-                </div>
-              )}
-              <div className="text-xs text-[color:var(--color-text-muted)]">Keep the page open for best results.</div>
+              {invoice ? (
+                <Button size="sm" variant="secondary" onClick={downloadInvoicePdf}>
+                  Download Invoice
+                </Button>
+              ) : null}
+              {invoice ? (
+                <Button size="sm" variant="secondary" onClick={downloadInvoicePacket}>
+                  Download Packet
+                </Button>
+              ) : null}
             </Card>
 
             <Card className="space-y-2">
@@ -2198,9 +2658,15 @@ export default function LoadDetailsPage() {
                       onChange={(e) => setEditReasonNote(e.target.value)}
                     />
                   </FormField>
-                  <Button size="sm" onClick={saveFreight} disabled={freightSaving}>
-                    {freightSaving ? "Saving..." : "Save"}
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button size="sm" onClick={saveFreight} disabled={freightSaving || !freightHasChanges}>
+                      {freightSaving ? "Saving..." : "Save"}
+                    </Button>
+                    <StatusChip
+                      tone={freightSaving ? "info" : freightHasChanges ? "warning" : "neutral"}
+                      label={freightSaving ? "Saving..." : freightHasChanges ? "Unsaved changes" : "No unsaved changes"}
+                    />
+                  </div>
                 </div>
               ) : (
                 <>
@@ -2211,48 +2677,6 @@ export default function LoadDetailsPage() {
                   <div className="text-sm text-[color:var(--color-text-muted)]">Consignee ref: {load?.consigneeReferenceNumber ?? "-"}</div>
                 </>
               )}
-            </Card>
-
-            <Card className="space-y-3">
-              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Dispatch readiness</div>
-              {dispatchBlockers.length > 0 ? (
-                <div className="space-y-2">
-                  {dispatchBlockers.map((blocker) => (
-                    <BlockerCard
-                      key={blocker.title}
-                      title={blocker.title}
-                      subtitle={blocker.subtitle}
-                      ctaLabel={blocker.ctaLabel}
-                      onClick={() => router.push(blocker.href)}
-                      tone={blocker.tone ?? "info"}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-[color:var(--color-text-muted)]">Dispatch requirements satisfied.</div>
-              )}
-            </Card>
-
-            <Card className="space-y-2">
-              <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-muted)]">Billing</div>
-              <div className="text-sm text-[color:var(--color-text-muted)]">
-                Invoice: {invoice?.status ? formatInvoiceStatusLabel(invoice.status) : "Not generated"}
-              </div>
-              {canVerify && canGenerateInvoice ? (
-                <Button size="sm" onClick={generateInvoice}>
-                  Generate invoice
-                </Button>
-              ) : null}
-              {invoice ? (
-                <Button size="sm" variant="secondary" onClick={downloadInvoicePdf}>
-                  Download Invoice
-                </Button>
-              ) : null}
-              {invoice ? (
-                <Button size="sm" variant="secondary" onClick={downloadInvoicePacket}>
-                  Download Packet
-                </Button>
-              ) : null}
             </Card>
           </div>
         </div>

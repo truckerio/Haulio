@@ -26,6 +26,21 @@ assert.ok(
   "Trip cockpit right column must expose command rail"
 );
 assert.ok(
+  tripPage.includes("Execution updates are managed in"),
+  "Trip command rail must state execution/commercial authority split"
+);
+const executionBlockersIndex = tripPage.indexOf("text-sm font-semibold text-ink\">Execution blockers");
+const docsHandoffIndex = tripPage.indexOf("text-sm font-semibold text-ink\">Docs handoff");
+const commercialSnapshotIndex = tripPage.indexOf("text-sm font-semibold text-ink\">Commercial snapshot (read-only)");
+assert.equal(executionBlockersIndex > -1, true, "Trip cockpit must include execution blockers card");
+assert.equal(docsHandoffIndex > -1, true, "Trip cockpit must include docs handoff card");
+assert.equal(commercialSnapshotIndex > -1, true, "Trip cockpit must include commercial snapshot card");
+assert.equal(
+  executionBlockersIndex < docsHandoffIndex && docsHandoffIndex < commercialSnapshotIndex,
+  true,
+  "Trip cockpit right rail must keep execution -> docs -> commercial card order"
+);
+assert.ok(
   tripPage.includes("text-sm font-semibold text-ink\">Loads in trip"),
   "Trip cockpit must keep nested loads panel inside trip authority context"
 );

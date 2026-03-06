@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ReactNode, createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { StatusChip } from "@/components/ui/status-chip";
 import { ToastViewport } from "@/components/ui/toast-viewport";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
-import { getRoleCapabilities } from "@/lib/capabilities";
+import { canRoleResumeWorkspace, getRoleCapabilities, getRoleLastWorkspaceStorageKey } from "@/lib/capabilities";
 import { getVisibleSections } from "@/lib/navigation";
 import type { NavSection } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
@@ -51,6 +51,7 @@ type ActivitySummary = {
 type AppShellActivityControls = {
   canUseActivity: boolean;
   activityBadgeCount: number;
+  isActivityDrawerOpen: boolean;
   openActivityDrawer: () => void;
 };
 
@@ -70,6 +71,19 @@ const SIDEBAR_PEEK_CLOSE_DELAY_MS = 240;
 let sidebarPinnedCache: boolean | null = null;
 let sidebarPeekOpenCache = false;
 let teamsEnabledCache: boolean | null = null;
+const WORKSPACE_TRACKABLE_PREFIXES = [
+  "/dispatch",
+  "/loads",
+  "/trips",
+  "/teams",
+  "/finance",
+  "/safety",
+  "/support",
+  "/today",
+  "/dashboard",
+  "/profile",
+  "/admin",
+];
 
 function compactRelativeTime(value: string) {
   const timestamp = new Date(value);
@@ -417,6 +431,7 @@ function AppShellInner({
   children: ReactNode;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const [navOpen, setNavOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
@@ -479,9 +494,10 @@ function AppShellInner({
     () => ({
       canUseActivity,
       activityBadgeCount,
+      isActivityDrawerOpen: activityDrawerOpen,
       openActivityDrawer: () => setActivityDrawerOpen(true),
     }),
-    [activityBadgeCount, canUseActivity]
+    [activityBadgeCount, activityDrawerOpen, canUseActivity]
   );
 
   useEffect(() => {
@@ -568,6 +584,20 @@ function AppShellInner({
       .then((data) => setOnboarding(data.state))
       .catch(() => setOnboarding(null));
   }, [user, pathname]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storageKey = getRoleLastWorkspaceStorageKey(user?.role);
+    if (!storageKey) return;
+    const query = searchParams.toString();
+    const fullPath = query ? `${pathname}?${query}` : pathname;
+    const isTrackable = WORKSPACE_TRACKABLE_PREFIXES.some(
+      (prefix) => fullPath === prefix || fullPath.startsWith(`${prefix}/`) || fullPath.startsWith(`${prefix}?`)
+    );
+    if (!isTrackable) return;
+    if (!canRoleResumeWorkspace(user?.role, fullPath)) return;
+    window.localStorage.setItem(storageKey, fullPath);
+  }, [pathname, searchParams, user?.role]);
 
   useEffect(() => {
     if (!user) {

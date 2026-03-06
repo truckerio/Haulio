@@ -7,8 +7,8 @@ const tripsWorkspace = fs.readFileSync(path.resolve(process.cwd(), "components/d
 const financeSpreadsheet = fs.readFileSync(path.resolve(process.cwd(), "components/finance/FinanceSpreadsheetPanel.tsx"), "utf8");
 
 assert.ok(
-  loadsPage.includes("toneFromSemantic"),
-  "phase15 should normalize load status chip semantics through shared status semantic mapping"
+  loadsPage.includes("toneFromSemantic") || loadsPage.includes("buildDispatchLoadsPath"),
+  "phase15 should normalize load semantics directly or route loads UX to the dispatch semantic owner"
 );
 assert.ok(
   tripsWorkspace.includes("toneFromSemantic"),
@@ -20,4 +20,3 @@ assert.ok(
 );
 
 console.log("phase15 status consistency contract tests passed");
-

@@ -25,9 +25,9 @@ type JournalLine = {
 
 type JournalEntry = {
   id: string;
-  entityType: "PAYABLE_RUN" | "SETTLEMENT";
+  entityType: "INVOICE" | "PAYABLE_RUN" | "SETTLEMENT";
   entityId: string;
-  eventType: "PAYABLE_RUN_PAID" | "SETTLEMENT_PAID";
+  eventType: "INVOICE_ISSUED" | "INVOICE_PAYMENT_RECEIVED" | "PAYABLE_RUN_PAID" | "SETTLEMENT_PAID";
   idempotencyKey: string;
   adapter: string | null;
   externalPayoutId: string | null;
@@ -69,6 +69,8 @@ function csvEscape(value: string) {
 }
 
 function entryTone(eventType: JournalEntry["eventType"]) {
+  if (eventType === "INVOICE_PAYMENT_RECEIVED") return "success" as const;
+  if (eventType === "INVOICE_ISSUED") return "info" as const;
   if (eventType === "SETTLEMENT_PAID") return "info" as const;
   return "success" as const;
 }
@@ -304,6 +306,7 @@ export function FinanceJournalsPanel() {
             <div className="mb-1 text-xs text-[color:var(--color-text-muted)]">Entity type</div>
             <Select value={entityType} onChange={(e) => setEntityType(e.target.value)}>
               <option value="">All</option>
+              <option value="INVOICE">Invoice</option>
               <option value="PAYABLE_RUN">Payable run</option>
               <option value="SETTLEMENT">Settlement</option>
             </Select>
@@ -312,6 +315,8 @@ export function FinanceJournalsPanel() {
             <div className="mb-1 text-xs text-[color:var(--color-text-muted)]">Event type</div>
             <Select value={eventType} onChange={(e) => setEventType(e.target.value)}>
               <option value="">All</option>
+              <option value="INVOICE_ISSUED">Invoice issued</option>
+              <option value="INVOICE_PAYMENT_RECEIVED">Invoice payment received</option>
               <option value="PAYABLE_RUN_PAID">Payable run paid</option>
               <option value="SETTLEMENT_PAID">Settlement paid</option>
             </Select>

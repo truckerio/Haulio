@@ -3,6 +3,12 @@ import { API_BASE } from "@/lib/apiBase";
 const DEV_ERRORS = process.env.NEXT_PUBLIC_DEV_ERRORS === "true" || process.env.NODE_ENV !== "production";
 const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
 const DB_SETUP_ERROR_CODES = new Set(["P1001", "P1003", "P2021", "P2022"]);
+const DB_SETUP_ERROR_PATTERNS = [
+  /does not exist in the current database/i,
+  /environment variable not found:\s*database_url/i,
+  /can't reach database server/i,
+  /provided database string is invalid/i,
+];
 
 export type ApiFetchOptions = RequestInit & {
   skipAuthRedirect?: boolean;
@@ -12,6 +18,26 @@ export type ApiFetchOptions = RequestInit & {
 
 export function getApiBase() {
   return API_BASE;
+}
+
+function normalizeApiPath(path: string) {
+  if (!path) return "";
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  const apiBase = getApiBase().replace(/\/+$/, "");
+  // Guard against callers passing "/api/*" while API_BASE is already "/api".
+  if (apiBase.endsWith("/api") && normalized.startsWith("/api/")) {
+    return normalized.slice(4);
+  }
+  if (apiBase.endsWith("/api") && normalized === "/api") {
+    return "";
+  }
+  return normalized;
+}
+
+function isDbSetupError(error: any, message: string) {
+  const detail = String(error?.detail || "");
+  if (DB_SETUP_ERROR_CODES.has(String(error?.code || ""))) return true;
+  return DB_SETUP_ERROR_PATTERNS.some((pattern) => pattern.test(message) || pattern.test(detail));
 }
 
 export function getCsrfToken() {
@@ -49,6 +75,7 @@ async function refreshCsrfToken() {
 
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const { skipAuthRedirect, retryOnCsrf = true, timeoutMs = 20000, ...fetchOptions } = options;
+  const normalizedPath = normalizeApiPath(path);
   const headers = new Headers(fetchOptions.headers || {});
   const method = (fetchOptions.method ?? "GET").toUpperCase();
   if (!["GET", "HEAD"].includes(method) && !headers.has("x-csrf-token")) {
@@ -71,7 +98,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener?.("abort", onExternalAbort);
   try {
-    res = await fetch(`${getApiBase()}${path}`, {
+    res = await fetch(`${getApiBase()}${normalizedPath}`, {
       ...fetchOptions,
       signal: controller.signal,
       headers,
@@ -100,7 +127,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
       if (String(error?.error || "").toLowerCase().includes("csrf")) {
         const refreshed = await refreshCsrfToken();
         if (refreshed) {
-          return apiFetch<T>(path, { ...options, retryOnCsrf: false });
+          return apiFetch<T>(normalizedPath, { ...options, retryOnCsrf: false });
         }
       }
       const message = error?.error || error?.message || "Request failed";
@@ -123,7 +150,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
       return err;
     };
     if (res.status >= 500) {
-      if (DB_SETUP_ERROR_CODES.has(String(error?.code || ""))) {
+      if (isDbSetupError(error, String(message || ""))) {
         throw new Error("Database is not ready. Run migrations and restart the stack.");
       }
       if (DEV_ERRORS) {

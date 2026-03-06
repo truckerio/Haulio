@@ -4,25 +4,28 @@ export const dynamic = "force-dynamic";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { createPortal } from "react-dom";
 import { AppShell } from "@/components/app-shell";
-import { useUser } from "@/components/auth/user-context";
+import { useAppShellActivity } from "@/components/app-shell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { FormField } from "@/components/ui/form-field";
 import { Select } from "@/components/ui/select";
 import { SectionHeader } from "@/components/ui/section-header";
 import { RefinePanel } from "@/components/ui/refine-panel";
-import { SegmentedControl } from "@/components/ui/segmented-control";
 import { EmptyState } from "@/components/ui/empty-state";
 import { BlockedScreen } from "@/components/ui/blocked-screen";
 import { NoAccess } from "@/components/rbac/no-access";
 import type { AssignmentSuggestion } from "@/components/assignment-assist/SuggestedAssignments";
 import {
+  DISPATCH_FROZEN_COLUMNS,
+  DISPATCH_GRID_COLUMNS,
   DISPATCH_OPTIONAL_COLUMNS,
   DISPATCH_REQUIRED_COLUMNS,
   DispatchSpreadsheetGrid,
+  type DispatchGridCommand,
+  type DispatchGridCommandType,
   type DispatchGridColumnKey,
   type DispatchGridDensity,
   type DispatchGridFilterState,
@@ -30,12 +33,16 @@ import {
   type DispatchInspectorFocusSection,
   type DispatchGridRow,
 } from "@/components/dispatch/DispatchSpreadsheetGrid";
-import { DriverLanesPanel } from "@/components/dispatch/DriverLanesPanel";
 import { DispatchDocUploadDrawer } from "@/components/dispatch/DispatchDocUploadDrawer";
-import { TripsWorkspace } from "@/components/dispatch/TripsWorkspace";
+import { CreateLoadDrawer } from "@/components/dispatch/CreateLoadDrawer";
 import { WorkbenchRightPane } from "@/components/dispatch/WorkbenchRightPane";
+import {
+  DISPATCH_WORKSPACE_COLUMN_CATALOG,
+  filterWorkspaceColumnCatalog,
+} from "@/components/dispatch/workspace-column-registry";
 import { apiFetch } from "@/lib/api";
-import { getDefaultDispatchWorkspace, getRoleCapabilities, type DispatchWorkspace } from "@/lib/capabilities";
+import { getRoleCapabilities, getRoleNoAccessCta } from "@/lib/capabilities";
+import { formatDateTime as formatDateTime24, formatTime as formatTime24 } from "@/lib/date-time";
 import { buildYardOsPlanningUrl } from "@/lib/yardos";
 import { LegsPanel } from "./legs-panel";
 
@@ -86,6 +93,12 @@ type DispatchItem = {
     id: string;
     tripNumber: string;
     status: string;
+    movementMode?: string | null;
+    origin?: string | null;
+    destination?: string | null;
+    plannedDepartureAt?: string | null;
+    plannedArrivalAt?: string | null;
+    loadsCount?: number | null;
   } | null;
   customerName?: string | null;
   rate?: string | number | null;
@@ -98,7 +111,16 @@ type DispatchItem = {
     trailer?: { id: string; unit: string } | null;
   };
   operatingEntity?: { id: string; name: string } | null;
-  route?: { shipperCity?: string | null; shipperState?: string | null; consigneeCity?: string | null; consigneeState?: string | null };
+  route?: {
+    shipperCity?: string | null;
+    shipperState?: string | null;
+    consigneeCity?: string | null;
+    consigneeState?: string | null;
+    shipperAppointmentStart?: string | null;
+    shipperAppointmentEnd?: string | null;
+    consigneeAppointmentStart?: string | null;
+    consigneeAppointmentEnd?: string | null;
+  };
   nextStop?: {
     id: string;
     type: string;
@@ -152,6 +174,54 @@ type DispatchItem = {
   };
 };
 
+type DispatchSyncHealth = {
+  generatedAt?: string;
+  samsara?: {
+    status?: string;
+    errorMessage?: string | null;
+    mapping?: {
+      mappedTrucks?: number;
+      totalActiveTrucks?: number;
+      mappedInTransitTrucks?: number;
+      inTransitTrucks?: number;
+      coveragePct?: number;
+    };
+    telemetry?: {
+      state?: "fresh" | "stale" | "disconnected";
+      inTransitLoads?: number;
+      staleInTransitLoads?: number;
+      activeTrackingSessions?: number;
+      lastPingAt?: string | null;
+    };
+    webhook?: {
+      acceptedLast24h?: number;
+      replayBlockedLast24h?: number;
+      rejectedLast24h?: number;
+      lastReceivedAt?: string | null;
+      schemaReady?: boolean;
+    };
+  };
+};
+
+function isTerminalExecutionStatus(status: string | null | undefined) {
+  return ["DELIVERED", "COMPLETE", "CANCELLED", "INVOICED", "PAID"].includes((status ?? "").toUpperCase());
+}
+
+function dispatchNoteTone(note: string | null) {
+  const value = (note ?? "").toLowerCase();
+  if (!value) return "neutral" as const;
+  if (value.includes("failed") || value.includes("error") || value.includes("unable")) return "danger" as const;
+  if (
+    value.includes("requires") ||
+    value.includes("select") ||
+    value.includes("no safe action") ||
+    value.includes("incomplete")
+  ) {
+    return "warning" as const;
+  }
+  return "success" as const;
+}
+
 const defaultFilters = {
   search: "",
   status: "",
@@ -170,6 +240,15 @@ const defaultFilters = {
 
 type Filters = typeof defaultFilters;
 type QueueView = "active" | "recent" | "history";
+type OwnershipView = "all" | "outbound" | "inbound";
+type MovementView = "all" | "LTL" | "FTL";
+type DispatchCanvasMode = "table" | "split" | "map";
+type SplitFocusPane = "grid" | "map" | "inspector";
+type DispatchQuickQueue = "all" | "unassigned" | "missingDocs" | "exceptions" | "overdue";
+type DispatchRibbonMenu = "workspace" | "queue" | "modes" | "canvas" | "quick" | "loads" | "grid" | "views" | "panels";
+type DispatchLayerFocus = "base" | "ribbon" | "splitPeek";
+type DispatchMapCluster = "all" | string;
+type DispatchWorkspace = "loads" | "trips" | "shipments";
 type WorkflowQueuePresetId =
   | "needsAssignment"
   | "lateRisk"
@@ -191,6 +270,8 @@ type BulkStatus =
   | "INVOICED"
   | "PAID"
   | "CANCELLED";
+
+type ShipmentExecutionStatus = "PLANNED" | "ASSIGNED" | "IN_TRANSIT" | "ARRIVED" | "COMPLETE" | "CANCELLED";
 
 type DispatchPanels = {
   inspector: boolean;
@@ -214,6 +295,7 @@ type DispatchViewConfig = {
   grid: {
     filters: DispatchGridFilterState;
     sortRules: DispatchGridSortRule[];
+    columnOrder: DispatchGridColumnKey[];
   };
 };
 
@@ -229,13 +311,132 @@ type DispatchExceptionItem = {
   status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
   title: string;
   detail?: string | null;
+  sla?: {
+    dueAt: string;
+    hours: number;
+    overdue: boolean;
+  } | null;
   createdAt: string;
+};
+
+type DispatchExceptionAssistActionCode = "ACKNOWLEDGE_EXCEPTION" | "ROUTE_OWNER" | "CREATE_FOLLOWUP_TASK";
+
+type DispatchExceptionAssistPreview = {
+  selectedAction?: {
+    code?: DispatchExceptionAssistActionCode;
+    payload?: {
+      owner?: DispatchExceptionItem["owner"];
+    } | null;
+  } | null;
+  decision?: {
+    suggestedOwner?: DispatchExceptionItem["owner"];
+  } | null;
 };
 
 const DEFAULT_COLUMNS: Partial<Record<DispatchGridColumnKey, boolean>> = DISPATCH_OPTIONAL_COLUMNS.reduce(
   (acc, key) => ({ ...acc, [key]: key === "tripNumber" }),
   {}
 );
+const DISPATCH_TRIP_CONTEXT_COLUMNS: DispatchGridColumnKey[] = [
+  "tripNumber",
+  "tripStatus",
+  "tripMode",
+  "tripOrigin",
+  "tripDestination",
+  "tripDeparture",
+  "tripArrival",
+  "tripLoads",
+];
+const DISPATCH_TRIPS_FIRST_OPEN_COLUMNS: DispatchGridColumnKey[] = [
+  "tripStatus",
+  "tripMode",
+  "tripOrigin",
+  "tripDestination",
+  "tripDeparture",
+  "tripArrival",
+  "tripLoads",
+  "assignment",
+  "customer",
+  "pickupAppt",
+  "deliveryAppt",
+  "nextAction",
+  "exceptions",
+  "risk",
+  "notes",
+  "updatedAt",
+];
+const LEGACY_TRIPS_WORKSPACE_COLUMNS = new Set<string>([
+  "movementMode",
+  "loadsCount",
+  "origin",
+  "destination",
+  "plannedDepartureAt",
+  "plannedArrivalAt",
+  "cargo",
+]);
+type DispatchGridPresetId = "opsDefault" | "tripHeavy" | "financeReview";
+
+const DISPATCH_GRID_PRESET_COLUMNS: Record<DispatchGridPresetId, DispatchGridColumnKey[]> = {
+  opsDefault: [
+    "customer",
+    "pickupAppt",
+    "deliveryAppt",
+    "assignment",
+    "nextAction",
+    "docs",
+    "exceptions",
+    "risk",
+    "notes",
+    "updatedAt",
+    "tripNumber",
+    "tripStatus",
+    "tripMode",
+  ],
+  tripHeavy: [
+    "customer",
+    "pickupAppt",
+    "deliveryAppt",
+    "assignment",
+    "miles",
+    "nextAction",
+    "updatedAt",
+    ...DISPATCH_TRIP_CONTEXT_COLUMNS,
+  ],
+  financeReview: [
+    "customer",
+    "rate",
+    "miles",
+    "paidMiles",
+    "docs",
+    "exceptions",
+    "notes",
+    "updatedAt",
+    "tripNumber",
+    "tripStatus",
+  ],
+};
+const DEFAULT_GRID_COLUMN_ORDER: DispatchGridColumnKey[] = DISPATCH_GRID_COLUMNS.map((column) => column.key);
+
+function buildDispatchGridColumnOrder(preferredColumns: DispatchGridColumnKey[]) {
+  const ordered: DispatchGridColumnKey[] = [];
+  const seen = new Set<DispatchGridColumnKey>();
+  const push = (column: DispatchGridColumnKey) => {
+    if (seen.has(column)) return;
+    seen.add(column);
+    ordered.push(column);
+  };
+  for (const column of DISPATCH_FROZEN_COLUMNS) {
+    push(column);
+  }
+  for (const column of preferredColumns) {
+    if (DISPATCH_FROZEN_COLUMNS.includes(column)) continue;
+    push(column);
+  }
+  for (const column of DEFAULT_GRID_COLUMN_ORDER) {
+    push(column);
+  }
+  return normalizeGridColumnOrder(ordered);
+}
 
 const DEFAULT_PANELS: DispatchPanels = {
   inspector: true,
@@ -248,7 +449,31 @@ const DEFAULT_PANELS: DispatchPanels = {
 const DEFAULT_GRID_STATE: DispatchViewConfig["grid"] = {
   filters: {},
   sortRules: [{ column: "pickupAppt", direction: "asc" }],
+  columnOrder: DEFAULT_GRID_COLUMN_ORDER,
 };
+
+function buildDispatchRoleDefaultColumns(canonicalRole: string | null): Partial<Record<DispatchGridColumnKey, boolean>> {
+  const setFrom = (keys: DispatchGridColumnKey[]) => buildDispatchColumnVisibility(keys);
+  if (canonicalRole === "BILLING") {
+    return setFrom(["tripNumber", "rate", "miles", "paidMiles", "docs", "notes", "updatedAt"]);
+  }
+  if (canonicalRole === "SAFETY" || canonicalRole === "SUPPORT") {
+    return setFrom(["tripNumber", "docs", "exceptions", "risk", "updatedAt"]);
+  }
+  if (canonicalRole === "DISPATCHER" || canonicalRole === "HEAD_DISPATCHER") {
+    return setFrom(["tripNumber", "nextAction", "notes", "docs", "exceptions", "risk", "updatedAt"]);
+  }
+  return setFrom(DISPATCH_OPTIONAL_COLUMNS);
+}
+
+function buildDispatchColumnVisibility(keys: DispatchGridColumnKey[]) {
+  return normalizeViewColumns(
+    DISPATCH_OPTIONAL_COLUMNS.reduce(
+      (acc, key) => ({ ...acc, [key]: keys.includes(key) }),
+      {} as Partial<Record<DispatchGridColumnKey, boolean>>
+    )
+  );
+}
 
 const SYSTEM_VIEW: DispatchViewConfig = {
   id: "dispatch-core",
@@ -259,6 +484,16 @@ const SYSTEM_VIEW: DispatchViewConfig = {
   panels: DEFAULT_PANELS,
   grid: DEFAULT_GRID_STATE,
 };
+
+function toShipmentExecutionStatus(status: string): ShipmentExecutionStatus | null {
+  if (status === "PLANNED") return "PLANNED";
+  if (status === "ASSIGNED") return "ASSIGNED";
+  if (status === "IN_TRANSIT") return "IN_TRANSIT";
+  if (status === "ARRIVED") return "ARRIVED";
+  if (status === "COMPLETE") return "COMPLETE";
+  if (status === "CANCELLED") return "CANCELLED";
+  return null;
+}
 
 const ISSUE_TYPE_LIST = [
   "NEEDS_ASSIGNMENT",
@@ -365,11 +600,99 @@ function formatExceptionAge(createdAt: string) {
   return `${Math.round(diffMinutes / (24 * 60))}d open`;
 }
 
+function formatExceptionSlaDue(sla?: DispatchExceptionItem["sla"]) {
+  if (!sla?.dueAt) return "SLA pending";
+  const dueAt = new Date(sla.dueAt);
+  if (Number.isNaN(dueAt.getTime())) return "SLA pending";
+  const diffMinutes = Math.round((dueAt.getTime() - Date.now()) / 60000);
+  if (sla.overdue || diffMinutes < 0) {
+    const overdueMinutes = Math.abs(diffMinutes);
+    if (overdueMinutes < 60) return `Overdue by ${overdueMinutes}m`;
+    if (overdueMinutes < 24 * 60) return `Overdue by ${Math.round(overdueMinutes / 60)}h`;
+    return `Overdue by ${Math.round(overdueMinutes / (24 * 60))}d`;
+  }
+  if (diffMinutes < 60) return `Due in ${diffMinutes}m`;
+  if (diffMinutes < 24 * 60) return `Due in ${Math.round(diffMinutes / 60)}h`;
+  return `Due in ${Math.round(diffMinutes / (24 * 60))}d`;
+}
+
 function formatDispatchRefreshTime(value: string | null) {
   if (!value) return "Not refreshed yet";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "Not refreshed yet";
-  return `Last refresh ${parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  return `Last refresh ${formatTime24(parsed, "-")}`;
+}
+
+function routeLabel(city?: string | null, state?: string | null) {
+  const parts = [city, state].filter((value) => typeof value === "string" && value.trim().length > 0);
+  return parts.length ? parts.join(", ") : "Route pending";
+}
+
+function buildDrivingDirectionsHref(origin: string, destination: string) {
+  return `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(
+    destination
+  )}&travelmode=driving`;
+}
+
+function buildMapEmbedHref(load: DispatchItem | null) {
+  if (!load) return null;
+  const origin = routeLabel(load.route?.shipperCity, load.route?.shipperState);
+  const destination = routeLabel(load.route?.consigneeCity, load.route?.consigneeState);
+  if (origin === "Route pending" || destination === "Route pending") return null;
+  return `https://www.google.com/maps?saddr=${encodeURIComponent(origin)}&daddr=${encodeURIComponent(
+    destination
+  )}&dirflg=d&output=embed`;
+}
+
+function formatMapEta(load: DispatchItem) {
+  if (isTerminalExecutionStatus(load.status)) return "Delivered";
+  const nextStopAt = load.riskFlags?.nextStopTime;
+  if (nextStopAt) {
+    const parsed = new Date(nextStopAt);
+    if (!Number.isNaN(parsed.getTime())) {
+      return formatDateTime24(parsed, "-");
+    }
+  }
+  if (typeof load.miles === "number" && Number.isFinite(load.miles) && load.miles > 0) {
+    const eta = new Date(Date.now() + (load.miles / 50) * 60 * 60 * 1000);
+    return `${formatDateTime24(eta, "-")} (drive est)`;
+  }
+  return "Pending";
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+function isUnassigned(load: DispatchItem) {
+  return !load.assignment?.driver?.id || !load.assignment?.truck?.id || !load.assignment?.trailer?.id;
+}
+
+function hasMissingDocs(load: DispatchItem) {
+  return !load.docs?.hasPod || !load.docs?.hasBol;
+}
+
+function hasOpenException(load: DispatchItem) {
+  return Boolean((load.exceptions ?? []).some((item) => item.status !== "RESOLVED"));
+}
+
+function mapCorridorLabel(load: DispatchItem) {
+  const origin = routeLabel(load.route?.shipperCity, load.route?.shipperState);
+  const destination = routeLabel(load.route?.consigneeCity, load.route?.consigneeState);
+  return `${origin} -> ${destination}`;
+}
+
+function mapPriorityScore(load: DispatchItem) {
+  let score = 0;
+  if (isUnassigned(load)) score += 40;
+  if (hasOpenException(load)) score += 30;
+  if (Boolean(load.riskFlags?.overdueStopWindow)) score += 25;
+  if (hasMissingDocs(load)) score += 20;
+  if (Boolean(load.riskFlags?.atRisk)) score += 15;
+  if (load.status === "IN_TRANSIT") score += 5;
+  return score;
 }
 
 function countActiveDispatchFilters(filters: Filters) {
@@ -388,6 +711,17 @@ function countActiveDispatchFilters(filters: Filters) {
   if (filters.operatingEntityId.trim()) count += 1;
   if (filters.teamId.trim()) count += 1;
   return count;
+}
+
+function isDeliveredHandoffPending(load: DispatchItem) {
+  if (load.status !== "DELIVERED") return false;
+  const hasIssues = Boolean((load.issues?.length ?? 0) > 0 || (load.issuesTop?.length ?? 0) > 0);
+  const hasOpenExceptions = Boolean((load.exceptions ?? []).some((item) => item.status !== "RESOLVED"));
+  const missingDocs = Boolean(!load.docs?.hasPod || !load.docs?.hasBol);
+  const hasRiskSignal = Boolean(
+    load.riskFlags?.atRisk || load.riskFlags?.trackingOffInTransit || load.riskFlags?.overdueStopWindow
+  );
+  return hasIssues || hasOpenExceptions || missingDocs || hasRiskSignal;
 }
 
 function issuePresetToGridFilters(issueType: string): DispatchGridFilterState {
@@ -412,6 +746,44 @@ function normalizeViewColumns(
   return next;
 }
 
+function normalizeGridColumnOrder(order?: DispatchGridColumnKey[]): DispatchGridColumnKey[] {
+  const allowed = new Set<DispatchGridColumnKey>(DISPATCH_GRID_COLUMNS.map((column) => column.key));
+  const frozen = new Set<DispatchGridColumnKey>(DISPATCH_FROZEN_COLUMNS);
+  const seen = new Set<DispatchGridColumnKey>();
+  const normalized: DispatchGridColumnKey[] = [];
+  for (const key of order ?? []) {
+    if (!allowed.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(key);
+  }
+  for (const column of DISPATCH_GRID_COLUMNS) {
+    if (seen.has(column.key)) continue;
+    seen.add(column.key);
+    normalized.push(column.key);
+  }
+  const movable = normalized.filter((key) => !frozen.has(key));
+  return [...DISPATCH_FROZEN_COLUMNS, ...movable];
+}
+
+function shouldBackfillTripsWorkspaceLayout(preferences?: {
+  columnVisibility?: Partial<Record<DispatchGridColumnKey, boolean>>;
+  columnOrder?: DispatchGridColumnKey[];
+}) {
+  if (!preferences) return true;
+  const hasColumnVisibility = Boolean(
+    preferences.columnVisibility && Object.keys(preferences.columnVisibility).length
+  );
+  const rawOrder = preferences.columnOrder ?? [];
+  const hasLegacyColumns = rawOrder.some((column) =>
+    LEGACY_TRIPS_WORKSPACE_COLUMNS.has(column)
+  );
+  const tripIndex = rawOrder.indexOf("tripNumber");
+  const identityIndex = rawOrder.indexOf("loadNumber");
+  const tripBeforeIdentity =
+    tripIndex >= 0 && identityIndex >= 0 && tripIndex < identityIndex;
+  return !hasColumnVisibility || hasLegacyColumns || tripBeforeIdentity;
+}
+
 function sanitizeView(view: DispatchViewConfig): DispatchViewConfig {
   return {
     ...view,
@@ -427,6 +799,7 @@ function sanitizeView(view: DispatchViewConfig): DispatchViewConfig {
     grid: {
       filters: view.grid?.filters ?? DEFAULT_GRID_STATE.filters,
       sortRules: Array.isArray(view.grid?.sortRules) && view.grid!.sortRules.length ? view.grid!.sortRules : DEFAULT_GRID_STATE.sortRules,
+      columnOrder: normalizeGridColumnOrder(view.grid?.columnOrder ?? DEFAULT_GRID_STATE.columnOrder),
     },
   };
 }
@@ -447,12 +820,45 @@ function hydrateDispatchViewFromApi(view: any): DispatchViewConfig {
   });
 }
 
+function DispatchRibbonActivityButton() {
+  const activity = useAppShellActivity();
+  if (!activity?.canUseActivity) return null;
+  return (
+    <button
+      type="button"
+      aria-label="Open activity"
+      onClick={activity.openActivityDrawer}
+      className="relative ml-auto inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] shadow-[var(--shadow-subtle)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
+    >
+      <svg aria-hidden="true" viewBox="0 0 24 24" className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M15 17H9a2 2 0 0 1-2-2v-4a5 5 0 1 1 10 0v4a2 2 0 0 1-2 2Z" />
+        <path d="M10 20a2 2 0 0 0 4 0" />
+      </svg>
+      {activity.activityBadgeCount > 0 ? (
+        <span className="absolute -right-1 -top-1 inline-flex min-h-4 min-w-4 items-center justify-center rounded-full bg-[color:var(--color-danger)] px-1 text-[10px] font-semibold text-white">
+          {activity.activityBadgeCount > 99 ? "99+" : activity.activityBadgeCount}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function DispatchLayerActivityBridge({
+  onDrawerStateChange,
+}: {
+  onDrawerStateChange: (isOpen: boolean) => void;
+}) {
+  const activity = useAppShellActivity();
+  useEffect(() => {
+    onDrawerStateChange(Boolean(activity?.isActivityDrawerOpen));
+  }, [activity?.isActivityDrawerOpen, onDrawerStateChange]);
+  return null;
+}
+
 function DispatchPageContent({
   workspace,
-  onWorkspaceChange,
 }: {
   workspace: DispatchWorkspace;
-  onWorkspaceChange: (next: DispatchWorkspace) => void;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -473,13 +879,24 @@ function DispatchPageContent({
     useState<Partial<Record<DispatchGridColumnKey, boolean>>>(normalizeViewColumns(DEFAULT_COLUMNS));
   const [gridFilters, setGridFilters] = useState<DispatchGridFilterState>(DEFAULT_GRID_STATE.filters);
   const [gridSortRules, setGridSortRules] = useState<DispatchGridSortRule[]>(DEFAULT_GRID_STATE.sortRules);
+  const [gridColumnOrder, setGridColumnOrder] = useState<DispatchGridColumnKey[]>(DEFAULT_GRID_STATE.columnOrder);
   const [panelLayout, setPanelLayout] = useState<DispatchPanels>(DEFAULT_PANELS);
   const [personalViews, setPersonalViews] = useState<DispatchViewConfig[]>([]);
   const [templateViews, setTemplateViews] = useState<DispatchViewConfig[]>([]);
   const [canManageTemplates, setCanManageTemplates] = useState(false);
   const [activeViewId, setActiveViewId] = useState<string>(SYSTEM_VIEW.id);
   const [showFilters, setShowFilters] = useState(false);
-  const [showWorkbenchMenu, setShowWorkbenchMenu] = useState(false);
+  const [activeRibbonMenu, setActiveRibbonMenu] = useState<DispatchRibbonMenu | null>(null);
+  const [gridCommand, setGridCommand] = useState<DispatchGridCommand | null>(null);
+  const [canvasMode, setCanvasMode] = useState<DispatchCanvasMode>("table");
+  const [splitPrimaryPane, setSplitPrimaryPane] = useState<SplitFocusPane>("grid");
+  const [splitSecondaryPane, setSplitSecondaryPane] = useState<Exclude<SplitFocusPane, "grid">>("inspector");
+  const [splitSecondaryOpen, setSplitSecondaryOpen] = useState(false);
+  const [quickQueue, setQuickQueue] = useState<DispatchQuickQueue>("all");
+  const [mapClusterFilter, setMapClusterFilter] = useState<DispatchMapCluster>("all");
+  const [mapSelectedLoadId, setMapSelectedLoadId] = useState<string | null>(null);
+  const [mapDraggingDriverId, setMapDraggingDriverId] = useState<string | null>(null);
+  const [mapDropTargetLoadId, setMapDropTargetLoadId] = useState<string | null>(null);
   const [activeWorkflowQueueId, setActiveWorkflowQueueId] = useState<WorkflowQueuePresetId | "">("");
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -490,12 +907,12 @@ function DispatchPageContent({
   const [bulkLoading, setBulkLoading] = useState(false);
   const [bulkNote, setBulkNote] = useState<string | null>(null);
   const [cellSavingKey, setCellSavingKey] = useState<string | null>(null);
-  const [laneAssigningKey, setLaneAssigningKey] = useState<string | null>(null);
   const [selectedLoadId, setSelectedLoadId] = useState<string | null>(null);
   const [selectedLoad, setSelectedLoad] = useState<any | null>(null);
   const [inspectorFocusSection, setInspectorFocusSection] = useState<DispatchInspectorFocusSection | null>(null);
   const [inspectorFocusNonce, setInspectorFocusNonce] = useState(0);
   const [docUploadTarget, setDocUploadTarget] = useState<{ loadId: string; loadNumber?: string | null } | null>(null);
+  const [createLoadDrawerOpen, setCreateLoadDrawerOpen] = useState(false);
   const [dispatchActionNote, setDispatchActionNote] = useState<string | null>(null);
   const [dispatchSettings, setDispatchSettings] = useState<any | null>(null);
   const [availability, setAvailability] = useState<AvailabilityData | null>(null);
@@ -517,19 +934,43 @@ function DispatchPageContent({
   const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [queueLoading, setQueueLoading] = useState(false);
   const [queueLoadedOnce, setQueueLoadedOnce] = useState(false);
+  const [workspaceLayoutHydrated, setWorkspaceLayoutHydrated] = useState(false);
   const [assetsError, setAssetsError] = useState<string | null>(null);
   const [exceptionsError, setExceptionsError] = useState<string | null>(null);
+  const [syncHealth, setSyncHealth] = useState<DispatchSyncHealth | null>(null);
+  const [syncHealthError, setSyncHealthError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   const [dispatchExceptions, setDispatchExceptions] = useState<DispatchExceptionItem[]>([]);
-  const [exceptionsSummary, setExceptionsSummary] = useState<{ total: number; open: number; acknowledged: number; blockers: number } | null>(null);
+  const [exceptionsOwnerFilter, setExceptionsOwnerFilter] = useState<"ALL" | DispatchExceptionItem["owner"]>("ALL");
+  const [exceptionsSummary, setExceptionsSummary] = useState<{
+    total: number;
+    open: number;
+    acknowledged: number;
+    blockers: number;
+    overdue: number;
+    owner: "ALL" | DispatchExceptionItem["owner"];
+  } | null>(null);
+  const [exceptionAssistRunningId, setExceptionAssistRunningId] = useState<string | null>(null);
   const [tripInspector, setTripInspector] = useState<any | null>(null);
   const [tripInspectorError, setTripInspectorError] = useState<string | null>(null);
   const [tripInspectorLoading, setTripInspectorLoading] = useState(false);
+  const [tripOptimizeLoading, setTripOptimizeLoading] = useState(false);
+  const [dispatchPackLoading, setDispatchPackLoading] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
   const [showStopActions, setShowStopActions] = useState(false);
   const [blocked, setBlocked] = useState<{ message?: string; ctaHref?: string } | null>(null);
+  const [hideDeliveredInActive, setHideDeliveredInActive] = useState(false);
   const pendingLoadIdRef = useRef<string | null>(null);
+  const enrichmentSignatureRef = useRef("");
+  const workspaceLayoutFingerprintRef = useRef("");
   const appliedIssuePresetRef = useRef<string | null>(null);
+  const dispatchHeaderRef = useRef<HTMLDivElement | null>(null);
+  const gridCommandTokenRef = useRef(0);
+  const [dispatchHeaderOffset, setDispatchHeaderOffset] = useState(0);
+  const [layerFocus, setLayerFocus] = useState<DispatchLayerFocus>("base");
+  const [activityDrawerOpen, setActivityDrawerOpen] = useState(false);
+  const [draggingGridColumn, setDraggingGridColumn] = useState<DispatchGridColumnKey | null>(null);
+  const [dispatchColumnSearch, setDispatchColumnSearch] = useState("");
 
   const loadIdParam = searchParams.get("loadId");
   const queueView = useMemo<QueueView>(() => {
@@ -537,7 +978,43 @@ function DispatchPageContent({
     if (value === "recent" || value === "history") return value;
     return "active";
   }, [searchParams]);
+  const ownershipView = useMemo<OwnershipView>(() => {
+    const value = searchParams.get("ownership");
+    if (value === "outbound" || value === "inbound") return value;
+    return "all";
+  }, [searchParams]);
+  const movementView = useMemo<MovementView>(() => {
+    const value = (searchParams.get("movementMode") || "").toUpperCase();
+    if (value === "LTL" || value === "FTL") return value;
+    return "all";
+  }, [searchParams]);
   const issuePresetParam = searchParams.get("issuePreset");
+  const createLoadRequested =
+    searchParams.get("createLoad") === "1" || searchParams.get("create") === "1";
+
+  const openRibbonMenu = useCallback(
+    (menu: DispatchRibbonMenu) => {
+      setActiveRibbonMenu(menu);
+      setLayerFocus("ribbon");
+    },
+    []
+  );
+
+  const toggleRibbonMenu = useCallback((menu: DispatchRibbonMenu) => {
+    setActiveRibbonMenu((prev) => {
+      const next = prev === menu ? null : menu;
+      setLayerFocus(next ? "ribbon" : "base");
+      return next;
+    });
+  }, []);
+
+  const toggleSplitPeekPanel = useCallback(() => {
+    setSplitSecondaryOpen((prev) => {
+      const next = !prev;
+      setLayerFocus(next ? "splitPeek" : "base");
+      return next;
+    });
+  }, []);
 
   const updateLoadIdParam = useCallback(
     (loadId: string | null) => {
@@ -569,13 +1046,87 @@ function DispatchPageContent({
     [pathname, router, searchParams]
   );
 
+  const updateOwnershipViewParam = useCallback(
+    (nextView: OwnershipView) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (nextView === "all") {
+        params.delete("ownership");
+      } else {
+        params.set("ownership", nextView);
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+      setPageIndex(0);
+    },
+    [pathname, router, searchParams]
+  );
+
+  const updateMovementViewParam = useCallback(
+    (nextView: MovementView) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (nextView === "all") {
+        params.delete("movementMode");
+      } else {
+        params.set("movementMode", nextView);
+      }
+      if (nextView === "FTL") {
+        params.delete("ownership");
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+      setPageIndex(0);
+    },
+    [pathname, router, searchParams]
+  );
+
+  const switchDispatchWorkspace = useCallback(
+    (nextWorkspace: DispatchWorkspace) => {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("workspace", nextWorkspace);
+      if (nextWorkspace === "trips") {
+        params.delete("loadId");
+        setPanelLayout((prev) => ({ ...prev, inspector: false, tripInspector: false }));
+      } else {
+        params.delete("tripId");
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+      setActiveRibbonMenu(null);
+    },
+    [pathname, router, searchParams]
+  );
+
+  useEffect(() => {
+    if (workspace !== "trips") return;
+    setPanelLayout((prev) => {
+      if (!prev.inspector && !prev.tripInspector) return prev;
+      return { ...prev, inspector: false, tripInspector: false };
+    });
+  }, [workspace]);
+
   const selectedLoadInView = Boolean(selectedLoadId && loads.some((load) => load.id === selectedLoadId));
+
+  const updateCreateLoadParam = useCallback(
+    (open: boolean) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (open) {
+        params.set("createLoad", "1");
+      } else {
+        params.delete("createLoad");
+        params.delete("create");
+      }
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+    },
+    [pathname, router, searchParams]
+  );
 
   const selectLoad = useCallback(
     (loadId: string, options?: { preserveFocus?: boolean }) => {
       if (!options?.preserveFocus) {
         setInspectorFocusSection(null);
       }
+      setMapSelectedLoadId(loadId);
       setSelectedLoadId(loadId);
       updateLoadIdParam(loadId);
     },
@@ -609,6 +1160,19 @@ function DispatchPageContent({
     [loads]
   );
 
+  const openTripInspectorForLoad = useCallback(
+    (loadId: string) => {
+      if (workspace === "trips") {
+        setPanelLayout((prev) => ({ ...prev, inspector: false, tripInspector: true }));
+        selectLoad(loadId, { preserveFocus: true });
+        return;
+      }
+      setPanelLayout((prev) => ({ ...prev, inspector: true, tripInspector: true }));
+      openInspectorForLoad(loadId, "assignment");
+    },
+    [openInspectorForLoad, selectLoad, workspace]
+  );
+
 
   const handleLegCreated = useCallback(() => {
     setLegDrawerOpen(false);
@@ -617,9 +1181,15 @@ function DispatchPageContent({
   }, []);
 
   const capabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
+  const noAccessCta = useMemo(() => getRoleNoAccessCta(user?.role), [user?.role]);
   const hasDispatchRole = capabilities.canDispatchExecution;
   const canDispatch = capabilities.canAccessDispatch;
   const canCreateLoad = capabilities.canEditLoad || capabilities.canDispatchExecution;
+  const canCreateLoadInActiveWorkspace = workspace === "loads" && canCreateLoad;
+  const isLoadWorkspace = workspace === "loads";
+  const isShipmentWorkspace = workspace === "shipments";
+  const isTripWorkspace = workspace === "trips";
+  const isDispatchGridWorkspace = true;
   const isQueueReadOnly = queueView !== "active";
   const canStartTracking = capabilities.canStartTracking && canDispatch;
   const canSeeAllTeams = Boolean(
@@ -627,8 +1197,100 @@ function DispatchPageContent({
   );
   const canAssignTeamsOps = Boolean(capabilities.canAccessAdmin || capabilities.canSeeTeamsOps);
   const canOverride = capabilities.canAccessAdmin;
+  const dispatchRoleDefaultColumns = useMemo(
+    () => buildDispatchRoleDefaultColumns(capabilities.canonicalRole),
+    [capabilities.canonicalRole]
+  );
+  useEffect(() => {
+    if (createLoadRequested && canCreateLoadInActiveWorkspace) {
+      setCreateLoadDrawerOpen(true);
+    }
+  }, [canCreateLoadInActiveWorkspace, createLoadRequested]);
+
+  useEffect(() => {
+    if (!canDispatch || !isDispatchGridWorkspace) return;
+    setWorkspaceLayoutHydrated(false);
+    let cancelled = false;
+    apiFetch<{
+      preferences?: {
+        density?: DispatchGridDensity;
+        columnVisibility?: Partial<Record<DispatchGridColumnKey, boolean>>;
+        columnOrder?: DispatchGridColumnKey[];
+      };
+      updatedAt?: string | null;
+    }>(`/dispatch/workspaces/${workspace}/layout`)
+      .then((payload) => {
+        if (cancelled) return;
+        const preferences = payload.preferences ?? {};
+        const hasSavedLayout = Boolean(payload.updatedAt);
+        const shouldApplyTripsPreset =
+          workspace === "trips" &&
+          (!hasSavedLayout || shouldBackfillTripsWorkspaceLayout(preferences));
+        const nextDensity = preferences.density === "compact" ? "compact" : "comfortable";
+        const nextVisibility = shouldApplyTripsPreset
+          ? buildDispatchColumnVisibility(DISPATCH_TRIPS_FIRST_OPEN_COLUMNS)
+          : normalizeViewColumns(preferences.columnVisibility ?? DEFAULT_COLUMNS);
+        const nextOrder = shouldApplyTripsPreset
+          ? buildDispatchGridColumnOrder(DISPATCH_TRIPS_FIRST_OPEN_COLUMNS)
+          : normalizeGridColumnOrder(preferences.columnOrder ?? DEFAULT_GRID_STATE.columnOrder);
+        setGridDensity(nextDensity);
+        setColumnVisibility(nextVisibility);
+        setGridColumnOrder(nextOrder);
+        const normalizedPayload = {
+          density: nextDensity,
+          columnVisibility: nextVisibility,
+          columnOrder: nextOrder,
+        };
+        workspaceLayoutFingerprintRef.current = JSON.stringify(normalizedPayload);
+        if (shouldApplyTripsPreset) {
+          void apiFetch(`/dispatch/workspaces/${workspace}/layout`, {
+            method: "PUT",
+            body: JSON.stringify({ preferences: normalizedPayload }),
+          }).catch(() => {
+            workspaceLayoutFingerprintRef.current = "";
+          });
+        }
+      })
+      .catch(() => {
+        workspaceLayoutFingerprintRef.current = "";
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setWorkspaceLayoutHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canDispatch, isDispatchGridWorkspace, workspace]);
+
+  useEffect(() => {
+    if (!canDispatch || !isDispatchGridWorkspace || !workspaceLayoutHydrated) return;
+    const payload = {
+      density: gridDensity,
+      columnVisibility: normalizeViewColumns(columnVisibility),
+      columnOrder: normalizeGridColumnOrder(gridColumnOrder),
+    };
+    const fingerprint = JSON.stringify(payload);
+    if (workspaceLayoutFingerprintRef.current === fingerprint) return;
+    workspaceLayoutFingerprintRef.current = fingerprint;
+    apiFetch(`/dispatch/workspaces/${workspace}/layout`, {
+      method: "PUT",
+      body: JSON.stringify({ preferences: payload }),
+    }).catch(() => {
+      workspaceLayoutFingerprintRef.current = "";
+    });
+  }, [canDispatch, columnVisibility, gridColumnOrder, gridDensity, isDispatchGridWorkspace, workspace, workspaceLayoutHydrated]);
+
   const userLastViewStorageKey = useMemo(
     () => (user?.id ? `dispatch:last-view:${user.id}` : null),
+    [user?.id]
+  );
+  const deliveredVisibilityStorageKey = useMemo(
+    () => (user?.id ? `dispatch:hide-delivered-active:${user.id}` : null),
+    [user?.id]
+  );
+  const canvasModeStorageKey = useMemo(
+    () => (user?.id ? `dispatch:canvas-mode:${user.id}` : null),
     [user?.id]
   );
   const allViews = useMemo(
@@ -639,6 +1301,106 @@ function DispatchPageContent({
     if (activeViewId === SYSTEM_VIEW.id) return SYSTEM_VIEW;
     return allViews.find((view) => view.id === activeViewId) ?? SYSTEM_VIEW;
   }, [activeViewId, allViews]);
+  const dispatchColumnLabelByKey = useMemo(
+    () => new Map<DispatchGridColumnKey, string>(DISPATCH_GRID_COLUMNS.map((column) => [column.key, column.label])),
+    []
+  );
+  const dispatchColumnCatalog = useMemo(() => DISPATCH_WORKSPACE_COLUMN_CATALOG, []);
+  const filteredDispatchColumnCatalog = useMemo(() => {
+    return filterWorkspaceColumnCatalog(dispatchColumnCatalog, dispatchColumnLabelByKey, dispatchColumnSearch);
+  }, [dispatchColumnCatalog, dispatchColumnLabelByKey, dispatchColumnSearch]);
+  const normalizedGridColumnOrder = useMemo(
+    () => normalizeGridColumnOrder(gridColumnOrder),
+    [gridColumnOrder]
+  );
+  const normalizedColumnVisibility = useMemo(
+    () => normalizeViewColumns(columnVisibility),
+    [columnVisibility]
+  );
+  const visibleGridColumns = useMemo(
+    () =>
+      normalizedGridColumnOrder.filter((column) => {
+        if (DISPATCH_REQUIRED_COLUMNS.includes(column)) return true;
+        return normalizedColumnVisibility[column] !== false;
+      }),
+    [normalizedGridColumnOrder, normalizedColumnVisibility]
+  );
+  const dispatchEnrichmentFields = useMemo(() => {
+    const fields = new Set<string>();
+    for (const column of visibleGridColumns) {
+      if (column === "docs") fields.add("docs");
+      if (column === "exceptions") fields.add("exceptions");
+      if (column === "notes") fields.add("notesIndicator");
+      if (
+        column === "tripNumber" ||
+        column === "tripStatus" ||
+        column === "tripMode" ||
+        column === "tripOrigin" ||
+        column === "tripDestination" ||
+        column === "tripDeparture" ||
+        column === "tripArrival" ||
+        column === "tripLoads"
+      ) {
+        fields.add("trip");
+      }
+      if (column === "pickupAppt" || column === "deliveryAppt") fields.add("nextStop");
+      if (column === "risk") fields.add("tracking");
+    }
+    return Array.from(fields);
+  }, [visibleGridColumns]);
+  const movableGridColumns = useMemo(
+    () => normalizedGridColumnOrder.filter((column) => !DISPATCH_FROZEN_COLUMNS.includes(column)),
+    [normalizedGridColumnOrder]
+  );
+  const canMoveGridColumn = useCallback(
+    (column: DispatchGridColumnKey, direction: -1 | 1) => {
+      const index = movableGridColumns.indexOf(column);
+      const nextIndex = index + direction;
+      return index >= 0 && nextIndex >= 0 && nextIndex < movableGridColumns.length;
+    },
+    [movableGridColumns]
+  );
+  const moveGridColumn = useCallback((column: DispatchGridColumnKey, direction: -1 | 1) => {
+    setGridColumnOrder((prev) => {
+      const base = normalizeGridColumnOrder(prev);
+      const movable = base.filter((key) => !DISPATCH_FROZEN_COLUMNS.includes(key));
+      const index = movable.indexOf(column);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= movable.length) return prev;
+      const nextMovable = [...movable];
+      const [moved] = nextMovable.splice(index, 1);
+      nextMovable.splice(nextIndex, 0, moved);
+      let pointer = 0;
+      return base.map((key) => {
+        if (DISPATCH_FROZEN_COLUMNS.includes(key)) return key;
+        const replacement = nextMovable[pointer];
+        pointer += 1;
+        return replacement;
+      });
+    });
+  }, []);
+  const moveGridColumnToTarget = useCallback((column: DispatchGridColumnKey, target: DispatchGridColumnKey) => {
+    if (column === target) return;
+    setGridColumnOrder((prev) => {
+      const base = normalizeGridColumnOrder(prev);
+      const movable = base.filter((key) => !DISPATCH_FROZEN_COLUMNS.includes(key));
+      const fromIndex = movable.indexOf(column);
+      const targetIndex = movable.indexOf(target);
+      if (fromIndex < 0 || targetIndex < 0) return prev;
+      const nextMovable = [...movable];
+      const [moved] = nextMovable.splice(fromIndex, 1);
+      const insertIndex = nextMovable.indexOf(target);
+      if (insertIndex < 0) return prev;
+      nextMovable.splice(insertIndex, 0, moved);
+      let pointer = 0;
+      return base.map((key) => {
+        if (DISPATCH_FROZEN_COLUMNS.includes(key)) return key;
+        const replacement = nextMovable[pointer];
+        pointer += 1;
+        return replacement;
+      });
+    });
+  }, []);
   const dispatchStage =
     selectedLoad?.status && ["DRAFT", "PLANNED", "ASSIGNED"].includes(selectedLoad.status);
   const rateConRequired = Boolean(dispatchSettings?.requireRateConBeforeDispatch && selectedLoad?.loadType === "BROKERED");
@@ -651,8 +1413,9 @@ function DispatchPageContent({
     const messages: string[] = [];
     if (assetsError) messages.push(`Assets sync issue: ${assetsError}`);
     if (exceptionsError) messages.push(`Exceptions sync issue: ${exceptionsError}`);
+    if (syncHealthError) messages.push(`Telematics sync issue: ${syncHealthError}`);
     return messages;
-  }, [assetsError, exceptionsError]);
+  }, [assetsError, exceptionsError, syncHealthError]);
   const assignDisabled =
     isQueueReadOnly ||
     !assignForm.driverId ||
@@ -669,16 +1432,32 @@ function DispatchPageContent({
   }, []);
 
   useEffect(() => {
-    if (!showWorkbenchMenu) return;
+    if (!activeRibbonMenu) return;
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      setShowWorkbenchMenu(false);
+      setActiveRibbonMenu(null);
+      setLayerFocus("base");
     };
     window.addEventListener("keydown", onEscape);
     return () => {
       window.removeEventListener("keydown", onEscape);
     };
-  }, [showWorkbenchMenu]);
+  }, [activeRibbonMenu]);
+
+  useEffect(() => {
+    if (!activeRibbonMenu) return;
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (dispatchHeaderRef.current?.contains(target)) return;
+      setActiveRibbonMenu(null);
+      setLayerFocus("base");
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+    };
+  }, [activeRibbonMenu]);
 
   useEffect(() => {
     if (!canDispatch || !user?.id) return;
@@ -708,6 +1487,9 @@ function DispatchPageContent({
         setFilters(nextView.filters);
         setGridDensity(nextView.density);
         setColumnVisibility(normalizeViewColumns(nextView.columns));
+        setGridFilters(nextView.grid.filters ?? DEFAULT_GRID_STATE.filters);
+        setGridSortRules(nextView.grid.sortRules ?? DEFAULT_GRID_STATE.sortRules);
+        setGridColumnOrder(normalizeGridColumnOrder(nextView.grid.columnOrder ?? DEFAULT_GRID_STATE.columnOrder));
         setPanelLayout({ ...nextView.panels, exceptions: false });
       })
       .catch(() => {
@@ -725,6 +1507,56 @@ function DispatchPageContent({
     if (!userLastViewStorageKey) return;
     window.localStorage.setItem(userLastViewStorageKey, activeViewId);
   }, [activeViewId, userLastViewStorageKey]);
+
+  useEffect(() => {
+    if (hasAccess === null) return;
+    if (hasAccess && hasDispatchRole) return;
+    router.replace(noAccessCta.href);
+  }, [hasAccess, hasDispatchRole, noAccessCta.href, router]);
+
+  useEffect(() => {
+    if (!deliveredVisibilityStorageKey) return;
+    const stored = window.localStorage.getItem(deliveredVisibilityStorageKey);
+    setHideDeliveredInActive(stored === "1");
+  }, [deliveredVisibilityStorageKey]);
+
+  useEffect(() => {
+    if (!deliveredVisibilityStorageKey) return;
+    window.localStorage.setItem(deliveredVisibilityStorageKey, hideDeliveredInActive ? "1" : "0");
+  }, [deliveredVisibilityStorageKey, hideDeliveredInActive]);
+
+  useEffect(() => {
+    if (!canvasModeStorageKey) return;
+    const stored = window.localStorage.getItem(canvasModeStorageKey);
+    if (stored === "map" || stored === "split" || stored === "table") {
+      setCanvasMode(stored);
+    }
+  }, [canvasModeStorageKey]);
+
+  useEffect(() => {
+    if (!canvasModeStorageKey) return;
+    window.localStorage.setItem(canvasModeStorageKey, canvasMode);
+  }, [canvasMode, canvasModeStorageKey]);
+
+  useEffect(() => {
+    if (canvasMode !== "split") {
+      setSplitSecondaryOpen(false);
+      setLayerFocus((current) => (current === "splitPeek" ? "base" : current));
+      return;
+    }
+    if (splitPrimaryPane === "map" && splitSecondaryPane === "map") {
+      setSplitSecondaryPane("inspector");
+    }
+    if (splitPrimaryPane === "inspector" && splitSecondaryPane === "inspector") {
+      setSplitSecondaryPane("map");
+    }
+  }, [canvasMode, splitPrimaryPane, splitSecondaryPane]);
+
+  useEffect(() => {
+    if (!activityDrawerOpen) return;
+    setActiveRibbonMenu(null);
+    setLayerFocus("base");
+  }, [activityDrawerOpen]);
 
   useEffect(() => {
     if (!user || !capabilities.canAccessAdmin) return;
@@ -824,6 +1656,18 @@ function DispatchPageContent({
     }
   }, [canDispatch]);
 
+  const loadDispatchSyncHealth = useCallback(async () => {
+    if (!canDispatch) return;
+    try {
+      const data = await apiFetch<DispatchSyncHealth>("/dispatch/sync-health");
+      setSyncHealth(data);
+      setSyncHealthError(null);
+    } catch (error) {
+      setSyncHealth(null);
+      setSyncHealthError((error as Error).message || "Unable to load sync health.");
+    }
+  }, [canDispatch]);
+
   useEffect(() => {
     if (!canSeeAllTeams) {
       setTeams([]);
@@ -840,10 +1684,23 @@ function DispatchPageContent({
     loadAssets();
   }, [canDispatch, loadAssets]);
 
+  useEffect(() => {
+    if (!canDispatch) return;
+    void loadDispatchSyncHealth();
+    const interval = window.setInterval(() => {
+      void loadDispatchSyncHealth();
+    }, 60_000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [canDispatch, loadDispatchSyncHealth]);
+
   const buildParams = useCallback((nextFilters = filters, page = pageIndex) => {
     const params = new URLSearchParams();
     params.set("view", "dispatch");
+    if (movementView !== "all") params.set("movementMode", movementView);
     params.set("queueView", queueView);
+    if (ownershipView !== "all") params.set("ownership", ownershipView.toUpperCase());
     params.set("page", String(page + 1));
     params.set("limit", String(PAGE_SIZE));
     if (nextFilters.search) params.set("search", nextFilters.search);
@@ -862,16 +1719,36 @@ function DispatchPageContent({
     if (nextFilters.operatingEntityId) params.set("operatingEntityId", nextFilters.operatingEntityId);
     if (canSeeAllTeams && nextFilters.teamId) params.set("teamId", nextFilters.teamId);
     return params.toString();
-  }, [filters, pageIndex, canSeeAllTeams, queueView]);
+  }, [filters, pageIndex, canSeeAllTeams, queueView, ownershipView, movementView]);
 
   const loadDispatchLoads = useCallback(async (nextFilters = filters, page = pageIndex) => {
     if (!canDispatch) return;
     setQueueLoading(true);
     try {
       const query = buildParams(nextFilters, page);
-      const url = query ? `/loads?${query}` : "/loads?view=dispatch";
+      const queryParams = new URLSearchParams(query);
+      queryParams.set("fieldMode", "base");
+      const url = queryParams.toString() ? `/dispatch/shipments?${queryParams.toString()}` : "/dispatch/shipments";
       const data = await apiFetch<{ items: DispatchItem[]; total: number; totalPages: number }>(url);
-      setLoads(data.items ?? []);
+      enrichmentSignatureRef.current = "";
+      setLoads(
+        (data.items ?? []).map((item) =>
+          isTerminalExecutionStatus(item.status)
+            ? {
+                ...item,
+                riskFlags: item.riskFlags
+                  ? {
+                      ...item.riskFlags,
+                      needsAssignment: false,
+                      trackingOffInTransit: false,
+                      overdueStopWindow: false,
+                      atRisk: false,
+                    }
+                  : item.riskFlags,
+              }
+            : item
+        )
+      );
       setTotalPages(data.totalPages ?? 1);
       setTotalCount(data.total ?? 0);
       setDispatchError(null);
@@ -889,23 +1766,89 @@ function DispatchPageContent({
     loadDispatchLoads(filters, pageIndex);
   }, [canDispatch, pageIndex, filters, loadDispatchLoads]);
 
+  useEffect(() => {
+    if (!canDispatch || !isDispatchGridWorkspace) return;
+    if (loads.length === 0 || dispatchEnrichmentFields.length === 0) return;
+    const loadIds = loads.map((item) => item.id);
+    const signature = `${loadIds.join(",")}::${dispatchEnrichmentFields.join(",")}`;
+    if (enrichmentSignatureRef.current === signature) return;
+    enrichmentSignatureRef.current = signature;
+    const params = new URLSearchParams();
+    params.set("loadIds", loadIds.join(","));
+    params.set("fields", dispatchEnrichmentFields.join(","));
+    let cancelled = false;
+    apiFetch<{
+      items: Array<
+        Partial<
+          Pick<DispatchItem, "id" | "docs" | "exceptions" | "notesIndicator" | "tracking" | "nextStop" | "trip" | "legSummary">
+        >
+      >;
+    }>(`/dispatch/shipments/enrichment?${params.toString()}`)
+      .then((payload) => {
+        if (cancelled) return;
+        const patchById = new Map<string, (typeof payload.items)[number]>();
+        for (const item of payload.items ?? []) {
+          if (!item.id) continue;
+          patchById.set(item.id, item);
+        }
+        if (!patchById.size) return;
+        setLoads((prev) =>
+          prev.map((row) => {
+            const patch = patchById.get(row.id);
+            if (!patch) return row;
+            return {
+              ...row,
+              docs: patch.docs ?? row.docs,
+              exceptions: patch.exceptions ?? row.exceptions,
+              notesIndicator: patch.notesIndicator ?? row.notesIndicator,
+              tracking: patch.tracking ?? row.tracking,
+              nextStop: patch.nextStop ?? row.nextStop,
+              trip: patch.trip ?? row.trip,
+              legSummary: patch.legSummary ?? row.legSummary,
+            };
+          })
+        );
+      })
+      .catch(() => {
+        enrichmentSignatureRef.current = "";
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canDispatch, dispatchEnrichmentFields, isDispatchGridWorkspace, loads]);
+
   const loadDispatchExceptions = useCallback(async () => {
     if (!canDispatch) return;
     try {
       setExceptionsError(null);
       const data = await apiFetch<{
         exceptions: DispatchExceptionItem[];
-        summary: { total: number; open: number; acknowledged: number; blockers: number };
-      }>("/dispatch/exceptions?status=ALL");
-      const unresolved = (data.exceptions ?? []).filter((item) => item.status !== "RESOLVED");
+        summary: { total: number; overdue: number; owner: string };
+      }>(
+        `/dispatch/exceptions/sla-queue${
+          exceptionsOwnerFilter === "ALL" ? "" : `?owner=${encodeURIComponent(exceptionsOwnerFilter)}`
+        }`
+      );
+      const unresolved = data.exceptions ?? [];
+      const open = unresolved.filter((item) => item.status === "OPEN").length;
+      const acknowledged = unresolved.filter((item) => item.status === "ACKNOWLEDGED").length;
+      const blockers = unresolved.filter((item) => item.severity === "BLOCKER").length;
+      const overdue = unresolved.filter((item) => item.sla?.overdue).length;
       setDispatchExceptions(unresolved);
-      setExceptionsSummary(data.summary ?? null);
+      setExceptionsSummary({
+        total: data.summary?.total ?? unresolved.length,
+        open,
+        acknowledged,
+        blockers,
+        overdue: data.summary?.overdue ?? overdue,
+        owner: exceptionsOwnerFilter,
+      });
     } catch (error) {
       setDispatchExceptions([]);
       setExceptionsSummary(null);
       setExceptionsError((error as Error).message || "Unable to load dispatch exceptions.");
     }
-  }, [canDispatch]);
+  }, [canDispatch, exceptionsOwnerFilter]);
 
   useEffect(() => {
     if (!canDispatch) return;
@@ -986,6 +1929,28 @@ function DispatchPageContent({
       .then((data) => setAvailability(data))
       .catch(() => setAvailability(null));
   }, [selectedLoadId, selectedLoadInView, canDispatch, refreshSelectedLoad, filters.teamId, canSeeAllTeams]);
+
+  const openCreateLoadDrawer = useCallback(() => {
+    setCreateLoadDrawerOpen(true);
+    updateCreateLoadParam(true);
+  }, [updateCreateLoadParam]);
+
+  const closeCreateLoadDrawer = useCallback(() => {
+    setCreateLoadDrawerOpen(false);
+    updateCreateLoadParam(false);
+  }, [updateCreateLoadParam]);
+
+  const handleCreateLoadFromDispatch = useCallback(
+    async (load: { id: string; loadNumber: string }) => {
+      setDispatchActionNote(`Created load ${load.loadNumber}`);
+      setPageIndex(0);
+      await loadDispatchLoads(filters, 0);
+      setSelectedLoadId(load.id);
+      updateLoadIdParam(load.id);
+      await refreshSelectedLoad(load.id);
+    },
+    [filters, loadDispatchLoads, refreshSelectedLoad, updateLoadIdParam]
+  );
 
   useEffect(() => {
     if (!selectedLoadId || !selectedLoadInView || !canDispatch || isQueueReadOnly) {
@@ -1072,7 +2037,8 @@ function DispatchPageContent({
     }
     const trackingOff = load?.status === "IN_TRANSIT" && trackingState === "OFF";
     const needsAssignment =
-      !trip || !trip.driverId || !trip.truckId || !trip.trailerId || trip.status === "PLANNED";
+      !isTerminalExecutionStatus(load?.status) &&
+      (!trip || !trip.driverId || !trip.truckId || !trip.trailerId || trip.status === "PLANNED");
     return {
       needsAssignment,
       trackingOffInTransit: trackingOff,
@@ -1232,14 +2198,16 @@ function DispatchPageContent({
     try {
       const existingTrip = selectedLoad?.tripLoads?.[0]?.trip ?? null;
       if (existingTrip?.id) {
-        await apiFetch(`/trips/${existingTrip.id}/assign`, {
-          method: "POST",
+        await apiFetch(`/shipments/${selectedLoad.id}/execution`, {
+          method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             driverId: params.driverId,
             truckId: params.truckId || null,
             trailerId: params.trailerId || null,
             status: "ASSIGNED",
+            reasonCode: "DISPATCH_ASSIGNMENT",
+            reasonNote: assistOverrideReason.trim() || overrideReason.trim() || undefined,
           }),
         });
       } else {
@@ -1314,14 +2282,15 @@ function DispatchPageContent({
       setAssignError("Cannot unassign once trip dispatch is in progress.");
       return;
     }
-    await apiFetch(`/trips/${existingTrip.id}/assign`, {
-      method: "POST",
+    await apiFetch(`/shipments/${selectedLoad.id}/execution`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         driverId: null,
         truckId: null,
         trailerId: null,
         status: "PLANNED",
+        reasonCode: "DISPATCH_UNASSIGN",
       }),
     });
     const updated = await refreshSelectedLoad(selectedLoad.id);
@@ -1393,6 +2362,76 @@ function DispatchPageContent({
     }
   };
 
+  const optimizeSelectedTrip = useCallback(async () => {
+    if (isQueueReadOnly) return;
+    const selectedTripId = selectedLoad?.tripLoads?.[0]?.trip?.id ?? null;
+    if (!selectedTripId) {
+      setDispatchActionNote("Trip optimization requires a shipment linked to a trip.");
+      return;
+    }
+    setTripOptimizeLoading(true);
+    try {
+      await apiFetch(`/trips/${selectedTripId}/cargo-plan/sync`, {
+        method: "POST",
+      });
+      setDispatchActionNote("Trip cargo plan optimized.");
+      await loadDispatchLoads(filters, pageIndex);
+      if (selectedLoad?.id) {
+        const updated = await refreshSelectedLoad(selectedLoad.id);
+        if (updated) patchLoadSummary(updated);
+      }
+    } catch (error) {
+      setDispatchError((error as Error).message || "Unable to optimize trip cargo plan.");
+    } finally {
+      setTripOptimizeLoading(false);
+    }
+  }, [filters, isQueueReadOnly, loadDispatchLoads, pageIndex, patchLoadSummary, refreshSelectedLoad, selectedLoad]);
+
+  const createDispatchPack = useCallback(async () => {
+    if (isQueueReadOnly) return;
+    if (!selectedLoad) {
+      setDispatchActionNote("Select a shipment before creating a dispatch pack.");
+      return;
+    }
+    const pickup = selectedLoad?.stops?.find((stop: any) => stop.type === "PICKUP");
+    const delivery = selectedLoad?.stops?.slice().reverse().find((stop: any) => stop.type === "DELIVERY");
+    const podDoc = (selectedLoad?.docs ?? []).find((doc: any) => doc.type === "POD");
+    const bolDoc = (selectedLoad?.docs ?? []).find((doc: any) => doc.type === "BOL");
+    const rateConDoc = (selectedLoad?.docs ?? []).find(
+      (doc: any) => doc.type === "RATECON" || doc.type === "RATE_CONFIRMATION"
+    );
+    const body = [
+      `Dispatch pack prepared for ${selectedLoad.loadNumber}.`,
+      `Trip: ${selectedLoad?.tripLoads?.[0]?.trip?.tripNumber ?? "Not linked"}`,
+      `Lane: ${routeLabel(pickup?.city, pickup?.state)} -> ${routeLabel(delivery?.city, delivery?.state)}`,
+      `Stops: ${(selectedLoad?.stops ?? []).length}`,
+      `Assignment: Driver ${selectedLoad?.tripLoads?.[0]?.trip?.driver?.name ?? selectedLoad?.driver?.name ?? "Unassigned"} · Truck ${selectedLoad?.tripLoads?.[0]?.trip?.truck?.unit ?? selectedLoad?.truck?.unit ?? "Unassigned"} · Trailer ${selectedLoad?.tripLoads?.[0]?.trip?.trailer?.unit ?? selectedLoad?.trailer?.unit ?? "Unassigned"}`,
+      `Docs: POD ${podDoc?.status ?? "MISSING"} · BOL ${bolDoc?.status ?? "MISSING"} · RateCon ${rateConDoc?.status ?? "MISSING"}`,
+      `Tracking: ${selectedLoad?.trackingSessions?.[0]?.status ?? "OFF"}`,
+      `Generated from dispatch inspector workflow.`,
+    ].join("\n");
+    setDispatchPackLoading(true);
+    try {
+      await apiFetch(`/loads/${selectedLoad.id}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          body,
+          noteType: "OPERATIONAL",
+          priority: "IMPORTANT",
+        }),
+      });
+      setDispatchActionNote("Dispatch pack logged in timeline.");
+      openInspectorForLoad(selectedLoad.id, "timeline");
+      const updated = await refreshSelectedLoad(selectedLoad.id);
+      if (updated) patchLoadSummary(updated);
+    } catch (error) {
+      setDispatchError((error as Error).message || "Unable to create dispatch pack.");
+    } finally {
+      setDispatchPackLoading(false);
+    }
+  }, [isQueueReadOnly, openInspectorForLoad, patchLoadSummary, refreshSelectedLoad, selectedLoad]);
+
   const acknowledgeException = useCallback(
     async (exceptionId: string) => {
       await apiFetch(`/dispatch/exceptions/${exceptionId}/acknowledge`, { method: "POST" });
@@ -1423,6 +2462,56 @@ function DispatchPageContent({
     [loadDispatchExceptions]
   );
 
+  const runExceptionAssist = useCallback(
+    async (exception: DispatchExceptionItem) => {
+      if (exception.status === "RESOLVED") return;
+      setExceptionAssistRunningId(exception.id);
+      try {
+        const preview = await apiFetch<DispatchExceptionAssistPreview>(
+          `/dispatch/exceptions/${exception.id}/auto-action/preview`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          }
+        );
+        const actionCode = preview.selectedAction?.code;
+        if (!actionCode) {
+          setDispatchActionNote("Assist found no safe action.");
+          return;
+        }
+        const payload: { action: DispatchExceptionAssistActionCode; owner?: DispatchExceptionItem["owner"] } = {
+          action: actionCode,
+        };
+        if (actionCode === "ROUTE_OWNER") {
+          payload.owner = preview.selectedAction?.payload?.owner ?? preview.decision?.suggestedOwner;
+        }
+        const applied = await apiFetch<{ action?: DispatchExceptionAssistActionCode; createdTask?: { id: string } | null }>(
+          `/dispatch/exceptions/${exception.id}/auto-action/apply`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        );
+        const finalAction = applied.action ?? actionCode;
+        const actionLabel = finalAction.replace(/_/g, " ").toLowerCase();
+        const createdTaskSuffix = applied.createdTask?.id ? " · follow-up task created" : "";
+        setDispatchActionNote(`Assist applied: ${actionLabel}${createdTaskSuffix}`);
+        await loadDispatchExceptions();
+        if (selectedLoad?.id) {
+          const updated = await refreshSelectedLoad(selectedLoad.id);
+          if (updated) patchLoadSummary(updated);
+        }
+      } catch (error) {
+        setDispatchError((error as Error).message || "Unable to apply assist action.");
+      } finally {
+        setExceptionAssistRunningId(null);
+      }
+    },
+    [loadDispatchExceptions, patchLoadSummary, refreshSelectedLoad, selectedLoad]
+  );
+
   const applyView = useCallback((view: DispatchViewConfig) => {
     const sanitized = sanitizeView(view);
     setActiveViewId(sanitized.id);
@@ -1432,6 +2521,7 @@ function DispatchPageContent({
     setColumnVisibility(normalizeViewColumns(sanitized.columns));
     setGridFilters(sanitized.grid.filters ?? DEFAULT_GRID_STATE.filters);
     setGridSortRules(sanitized.grid.sortRules ?? DEFAULT_GRID_STATE.sortRules);
+    setGridColumnOrder(normalizeGridColumnOrder(sanitized.grid.columnOrder ?? DEFAULT_GRID_STATE.columnOrder));
     setPanelLayout(sanitized.panels);
     setPageIndex(0);
   }, []);
@@ -1452,6 +2542,38 @@ function DispatchPageContent({
     [queueView, updateQueueViewParam]
   );
 
+  const applyGridColumnPreset = useCallback((presetId: DispatchGridPresetId) => {
+    const presetColumns = DISPATCH_GRID_PRESET_COLUMNS[presetId];
+    if (!presetColumns) return;
+    setColumnVisibility(buildDispatchColumnVisibility(presetColumns));
+    setGridColumnOrder(buildDispatchGridColumnOrder(presetColumns));
+    setDispatchActionNote(
+      presetId === "opsDefault"
+        ? "Applied Ops default columns."
+        : presetId === "tripHeavy"
+          ? "Applied Trip-heavy columns."
+          : "Applied Finance review columns."
+    );
+  }, []);
+
+  const enableTripContextColumns = useCallback(() => {
+    setColumnVisibility((prev) => {
+      const visibleSet = new Set<DispatchGridColumnKey>(
+        DISPATCH_OPTIONAL_COLUMNS.filter((column) => prev[column] !== false)
+      );
+      for (const column of DISPATCH_TRIP_CONTEXT_COLUMNS) {
+        visibleSet.add(column);
+      }
+      return buildDispatchColumnVisibility(Array.from(visibleSet));
+    });
+    setDispatchActionNote("Trip context columns are now visible.");
+  }, []);
+
+  const runGridCommand = useCallback((type: DispatchGridCommandType) => {
+    gridCommandTokenRef.current += 1;
+    setGridCommand({ token: gridCommandTokenRef.current, type });
+  }, []);
+
   const saveCurrentAsView = useCallback(async (scope: "PERSONAL" | "ADMIN_TEMPLATE" = "PERSONAL") => {
     const name = window.prompt("Save view as");
     if (!name?.trim()) return;
@@ -1471,6 +2593,7 @@ function DispatchPageContent({
           grid: {
             filters: gridFilters,
             sortRules: gridSortRules,
+            columnOrder: normalizeGridColumnOrder(gridColumnOrder),
           },
         },
       }),
@@ -1482,7 +2605,7 @@ function DispatchPageContent({
       setPersonalViews((prev) => [nextView, ...prev.filter((view) => view.id !== nextView.id)]);
     }
     applyView(nextView);
-  }, [applyView, columnVisibility, filters, gridDensity, gridFilters, gridSortRules, panelLayout, user?.role]);
+  }, [applyView, columnVisibility, filters, gridColumnOrder, gridDensity, gridFilters, gridSortRules, panelLayout, user?.role]);
 
   const updateCurrentView = useCallback(async () => {
     if (activeViewId === SYSTEM_VIEW.id) {
@@ -1510,6 +2633,7 @@ function DispatchPageContent({
           grid: {
             filters: gridFilters,
             sortRules: gridSortRules,
+            columnOrder: normalizeGridColumnOrder(gridColumnOrder),
           },
         },
       }),
@@ -1528,6 +2652,7 @@ function DispatchPageContent({
     canManageTemplates,
     columnVisibility,
     filters,
+    gridColumnOrder,
     gridDensity,
     gridFilters,
     gridSortRules,
@@ -1558,25 +2683,71 @@ function DispatchPageContent({
       payload[params.field] = params.value;
       setCellSavingKey(`${params.loadId}:${params.field === "customerName" ? "customer" : params.field}`);
       try {
-        const response = await apiFetch<{ load: any }>(`/loads/${params.loadId}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        setLoads((prev) =>
-          prev.map((item) => {
-            if (item.id !== params.loadId) return item;
-            return {
-              ...item,
-              customerName: response.load.customerName ?? item.customerName,
-              status: response.load.status ?? item.status,
-              miles: response.load.miles ?? item.miles,
-              paidMiles: response.load.paidMiles ?? item.paidMiles,
-              rate: response.load.rate ?? item.rate,
-              movementMode: response.load.movementMode ?? item.movementMode,
-            };
-          })
-        );
+        if (params.field === "customerName" || params.field === "miles" || params.field === "rate") {
+          const response = await apiFetch<{ shipment?: { load?: any } }>(`/shipments/${params.loadId}/commercial`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              [params.field === "customerName" ? "customerName" : params.field]: params.value,
+              reasonCode: "DISPATCH_INLINE_EDIT",
+            }),
+          });
+          const updatedLoad = response.shipment?.load;
+          if (updatedLoad) {
+            setLoads((prev) =>
+              prev.map((item) => {
+                if (item.id !== params.loadId) return item;
+                return {
+                  ...item,
+                  customerName: updatedLoad.customerName ?? item.customerName,
+                  status: updatedLoad.status ?? item.status,
+                  miles: updatedLoad.miles ?? item.miles,
+                  paidMiles: updatedLoad.paidMiles ?? item.paidMiles,
+                  rate: updatedLoad.rate ?? item.rate,
+                  movementMode: updatedLoad.movementMode ?? item.movementMode,
+                };
+              })
+            );
+          }
+        } else {
+          const executionStatus = toShipmentExecutionStatus(String(params.value));
+          if (executionStatus) {
+            await apiFetch(`/shipments/${params.loadId}/execution`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                status: executionStatus,
+                reasonCode: "DISPATCH_STATUS_EDIT",
+              }),
+            });
+            setLoads((prev) =>
+              prev.map((item) => {
+                if (item.id !== params.loadId) return item;
+                return { ...item, status: executionStatus };
+              })
+            );
+          } else {
+            const response = await apiFetch<{ load: any }>(`/loads/${params.loadId}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            setLoads((prev) =>
+              prev.map((item) => {
+                if (item.id !== params.loadId) return item;
+                return {
+                  ...item,
+                  customerName: response.load.customerName ?? item.customerName,
+                  status: response.load.status ?? item.status,
+                  miles: response.load.miles ?? item.miles,
+                  paidMiles: response.load.paidMiles ?? item.paidMiles,
+                  rate: response.load.rate ?? item.rate,
+                  movementMode: response.load.movementMode ?? item.movementMode,
+                };
+              })
+            );
+          }
+        }
         if (selectedLoadId === params.loadId) {
           await refreshSelectedLoad(params.loadId);
         }
@@ -1618,37 +2789,33 @@ function DispatchPageContent({
       if (isQueueReadOnly) return;
       const row = loads.find((load) => load.id === params.loadId);
       if (!row) return;
-      setLaneAssigningKey(`lane:${params.driverId}`);
-      try {
-        if (row.trip?.id) {
-          await apiFetch(`/trips/${row.trip.id}/assign`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              driverId: params.driverId,
-              truckId: row.assignment?.truck?.id ?? null,
-              trailerId: row.assignment?.trailer?.id ?? null,
-              status: "ASSIGNED",
-            }),
-          });
-        } else {
-          await apiFetch("/trips", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              loadNumbers: [row.loadNumber],
-              movementMode: row.movementMode ?? "FTL",
-              driverId: params.driverId,
-              status: "ASSIGNED",
-            }),
-          });
-        }
-        await loadDispatchLoads(filters, pageIndex);
-        if (selectedLoadId === row.id) {
-          await refreshSelectedLoad(row.id);
-        }
-      } finally {
-        setLaneAssigningKey(null);
+      if (row.trip?.id) {
+        await apiFetch(`/shipments/${row.id}/execution`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            driverId: params.driverId,
+            truckId: row.assignment?.truck?.id ?? null,
+            trailerId: row.assignment?.trailer?.id ?? null,
+            status: "ASSIGNED",
+            reasonCode: "DRIVER_LANE_ASSIGN",
+          }),
+        });
+      } else {
+        await apiFetch("/trips", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            loadNumbers: [row.loadNumber],
+            movementMode: row.movementMode ?? "FTL",
+            driverId: params.driverId,
+            status: "ASSIGNED",
+          }),
+        });
+      }
+      await loadDispatchLoads(filters, pageIndex);
+      if (selectedLoadId === row.id) {
+        await refreshSelectedLoad(row.id);
       }
     },
     [filters, isQueueReadOnly, loadDispatchLoads, loads, pageIndex, refreshSelectedLoad, selectedLoadId]
@@ -1660,13 +2827,24 @@ function DispatchPageContent({
     setBulkLoading(true);
     try {
       const results = await Promise.allSettled(
-        ids.map((loadId) =>
-          apiFetch(`/loads/${loadId}`, {
+        ids.map((loadId) => {
+          const executionStatus = toShipmentExecutionStatus(bulkStatus);
+          if (executionStatus) {
+            return apiFetch(`/shipments/${loadId}/execution`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                status: executionStatus,
+                reasonCode: "DISPATCH_BULK_STATUS",
+              }),
+            });
+          }
+          return apiFetch(`/loads/${loadId}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ status: bulkStatus }),
-          })
-        )
+          });
+        })
       );
       const failed = results.filter((result) => result.status === "rejected").length;
       setBulkNote(
@@ -1684,6 +2862,7 @@ function DispatchPageContent({
   const createTripFromSelection = useCallback(async () => {
     const selected = loads.filter((load) => selectedRows.has(load.id));
     if (!selected.length) return;
+    const primarySelectedLoadId = selected[0]?.id ?? null;
     setBulkLoading(true);
     try {
       const payload = await apiFetch<{ trip: { id: string } }>("/trips", {
@@ -1698,13 +2877,27 @@ function DispatchPageContent({
       setBulkNote(`Created trip with ${selected.length} loads.`);
       setSelectedRows(new Set());
       await loadDispatchLoads(filters, pageIndex);
+      if (primarySelectedLoadId) {
+        setPanelLayout((prev) => ({ ...prev, inspector: true, tripInspector: true }));
+        await refreshSelectedLoad(primarySelectedLoadId);
+        openInspectorForLoad(primarySelectedLoadId, "assignment");
+      }
       if (payload.trip?.id) {
-        router.push(`/trips?tripId=${payload.trip.id}`);
+        setDispatchActionNote(`Trip ${payload.trip.id} created. Assignment is ready in dispatch.`);
       }
     } finally {
       setBulkLoading(false);
     }
-  }, [bulkMovementMode, filters, loadDispatchLoads, loads, pageIndex, router, selectedRows]);
+  }, [
+    bulkMovementMode,
+    filters,
+    loadDispatchLoads,
+    loads,
+    openInspectorForLoad,
+    pageIndex,
+    refreshSelectedLoad,
+    selectedRows,
+  ]);
 
   const availableDrivers = useMemo(() => availability?.availableDrivers ?? drivers, [availability, drivers]);
   const unavailableDrivers = useMemo(() => availability?.unavailableDrivers ?? [], [availability]);
@@ -1760,10 +2953,20 @@ function DispatchPageContent({
     return "neutral";
   };
 
+  const activeQueueLoads = useMemo(() => {
+    if (queueView !== "active") return loads;
+    // Delivered shipments should leave Active and appear under Recent/History.
+    return loads.filter((load) => load.status !== "DELIVERED");
+  }, [loads, queueView]);
+
+  const deliveredHandoffPendingCount = useMemo(
+    () => activeQueueLoads.filter((load) => isDeliveredHandoffPending(load)).length,
+    [activeQueueLoads]
+  );
 
   const sortedLoads = useMemo(() => {
     if (queueView !== "active") return loads;
-    return [...loads].sort((a, b) => {
+    return [...activeQueueLoads].sort((a, b) => {
       const aPriority = a.riskFlags?.needsAssignment ? 0 : a.riskFlags?.atRisk ? 1 : 2;
       const bPriority = b.riskFlags?.needsAssignment ? 0 : b.riskFlags?.atRisk ? 1 : 2;
       if (aPriority !== bPriority) return aPriority - bPriority;
@@ -1771,7 +2974,7 @@ function DispatchPageContent({
       const bTime = b.riskFlags?.nextStopTime ? new Date(b.riskFlags.nextStopTime).getTime() : Number.MAX_SAFE_INTEGER;
       return aTime - bTime;
     });
-  }, [loads, queueView]);
+  }, [activeQueueLoads, loads, queueView]);
 
   const dispatchSignals = useMemo(() => {
     const inTransit = sortedLoads.filter((load) => load.status === "IN_TRANSIT");
@@ -1796,6 +2999,105 @@ function DispatchPageContent({
     };
   }, [sortedLoads]);
 
+  const syncSignals = useMemo(() => {
+    const status = syncHealth?.samsara?.status ?? "DISCONNECTED";
+    const telemetryState = syncHealth?.samsara?.telemetry?.state ?? "disconnected";
+    const staleInTransitLoads = syncHealth?.samsara?.telemetry?.staleInTransitLoads ?? 0;
+    const mapping = syncHealth?.samsara?.mapping ?? {};
+    const webhookRejected = syncHealth?.samsara?.webhook?.rejectedLast24h ?? 0;
+    return {
+      status,
+      telemetryState,
+      staleInTransitLoads,
+      mappedTrucks: mapping.mappedTrucks ?? 0,
+      totalActiveTrucks: mapping.totalActiveTrucks ?? 0,
+      coveragePct: mapping.coveragePct ?? 0,
+      webhookRejected,
+      lastPingAt: syncHealth?.samsara?.telemetry?.lastPingAt ?? null,
+    };
+  }, [syncHealth]);
+
+  const quickQueueCounts = useMemo(
+    () => ({
+      unassigned: sortedLoads.filter((load) => isUnassigned(load)).length,
+      missingDocs: sortedLoads.filter((load) => hasMissingDocs(load)).length,
+      exceptions: sortedLoads.filter((load) => hasOpenException(load)).length,
+      overdue: sortedLoads.filter((load) => Boolean(load.riskFlags?.overdueStopWindow)).length,
+    }),
+    [sortedLoads]
+  );
+
+  const queueScopedLoads = useMemo(() => {
+    switch (quickQueue) {
+      case "unassigned":
+        return sortedLoads.filter((load) => isUnassigned(load));
+      case "missingDocs":
+        return sortedLoads.filter((load) => hasMissingDocs(load));
+      case "exceptions":
+        return sortedLoads.filter((load) => hasOpenException(load));
+      case "overdue":
+        return sortedLoads.filter((load) => Boolean(load.riskFlags?.overdueStopWindow));
+      default:
+        return sortedLoads;
+    }
+  }, [quickQueue, sortedLoads]);
+
+  const mapClusters = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const load of queueScopedLoads) {
+      const key = mapCorridorLabel(load);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([corridor, count]) => ({ corridor, count }))
+      .sort((a, b) => (b.count - a.count) || a.corridor.localeCompare(b.corridor))
+      .slice(0, 8);
+  }, [queueScopedLoads]);
+
+  const mapSourceRows = useMemo(() => {
+    const filtered =
+      mapClusterFilter === "all"
+        ? queueScopedLoads
+        : queueScopedLoads.filter((load) => mapCorridorLabel(load) === mapClusterFilter);
+    return [...filtered].sort((a, b) => {
+      const byPriority = mapPriorityScore(b) - mapPriorityScore(a);
+      if (byPriority !== 0) return byPriority;
+      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      return bTime - aTime;
+    });
+  }, [mapClusterFilter, queueScopedLoads]);
+
+  useEffect(() => {
+    setSelectedRows((prev) => {
+      if (prev.size === 0) return prev;
+      const visibleIds = new Set(queueScopedLoads.map((load) => load.id));
+      const next = new Set(Array.from(prev).filter((id) => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    if (selectedLoadId && !queueScopedLoads.some((load) => load.id === selectedLoadId)) {
+      setSelectedLoadId(null);
+      setInspectorFocusSection(null);
+      updateLoadIdParam(null);
+    }
+  }, [queueScopedLoads, selectedLoadId, updateLoadIdParam]);
+
+  useEffect(() => {
+    if (queueScopedLoads.length === 0) {
+      setMapSelectedLoadId(null);
+      return;
+    }
+    if (mapSelectedLoadId && mapSourceRows.some((load) => load.id === mapSelectedLoadId)) return;
+    setMapSelectedLoadId(selectedLoadId && mapSourceRows.some((load) => load.id === selectedLoadId) ? selectedLoadId : mapSourceRows[0]?.id ?? null);
+  }, [mapSelectedLoadId, mapSourceRows, queueScopedLoads.length, selectedLoadId]);
+
+  useEffect(() => {
+    if (mapClusterFilter === "all") return;
+    if (!mapClusters.some((cluster) => cluster.corridor === mapClusterFilter)) {
+      setMapClusterFilter("all");
+    }
+  }, [mapClusterFilter, mapClusters]);
+
   const workbenchMapHref = useMemo(
     () =>
       buildYardOsPlanningUrl({
@@ -1813,20 +3115,75 @@ function DispatchPageContent({
     window.open(workbenchMapHref, "_blank", "noopener,noreferrer");
   }, [workbenchMapHref]);
 
+  const openRouteMap = useCallback((load: DispatchItem) => {
+    const origin = routeLabel(load.route?.shipperCity, load.route?.shipperState);
+    const destination = routeLabel(load.route?.consigneeCity, load.route?.consigneeState);
+    if (origin === "Route pending" || destination === "Route pending") {
+      setDispatchActionNote("Route location is incomplete for this shipment.");
+      return;
+    }
+    const href = buildDrivingDirectionsHref(origin, destination);
+    window.open(href, "_blank", "noopener,noreferrer");
+  }, []);
+
+  const copyShipmentShareLink = useCallback(async (loadId: string) => {
+    const href =
+      typeof window !== "undefined"
+        ? `${window.location.origin}/shipments/${loadId}`
+        : `/shipments/${loadId}`;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(href);
+      }
+      setDispatchActionNote("Shipment link copied.");
+    } catch {
+      setDispatchActionNote(href);
+    }
+  }, []);
+
   const selectedLoadSummary = useMemo(() => {
     if (!selectedLoadId) return null;
-    return sortedLoads.find((load) => load.id === selectedLoadId) ?? null;
-  }, [sortedLoads, selectedLoadId]);
+    return queueScopedLoads.find((load) => load.id === selectedLoadId) ?? sortedLoads.find((load) => load.id === selectedLoadId) ?? null;
+  }, [queueScopedLoads, sortedLoads, selectedLoadId]);
+
+  useEffect(() => {
+    if (!canDispatch) return;
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTypingTarget(event.target)) return;
+      const selected = selectedLoadSummary;
+      if (!selected) return;
+      const key = event.key.toLowerCase();
+      if (key === "a") {
+        event.preventDefault();
+        openInspectorForLoad(selected.id, "assignment");
+        setDispatchActionNote(`Shortcut: assign ${selected.loadNumber}`);
+        return;
+      }
+      if (key === "m") {
+        event.preventDefault();
+        openInspectorForLoad(selected.id, "timeline");
+        setDispatchActionNote(`Shortcut: message ${selected.loadNumber}`);
+        return;
+      }
+      if (key === "s") {
+        event.preventDefault();
+        void copyShipmentShareLink(selected.id);
+      }
+    };
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [canDispatch, copyShipmentShareLink, openInspectorForLoad, selectedLoadSummary]);
 
   const gridRows = useMemo<DispatchGridRow[]>(
     () =>
-      sortedLoads.map((load) => ({
+      queueScopedLoads.map((load) => ({
         ...load,
       })),
-    [sortedLoads]
+    [queueScopedLoads]
   );
   const selectedCount = selectedRows.size;
-  const loadById = useMemo(() => new Map(sortedLoads.map((load) => [load.id, load])), [sortedLoads]);
+  const loadById = useMemo(() => new Map(queueScopedLoads.map((load) => [load.id, load])), [queueScopedLoads]);
   const exceptionRows = useMemo<Array<DispatchExceptionItem & { actionable: boolean; source: "dispatch" | "signal" }>>(() => {
     const mapped = dispatchExceptions.map((item) => ({
       ...item,
@@ -1837,7 +3194,7 @@ function DispatchPageContent({
     const seen = new Set(
       mapped.map((item) => `${item.loadId}:${item.title.trim().toLowerCase()}`)
     );
-    const signalRows = sortedLoads.flatMap((load) => {
+    const signalRows = queueScopedLoads.flatMap((load) => {
       const derived: Array<DispatchExceptionItem & { actionable: boolean; source: "signal" }> = [];
       const loadNumber = load.loadNumber ?? "Unknown load";
       const createdAt = load.updatedAt ?? new Date().toISOString();
@@ -1868,10 +3225,14 @@ function DispatchPageContent({
       return derived;
     });
     return [...mapped, ...signalRows];
-  }, [dispatchExceptions, loadById, sortedLoads]);
+  }, [dispatchExceptions, loadById, queueScopedLoads]);
   const exceptionSubtitle = useMemo(() => {
     if (exceptionsSummary && (exceptionsSummary.open > 0 || dispatchExceptions.length > 0)) {
-      return `${exceptionsSummary.open} open · ${exceptionsSummary.acknowledged} acknowledged · ${exceptionsSummary.blockers} blockers`;
+      const ownerLabel =
+        exceptionsSummary.owner === "ALL"
+          ? "All owners"
+          : `${exceptionsSummary.owner.charAt(0)}${exceptionsSummary.owner.slice(1).toLowerCase()} owner`;
+      return `${exceptionsSummary.open} open · ${exceptionsSummary.acknowledged} acknowledged · ${exceptionsSummary.blockers} blockers · ${exceptionsSummary.overdue} overdue · ${ownerLabel}`;
     }
     if (!exceptionRows.length) return "Open issues visible in queue";
     const blockers = exceptionRows.filter((item) => item.severity === "BLOCKER").length;
@@ -1880,6 +3241,7 @@ function DispatchPageContent({
 
   const selectedTripId =
     selectedLoadSummary?.trip?.id ?? selectedLoad?.tripLoads?.[0]?.trip?.id ?? null;
+  const inspectorStickyTop = Math.max(dispatchHeaderOffset + 12, 96);
 
   useEffect(() => {
     if (!panelLayout.tripInspector || !selectedTripId || !canDispatch) {
@@ -1908,6 +3270,22 @@ function DispatchPageContent({
       active = false;
     };
   }, [canDispatch, panelLayout.tripInspector, selectedTripId]);
+
+  useEffect(() => {
+    const headerEl = dispatchHeaderRef.current;
+    if (!headerEl) return;
+    const updateOffset = () => {
+      setDispatchHeaderOffset(headerEl.getBoundingClientRect().height);
+    };
+    updateOffset();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => updateOffset());
+      observer.observe(headerEl);
+      return () => observer.disconnect();
+    }
+    window.addEventListener("resize", updateOffset);
+    return () => window.removeEventListener("resize", updateOffset);
+  }, []);
 
   const workbenchAssignment = {
     form: assignForm,
@@ -2045,7 +3423,16 @@ function DispatchPageContent({
       legDrawerContent={legDrawerContent ?? undefined}
       legAddedNote={legAddedNote ? "✓ Added" : null}
       canStartTracking={canStartTracking}
+      canUploadDocs={capabilities.canUploadLoadDocs}
+      canVerifyDocs={capabilities.canVerifyDocs}
+      canAccessFinance={capabilities.canAccessFinance}
+      canBillActions={capabilities.canBillActions}
+      onOpenDocUpload={() => setDocUploadTarget({ loadId: selectedLoad.id, loadNumber: selectedLoad.loadNumber ?? null })}
       yardOsLaunch={yardOsLaunchHref ? { href: yardOsLaunchHref, onOpen: openYardOs } : undefined}
+      onOptimizeTrip={optimizeSelectedTrip}
+      optimizingTrip={tripOptimizeLoading}
+      onCreateDispatchPack={createDispatchPack}
+      creatingDispatchPack={dispatchPackLoading}
       focusSection={inspectorFocusSection}
       focusNonce={inspectorFocusNonce}
       teamAssignment={
@@ -2096,35 +3483,1020 @@ function DispatchPageContent({
       )}
     </Card>
   ) : null;
+  const splitFocusMode = canvasMode === "split";
   const showInspectorPanel = panelLayout.inspector && Boolean(selectedLoadId);
   const showTripInspectorPanel = panelLayout.tripInspector;
   const showExceptionsPanel = panelLayout.exceptions;
-  const showDriverLanesPanel = panelLayout.driverLanes;
+  const showGridPrimary = canvasMode === "table" || (splitFocusMode && splitPrimaryPane === "grid");
+  const showMapPrimary = canvasMode === "map" || (splitFocusMode && splitPrimaryPane === "map");
+  const showInspectorPrimary = splitFocusMode && splitPrimaryPane === "inspector";
+  const showGridInspectorRail = showGridPrimary && !splitFocusMode && (showInspectorPanel || showTripInspectorPanel);
+  const showGridExceptionsRail = showGridPrimary && !splitFocusMode && showExceptionsPanel;
+  const dispatchRibbonZClass = layerFocus === "ribbon" ? "z-[48]" : "z-[40]";
+  const dispatchRibbonMenuZClass = layerFocus === "ribbon" ? "z-[49]" : "z-[41]";
+  const splitPeekZClass = layerFocus === "splitPeek" ? "z-[48]" : "z-[42]";
   const showInitialQueueLoadingState = queueLoading && !queueLoadedOnce;
   const showQueueEmptyState = !queueLoading && queueLoadedOnce && !dispatchError && gridRows.length === 0;
   const showQueueCanvas = !showInitialQueueLoadingState && !showQueueEmptyState;
   const dispatchGridTemplateColumns = [
-    ...(showExceptionsPanel && panelLayout.exceptionsDock === "left" ? ["minmax(220px, 280px)"] : []),
+    ...(showGridExceptionsRail && panelLayout.exceptionsDock === "left" ? ["minmax(220px, 280px)"] : []),
     "minmax(0, 1fr)",
-    ...(showInspectorPanel || showTripInspectorPanel ? ["minmax(360px, 440px)"] : []),
-    ...(showExceptionsPanel && panelLayout.exceptionsDock === "right" ? ["minmax(220px, 280px)"] : []),
+    ...(showGridInspectorRail ? ["minmax(360px, 440px)"] : []),
+    ...(showGridExceptionsRail && panelLayout.exceptionsDock === "right" ? ["minmax(220px, 280px)"] : []),
   ].join(" ");
-  const workbenchMenuOverlay =
-    showWorkbenchMenu && typeof document !== "undefined"
-      ? createPortal(
-          <div className="fixed inset-0 z-[9999]">
-            <button
-              type="button"
-              aria-label="Close dispatch controls menu"
-              onClick={() => setShowWorkbenchMenu(false)}
-              className="absolute inset-0 bg-black/18 backdrop-blur-sm"
+  const mapPreviewRows = useMemo(() => mapSourceRows.slice(0, 24), [mapSourceRows]);
+  const mapSelectedLoad = useMemo(
+    () =>
+      (mapSelectedLoadId ? mapSourceRows.find((row) => row.id === mapSelectedLoadId) : null) ??
+      mapSourceRows[0] ??
+      null,
+    [mapSelectedLoadId, mapSourceRows]
+  );
+  const mapEmbedHref = useMemo(() => buildMapEmbedHref(mapSelectedLoad), [mapSelectedLoad]);
+  const mapAssignableDrivers = useMemo(() => drivers.slice(0, 20), [drivers]);
+  const mapPreviewPanel =
+    isDispatchGridWorkspace ? (
+      <Card>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <SectionHeader
+              title="Live dispatch map canvas"
+              subtitle="Map-first routing + driver lane assignment surface"
             />
-            <div className="absolute right-4 top-20 z-[10000] w-[min(96vw,640px)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white p-3 shadow-[var(--shadow-elevated)]">
-              <div className="grid gap-3">
-                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Workbench controls</div>
-                <FormField label="View" htmlFor="dispatchViewSelectMenu">
+            <div className="mt-1 text-xs text-[color:var(--color-text-muted)]">
+              Showing {mapPreviewRows.length} of {mapSourceRows.length} shipments in the current map scope ({queueScopedLoads.length} queue rows).
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <Button
+                size="sm"
+                variant={mapClusterFilter === "all" ? "secondary" : "ghost"}
+                onClick={() => setMapClusterFilter("all")}
+              >
+                All corridors
+              </Button>
+              {mapClusters.map((cluster) => (
+                <Button
+                  key={cluster.corridor}
+                  size="sm"
+                  variant={mapClusterFilter === cluster.corridor ? "secondary" : "ghost"}
+                  onClick={() => setMapClusterFilter(cluster.corridor)}
+                  title={cluster.corridor}
+                >
+                  {cluster.corridor} ({cluster.count})
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="secondary" onClick={openWorkbenchMap} disabled={!workbenchMapHref}>
+                Open live map
+              </Button>
+              {quickQueue !== "all" ? (
+                <Button size="sm" variant="ghost" onClick={() => setQuickQueue("all")}>
+                Back to all shipments
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1.45fr)_minmax(300px,1fr)]">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-2">
+              <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[color:var(--color-text-muted)]">Driver lane (map)</div>
+              {mapAssignableDrivers.length ? (
+                mapAssignableDrivers.map((driver) => (
+                  <button
+                    key={driver.id}
+                    type="button"
+                    draggable={!isQueueReadOnly}
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData("text/haulio-driver-id", driver.id);
+                      setMapDraggingDriverId(driver.id);
+                    }}
+                    onDragEnd={() => {
+                      setMapDraggingDriverId(null);
+                      setMapDropTargetLoadId(null);
+                    }}
+                    onClick={() => {
+                      if (!mapSelectedLoad || isQueueReadOnly) return;
+                      void assignLoadFromLane({ loadId: mapSelectedLoad.id, driverId: driver.id });
+                      setDispatchActionNote(`Assigned ${driver.name ?? "driver"} to ${mapSelectedLoad.loadNumber}.`);
+                    }}
+                    className={`rounded-full border px-2 py-1 text-[11px] transition ${
+                      mapDraggingDriverId === driver.id
+                        ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] text-[color:var(--color-accent)]"
+                        : "border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
+                    }`}
+                    title={isQueueReadOnly ? "Switch to Active queue to assign" : "Drag to a shipment card to assign"}
+                  >
+                    {driver.name ?? "Driver"}
+                  </button>
+                ))
+              ) : (
+                <span className="text-[11px] text-[color:var(--color-text-muted)]">No drivers available.</span>
+              )}
+            </div>
+            <div className="overflow-hidden rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)]">
+              {mapEmbedHref ? (
+                <iframe
+                  src={mapEmbedHref}
+                  title="Dispatch route map"
+                  className="h-[340px] w-full"
+                  loading="lazy"
+                  referrerPolicy="no-referrer-when-downgrade"
+                />
+              ) : (
+                <div className="flex h-[340px] items-center justify-center px-4 text-center text-sm text-[color:var(--color-text-muted)]">
+                  Route map unavailable for this shipment. Add pickup and delivery locations to view the map.
+                </div>
+              )}
+              {mapSelectedLoad ? (
+                <div className="border-t border-[color:var(--color-divider)] px-3 py-2 text-xs">
+                  <div className="font-semibold text-ink">{mapSelectedLoad.loadNumber}</div>
+                  <div className="text-[color:var(--color-text-muted)]">
+                    {routeLabel(mapSelectedLoad.route?.shipperCity, mapSelectedLoad.route?.shipperState)} →{" "}
+                    {routeLabel(mapSelectedLoad.route?.consigneeCity, mapSelectedLoad.route?.consigneeState)}
+                  </div>
+                  <div className="mt-1 text-[11px] text-[color:var(--color-text-muted)]">ETA: {formatMapEta(mapSelectedLoad)}</div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <Button size="sm" variant="ghost" onClick={() => openInspectorForLoad(mapSelectedLoad.id, "assignment")}>
+                      Assign
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => openRouteMap(mapSelectedLoad)}>
+                      Route
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => openInspectorForLoad(mapSelectedLoad.id, "timeline")}>
+                      Message
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => void copyShipmentShareLink(mapSelectedLoad.id)}>
+                      Share
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div className="space-y-2">
+            {mapPreviewRows.map((row) => (
+              <div
+                key={row.id}
+                onDragOver={(event) => {
+                  if (isQueueReadOnly) return;
+                  if (!Array.from(event.dataTransfer.types).includes("text/haulio-driver-id")) return;
+                  event.preventDefault();
+                  setMapDropTargetLoadId(row.id);
+                }}
+                onDragLeave={() => {
+                  if (mapDropTargetLoadId === row.id) setMapDropTargetLoadId(null);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const driverId = event.dataTransfer.getData("text/haulio-driver-id");
+                  setMapDropTargetLoadId(null);
+                  setMapDraggingDriverId(null);
+                  if (!driverId || isQueueReadOnly) return;
+                  void assignLoadFromLane({ loadId: row.id, driverId });
+                  setDispatchActionNote(`Assignment submitted for ${row.loadNumber}.`);
+                }}
+                className={`rounded-[var(--radius-control)] border px-3 py-2 text-xs transition ${
+                  mapSelectedLoad?.id === row.id
+                    ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)]/25"
+                    : mapDropTargetLoadId === row.id
+                    ? "border-[color:var(--color-success)] bg-[color:var(--color-success-soft)]/30"
+                    : "border-[color:var(--color-divider)] bg-[color:var(--color-surface)]"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <button
+                    type="button"
+                    className="truncate text-left font-semibold text-ink hover:underline"
+                    onClick={() => {
+                      setMapSelectedLoadId(row.id);
+                      openInspectorForLoad(row.id, "stops");
+                    }}
+                  >
+                    {row.loadNumber}
+                  </button>
+                  <div className="text-right">
+                    <span className="text-[10px] uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">{row.status}</span>
+                    <div className="text-[10px] text-[color:var(--color-text-muted)]">P{mapPriorityScore(row)}</div>
+                  </div>
+                </div>
+                <div className="mt-1 truncate text-[color:var(--color-text-muted)]">
+                  {routeLabel(row.route?.shipperCity, row.route?.shipperState)} → {routeLabel(row.route?.consigneeCity, row.route?.consigneeState)}
+                </div>
+                <div className="mt-1 text-[11px] text-[color:var(--color-text-muted)]">
+                  Driver: {row.assignment?.driver?.name ?? "Unassigned"}
+                </div>
+                <div className="mt-1 text-[11px] text-[color:var(--color-text-muted)]">ETA: {formatMapEta(row)}</div>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {isUnassigned(row) ? (
+                    <Badge className="bg-[color:var(--color-danger-soft)] text-[color:var(--color-danger)]">Unassigned</Badge>
+                  ) : null}
+                  {hasMissingDocs(row) ? (
+                    <Badge className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">Missing docs</Badge>
+                  ) : null}
+                  {hasOpenException(row) ? (
+                    <Badge className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">Exception</Badge>
+                  ) : null}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <Button size="sm" variant="ghost" onClick={() => openInspectorForLoad(row.id, "assignment")}>
+                    Assign
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => openRouteMap(row)}>
+                    Route
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => void copyShipmentShareLink(row.id)}>
+                    Share
+                  </Button>
+                </div>
+                {mapDropTargetLoadId === row.id ? (
+                  <div className="mt-1 text-[10px] uppercase tracking-[0.1em] text-[color:var(--color-success)]">
+                    Drop driver to assign
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+    ) : null;
+  const splitInspectorContent = (
+    <div className="space-y-3">
+      {workbenchRightPane ?? (
+        <Card>
+          <EmptyState title="Select a shipment" description="Choose a shipment row to inspect assignment, stops, and timeline." />
+        </Card>
+      )}
+      {tripInspectorPanel}
+    </div>
+  );
+  const splitSecondaryContent =
+    splitSecondaryPane === "map" ? (
+      mapPreviewPanel
+    ) : splitSecondaryPane === "inspector" ? (
+      splitInspectorContent
+    ) : null;
+  const splitSecondaryTitle = splitSecondaryPane === "map" ? "Map peek" : "Inspector peek";
+  if (hasAccess === false) {
+    return (
+      <AppShell title="Dispatch" subtitle="Shipment-first assignment and execution" hideHeader hideTopActivityTrigger>
+        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
+      </AppShell>
+    );
+  }
+  if (hasAccess === null) {
+    return (
+      <AppShell title="Dispatch" subtitle="Shipment-first assignment and execution" hideHeader hideTopActivityTrigger>
+        <EmptyState title="Loading workspace..." description="Pulling dispatch and trip access." />
+      </AppShell>
+    );
+  }
+
+  if (!hasDispatchRole) {
+    return (
+      <AppShell title="Dispatch" subtitle="Shipment-first assignment and execution" hideHeader hideTopActivityTrigger>
+        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
+      </AppShell>
+    );
+  }
+
+  if (blocked) {
+    const isAdmin = user?.role === "ADMIN";
+    return (
+      <AppShell title="Dispatch" subtitle="Shipment-first assignment and execution" hideHeader hideTopActivityTrigger>
+        <BlockedScreen
+          isAdmin={isAdmin}
+          description={isAdmin ? blocked.message || "Finish setup to perform dispatch assignments." : undefined}
+          ctaHref={isAdmin ? blocked.ctaHref || "/onboarding" : undefined}
+        />
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell title="Dispatch" subtitle="Shipment-first assignment and execution" hideHeader hideTopActivityTrigger>
+      <DispatchLayerActivityBridge onDrawerStateChange={setActivityDrawerOpen} />
+      <div
+        ref={dispatchHeaderRef}
+        className={`relative isolate sticky top-0 ${dispatchRibbonZClass} -mx-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-2 py-1 backdrop-blur`}
+      >
+        <div className="flex items-center gap-1.5">
+          <div className="mr-1 hidden text-sm font-semibold text-ink md:block">Dispatch</div>
+          <div
+            className="flex min-w-0 flex-1 flex-nowrap items-center gap-1 overflow-x-auto"
+          >
+            <Button
+              size="sm"
+              variant={activeRibbonMenu === "workspace" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => toggleRibbonMenu("workspace")}
+              onMouseEnter={() => openRibbonMenu("workspace")}
+              onFocus={() => openRibbonMenu("workspace")}
+            >
+              Workspace
+            </Button>
+            <Button
+              size="sm"
+              variant={activeRibbonMenu === "queue" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => toggleRibbonMenu("queue")}
+              onMouseEnter={() => openRibbonMenu("queue")}
+              onFocus={() => openRibbonMenu("queue")}
+            >
+              Queue
+            </Button>
+            <Button
+              size="sm"
+              variant={activeRibbonMenu === "modes" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => toggleRibbonMenu("modes")}
+              onMouseEnter={() => openRibbonMenu("modes")}
+              onFocus={() => openRibbonMenu("modes")}
+            >
+              Modes
+            </Button>
+            <Button
+              size="sm"
+              variant={activeRibbonMenu === "canvas" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => toggleRibbonMenu("canvas")}
+              onMouseEnter={() => openRibbonMenu("canvas")}
+              onFocus={() => openRibbonMenu("canvas")}
+            >
+              Canvas
+            </Button>
+            <Button
+              size="sm"
+              variant={activeRibbonMenu === "quick" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => toggleRibbonMenu("quick")}
+              onMouseEnter={() => openRibbonMenu("quick")}
+              onFocus={() => openRibbonMenu("quick")}
+            >
+              Quick
+            </Button>
+            {isDispatchGridWorkspace ? (
+              <Button
+                size="sm"
+                variant={activeRibbonMenu === "loads" ? "secondary" : "ghost"}
+                className="h-7 px-2"
+                onClick={() => toggleRibbonMenu("loads")}
+                onMouseEnter={() => openRibbonMenu("loads")}
+                onFocus={() => openRibbonMenu("loads")}
+              >
+                {isShipmentWorkspace ? "Shipments" : "Loads"}
+              </Button>
+            ) : null}
+            {isDispatchGridWorkspace ? (
+              <Button
+                size="sm"
+                variant={activeRibbonMenu === "grid" ? "secondary" : "ghost"}
+                className="h-7 px-2"
+                onClick={() => toggleRibbonMenu("grid")}
+                onMouseEnter={() => openRibbonMenu("grid")}
+                onFocus={() => openRibbonMenu("grid")}
+              >
+                Grid
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant={activeRibbonMenu === "views" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => toggleRibbonMenu("views")}
+              onMouseEnter={() => openRibbonMenu("views")}
+              onFocus={() => openRibbonMenu("views")}
+            >
+              Views
+            </Button>
+            <Button
+              size="sm"
+              variant={activeRibbonMenu === "panels" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => toggleRibbonMenu("panels")}
+              onMouseEnter={() => openRibbonMenu("panels")}
+              onFocus={() => openRibbonMenu("panels")}
+            >
+              Panels
+            </Button>
+          </div>
+          <DispatchRibbonActivityButton />
+        </div>
+
+        {activeRibbonMenu ? (
+          <div
+            className={`absolute left-0 top-full ${dispatchRibbonMenuZClass} mt-1.5 w-full max-w-md overflow-hidden rounded-[var(--radius-control)] border border-[color:var(--color-divider-strong)] bg-[color:var(--color-surface-elevated)] p-2 shadow-[0_24px_64px_rgba(15,23,42,0.24)] ring-1 ring-black/10 backdrop-blur-none`}
+          >
+            <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-0 bg-[color:var(--color-surface-elevated)]" />
+            <div className="relative z-10 mb-1 text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">
+              {activeRibbonMenu === "workspace"
+                ? "Workspace controls"
+                : activeRibbonMenu === "queue"
+                ? "Queue controls"
+                : activeRibbonMenu === "modes"
+                ? "Mode controls"
+                : activeRibbonMenu === "canvas"
+                ? "Canvas controls"
+                : activeRibbonMenu === "quick"
+                ? "Quick queues"
+                : activeRibbonMenu === "grid"
+                ? "Grid actions"
+                : activeRibbonMenu === "views"
+                ? "View controls"
+                : activeRibbonMenu === "panels"
+                ? "Panel controls"
+                : isShipmentWorkspace
+                ? "Shipment controls"
+                : "Load controls"}
+            </div>
+            <div className="relative z-10 max-h-[55vh] overflow-y-auto pr-1">
+            {activeRibbonMenu === "workspace" ? (
+              <div className="flex flex-col gap-1.5">
+                <Button
+                  size="sm"
+                  variant={workspace === "loads" ? "secondary" : "ghost"}
+                  className="h-8 justify-start"
+                  onClick={() => switchDispatchWorkspace("loads")}
+                >
+                  Loads workspace
+                </Button>
+                <Button
+                  size="sm"
+                  variant={workspace === "trips" ? "secondary" : "ghost"}
+                  className="h-8 justify-start"
+                  onClick={() => switchDispatchWorkspace("trips")}
+                >
+                  Trips workspace
+                </Button>
+                <Button
+                  size="sm"
+                  variant={workspace === "shipments" ? "secondary" : "ghost"}
+                  className="h-8 justify-start"
+                  onClick={() => switchDispatchWorkspace("shipments")}
+                >
+                  Shipments workspace
+                </Button>
+                {canSeeAllTeams ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant={filters.teamId ? "ghost" : "secondary"}
+                      className="h-8 justify-start"
+                      onClick={() => setFilters((prev) => ({ ...prev, teamId: "" }))}
+                    >
+                      All teams
+                    </Button>
+                    {teams
+                      .filter((team) => team.active !== false)
+                      .slice(0, 8)
+                      .map((team) => (
+                        <Button
+                          key={team.id}
+                          size="sm"
+                          variant={filters.teamId === team.id ? "secondary" : "ghost"}
+                          className="h-8 justify-start"
+                          onClick={() => setFilters((prev) => ({ ...prev, teamId: team.id }))}
+                        >
+                          Team: {team.name}
+                        </Button>
+                      ))}
+                  </>
+                ) : null}
+                {canAssignTeamsOps && teamsEnabled ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => router.push("/teams/settings")}
+                  >
+                    Team settings
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            {activeRibbonMenu === "queue" ? (
+              <div className="flex flex-col gap-1.5">
+                <Button size="sm" variant={queueView === "active" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => updateQueueViewParam("active")}>
+                  Active queue
+                </Button>
+                <Button size="sm" variant={queueView === "recent" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => updateQueueViewParam("recent")}>
+                  Recent queue
+                </Button>
+                <Button size="sm" variant={queueView === "history" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => updateQueueViewParam("history")}>
+                  History queue
+                </Button>
+                {queueView === "active" ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 justify-start"
+                    onClick={() => setHideDeliveredInActive((prev) => !prev)}
+                    title={
+                      hideDeliveredInActive
+                        ? "Show delivered handoff rows in active queue"
+                        : "Hide delivered handoff rows from active queue"
+                    }
+                  >
+                    {hideDeliveredInActive ? "Show delivered" : "Hide delivered"}
+                  </Button>
+                ) : null}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-8 justify-start"
+                  onClick={() => {
+                    void loadDispatchLoads(filters, pageIndex);
+                    void loadDispatchSyncHealth();
+                  }}
+                  disabled={queueLoading}
+                >
+                  {queueLoading ? "Refreshing..." : "Refresh"}
+                </Button>
+              </div>
+            ) : null}
+            {activeRibbonMenu === "modes" ? (
+              <div className="flex flex-col gap-1.5">
+                <Button size="sm" variant={movementView === "all" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => updateMovementViewParam("all")}>
+                  All modes
+                </Button>
+                <Button size="sm" variant={movementView === "LTL" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => updateMovementViewParam("LTL")}>
+                  LTL
+                </Button>
+                <Button size="sm" variant={movementView === "FTL" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => updateMovementViewParam("FTL")}>
+                  FTL
+                </Button>
+                <FormField label="LTL ownership lane" htmlFor="dispatchOwnershipHeader">
                   <Select
-                    id="dispatchViewSelectMenu"
+                    id="dispatchOwnershipHeader"
+                    value={ownershipView}
+                    disabled={movementView === "FTL"}
+                    onChange={(event) => updateOwnershipViewParam(event.target.value as OwnershipView)}
+                  >
+                    <option value="all">All lanes</option>
+                    <option value="outbound">Outbound</option>
+                    <option value="inbound">Inbound</option>
+                  </Select>
+                </FormField>
+              </div>
+            ) : null}
+            {activeRibbonMenu === "canvas" ? (
+              <div className="flex flex-col gap-1.5">
+                <Button size="sm" variant={canvasMode === "table" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => setCanvasMode("table")}>
+                  Table
+                </Button>
+                <Button size="sm" variant={canvasMode === "split" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => setCanvasMode("split")}>
+                  Split
+                </Button>
+                <Button size="sm" variant={canvasMode === "map" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => setCanvasMode("map")}>
+                  Map
+                </Button>
+                {canvasMode === "split" ? (
+                  <>
+                    <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Split focus</div>
+                    <Button size="sm" variant={splitPrimaryPane === "grid" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => setSplitPrimaryPane("grid")}>
+                      Primary: Grid
+                    </Button>
+                    <Button size="sm" variant={splitPrimaryPane === "map" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => setSplitPrimaryPane("map")}>
+                      Primary: Map
+                    </Button>
+                    <Button size="sm" variant={splitPrimaryPane === "inspector" ? "secondary" : "ghost"} className="h-8 justify-start" onClick={() => setSplitPrimaryPane("inspector")}>
+                      Primary: Inspector
+                    </Button>
+                    <Button size="sm" variant={splitSecondaryOpen ? "secondary" : "ghost"} className="h-8 justify-start" onClick={toggleSplitPeekPanel}>
+                      {splitSecondaryOpen ? "Hide peek panel" : "Show peek panel"}
+                    </Button>
+                  </>
+                ) : null}
+                {isDispatchGridWorkspace && workbenchMapHref ? (
+                  <Button type="button" size="sm" variant="secondary" className="h-8 justify-start" onClick={openWorkbenchMap}>
+                    Open live map
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            {activeRibbonMenu === "quick" && isDispatchGridWorkspace ? (
+              <div className="flex flex-col gap-1.5 text-xs">
+                <Button size="sm" className="h-8 justify-start" variant={quickQueue === "unassigned" ? "secondary" : "ghost"} onClick={() => setQuickQueue("unassigned")}>
+                  Unassigned {quickQueueCounts.unassigned}
+                </Button>
+                <Button size="sm" className="h-8 justify-start" variant={quickQueue === "missingDocs" ? "secondary" : "ghost"} onClick={() => setQuickQueue("missingDocs")}>
+                  Missing docs {quickQueueCounts.missingDocs}
+                </Button>
+                <Button size="sm" className="h-8 justify-start" variant={quickQueue === "exceptions" ? "secondary" : "ghost"} onClick={() => setQuickQueue("exceptions")}>
+                  Exceptions {quickQueueCounts.exceptions}
+                </Button>
+                <Button size="sm" className="h-8 justify-start" variant={quickQueue === "overdue" ? "secondary" : "ghost"} onClick={() => setQuickQueue("overdue")}>
+                  Overdue {quickQueueCounts.overdue}
+                </Button>
+                {quickQueue !== "all" ? (
+                  <Button size="sm" className="h-8 justify-start" variant="ghost" onClick={() => setQuickQueue("all")}>
+                    Clear
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            {activeRibbonMenu === "loads" && isDispatchGridWorkspace ? (
+              <div className="flex flex-col gap-1.5">
+                {isLoadWorkspace ? (
+                  <Button size="sm" variant="secondary" className="h-8 justify-start" onClick={openCreateLoadDrawer} disabled={!canCreateLoad}>
+                    Create load
+                  </Button>
+                ) : null}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 justify-start"
+                  onClick={() => router.push("/loads/confirmations")}
+                >
+                  RC Inbox
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 justify-start"
+                  onClick={() => {
+                    void loadDispatchLoads(filters, pageIndex);
+                    void loadDispatchSyncHealth();
+                  }}
+                  disabled={queueLoading}
+                >
+                  {queueLoading ? "Refreshing..." : "Refresh loads"}
+                </Button>
+                {selectedLoadId ? (
+                  <Button size="sm" variant="ghost" className="h-8 justify-start" onClick={() => router.push(`/shipments/${selectedLoadId}`)}>
+                    Open selected shipment
+                  </Button>
+                ) : null}
+                {selectedLoadId && capabilities.canAccessFinance ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      const token = selectedLoadSummary?.loadNumber ?? "";
+                      router.push(
+                        token
+                          ? `/finance?tab=receivables&search=${encodeURIComponent(token)}`
+                          : "/finance?tab=receivables"
+                      );
+                    }}
+                  >
+                    Open receivables
+                  </Button>
+                ) : null}
+                {selectedLoadId && capabilities.canBillActions ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      const token = selectedLoadSummary?.loadNumber ?? "";
+                      const query = token
+                        ? `/finance?tab=payables&loadId=${encodeURIComponent(selectedLoadId)}&search=${encodeURIComponent(token)}`
+                        : `/finance?tab=payables&loadId=${encodeURIComponent(selectedLoadId)}`;
+                      router.push(query);
+                    }}
+                  >
+                    Open payables context
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            {activeRibbonMenu === "grid" && isDispatchGridWorkspace ? (
+              <div className="space-y-2">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Queue presets</div>
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  {WORKFLOW_QUEUE_PRESETS.map((preset) => (
+                    <Button
+                      key={preset.id}
+                      size="sm"
+                      variant={activeWorkflowQueueId === preset.id ? "secondary" : "ghost"}
+                      className="h-8 justify-start"
+                      onClick={() => {
+                        applyWorkflowQueuePreset(preset.id);
+                        setActiveRibbonMenu(null);
+                      }}
+                    >
+                      {preset.label}
+                    </Button>
+                  ))}
+                </div>
+
+                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Workspace presets</div>
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      applyGridColumnPreset("opsDefault");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Ops default
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      applyGridColumnPreset("tripHeavy");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Trip-heavy
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      applyGridColumnPreset("financeReview");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Finance review
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      enableTripContextColumns();
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Show trip context
+                  </Button>
+                </div>
+
+                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Grid tools</div>
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("openExport");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Export rows
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("copyFiltered");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Copy filtered
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("morningSort");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Morning dispatch sort
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("clearSort");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Clear sort
+                  </Button>
+                </div>
+
+                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Clear-out macros</div>
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("clearoutPlanningNoise");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Clear planning noise
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("clearoutCompleted");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Clear completed
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("clearoutInTransit");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    In-Transit only
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      runGridCommand("clearoutFirefighting");
+                      setActiveRibbonMenu(null);
+                    }}
+                  >
+                    Firefighting mode
+                  </Button>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 justify-start"
+                  onClick={() => {
+                    runGridCommand("clearoutReset");
+                    setActiveRibbonMenu(null);
+                  }}
+                >
+                  Reset filters
+                </Button>
+
+                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">
+                  Field catalog
+                </div>
+                <Input
+                  value={dispatchColumnSearch}
+                  onChange={(event) => setDispatchColumnSearch(event.target.value)}
+                  placeholder="Search fields"
+                  className="h-8"
+                />
+                <div className="space-y-2">
+                  {filteredDispatchColumnCatalog.length === 0 ? (
+                    <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-2 text-xs text-[color:var(--color-text-muted)]">
+                      No fields match your search.
+                    </div>
+                  ) : (
+                    filteredDispatchColumnCatalog.map((group) => (
+                      <div key={group.id} className="space-y-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[color:var(--color-text-muted)]">
+                          {group.label}
+                        </div>
+                        {group.columns.map((column) => {
+                          const isLocked = DISPATCH_REQUIRED_COLUMNS.includes(column) || DISPATCH_FROZEN_COLUMNS.includes(column);
+                          return (
+                            <label
+                              key={column}
+                              className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1.5 text-xs"
+                            >
+                              <span>{dispatchColumnLabelByKey.get(column) ?? column}</span>
+                              {isLocked ? (
+                                <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">Locked</Badge>
+                              ) : (
+                                <input
+                                  type="checkbox"
+                                  checked={columnVisibility[column] !== false}
+                                  onChange={(event) =>
+                                    setColumnVisibility((prev) => ({
+                                      ...prev,
+                                      [column]: event.target.checked,
+                                    }))
+                                  }
+                                />
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() =>
+                      setColumnVisibility(() =>
+                        normalizeViewColumns(
+                          DISPATCH_OPTIONAL_COLUMNS.reduce(
+                            (acc, column) => ({ ...acc, [column]: true }),
+                            {} as Partial<Record<DispatchGridColumnKey, boolean>>
+                          )
+                        )
+                      )
+                    }
+                  >
+                    Show all optional
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      setColumnVisibility(dispatchRoleDefaultColumns);
+                      setGridColumnOrder(DEFAULT_GRID_STATE.columnOrder);
+                    }}
+                  >
+                    Reset to role default
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 justify-start"
+                    onClick={() => {
+                      setColumnVisibility(normalizeViewColumns(DEFAULT_COLUMNS));
+                      setGridColumnOrder(DEFAULT_GRID_STATE.columnOrder);
+                    }}
+                  >
+                    Reset to system default
+                  </Button>
+                </div>
+
+                <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">
+                  Column order
+                </div>
+                <div className="text-[11px] text-[color:var(--color-text-muted)]">
+                  Drag rows to reorder the grid columns.
+                </div>
+                <div className="space-y-1">
+                  {movableGridColumns.map((column) => (
+                    <div
+                      key={column}
+                      className={`flex items-center justify-between gap-2 rounded-[var(--radius-control)] border px-2 py-1.5 text-xs ${
+                        draggingGridColumn === column
+                          ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)]/20"
+                          : "border-[color:var(--color-divider)]"
+                      }`}
+                      draggable
+                      onDragStart={(event) => {
+                        setDraggingGridColumn(column);
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", column);
+                      }}
+                      onDragOver={(event) => {
+                        if (!draggingGridColumn || draggingGridColumn === column) return;
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "move";
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (!draggingGridColumn || draggingGridColumn === column) return;
+                        moveGridColumnToTarget(draggingGridColumn, column);
+                        setDraggingGridColumn(null);
+                      }}
+                      onDragEnd={() => setDraggingGridColumn(null)}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="cursor-grab select-none text-[color:var(--color-text-muted)]">::</span>
+                        {dispatchColumnLabelByKey.get(column) ?? column}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2"
+                          onClick={() => moveGridColumn(column, -1)}
+                          disabled={!canMoveGridColumn(column, -1)}
+                        >
+                          Up
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2"
+                          onClick={() => moveGridColumn(column, 1)}
+                          disabled={!canMoveGridColumn(column, 1)}
+                        >
+                          Down
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {activeRibbonMenu === "views" ? (
+              <div className="space-y-2">
+                <FormField label="View" htmlFor="dispatchViewSelectRibbon">
+                  <Select
+                    id="dispatchViewSelectRibbon"
                     value={activeViewId}
                     onChange={(event) => {
                       const nextId = event.target.value;
@@ -2149,7 +4521,7 @@ function DispatchPageContent({
                     ))}
                   </Select>
                 </FormField>
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div className="grid gap-1.5 sm:grid-cols-2">
                   <Button size="sm" variant="secondary" onClick={() => void saveCurrentAsView("PERSONAL")}>
                     Save as new
                   </Button>
@@ -2157,7 +4529,9 @@ function DispatchPageContent({
                     <Button size="sm" variant="ghost" onClick={() => void saveCurrentAsView("ADMIN_TEMPLATE")}>
                       Save template
                     </Button>
-                  ) : null}
+                  ) : (
+                    <div />
+                  )}
                   <Button size="sm" variant="secondary" onClick={() => void updateCurrentView()}>
                     Save current
                   </Button>
@@ -2170,28 +4544,28 @@ function DispatchPageContent({
                     Delete view
                   </Button>
                 </div>
-                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-                  <FormField label="Workflow queue preset" htmlFor="workflowQueuePresetMenu">
-                    <Select
-                      id="workflowQueuePresetMenu"
-                      value={activeWorkflowQueueId}
-                      onChange={(event) => {
-                        const nextValue = event.target.value as WorkflowQueuePresetId | "";
-                        if (!nextValue) {
-                          setActiveWorkflowQueueId("");
-                          return;
-                        }
-                        applyWorkflowQueuePreset(nextValue);
-                      }}
-                    >
-                      <option value="">Workflow queue preset</option>
-                      {WORKFLOW_QUEUE_PRESETS.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.label}
-                        </option>
-                      ))}
-                    </Select>
-                  </FormField>
+                <FormField label="Workflow queue preset" htmlFor="workflowQueuePresetRibbon">
+                  <Select
+                    id="workflowQueuePresetRibbon"
+                    value={activeWorkflowQueueId}
+                    onChange={(event) => {
+                      const nextValue = event.target.value as WorkflowQueuePresetId | "";
+                      if (!nextValue) {
+                        setActiveWorkflowQueueId("");
+                        return;
+                      }
+                      applyWorkflowQueuePreset(nextValue);
+                    }}
+                  >
+                    <option value="">Workflow queue preset</option>
+                    {WORKFLOW_QUEUE_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+                <div className="grid gap-1.5 sm:grid-cols-2">
                   <Button
                     type="button"
                     size="sm"
@@ -2199,205 +4573,205 @@ function DispatchPageContent({
                     onClick={() => void saveCurrentAsView("PERSONAL")}
                     disabled={!activeWorkflowQueueId}
                   >
-                    Save
+                    Save preset view
                   </Button>
-                </div>
-                <div className="grid gap-2">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">Panels</div>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <Button
-                      size="sm"
-                      variant={panelLayout.inspector ? "secondary" : "ghost"}
-                      onClick={() => setPanelLayout((prev) => ({ ...prev, inspector: !prev.inspector }))}
-                    >
-                      Inspector
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={panelLayout.tripInspector ? "secondary" : "ghost"}
-                      onClick={() => setPanelLayout((prev) => ({ ...prev, tripInspector: !prev.tripInspector }))}
-                    >
-                      Trip inspector
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={panelLayout.driverLanes ? "secondary" : "ghost"}
-                      onClick={() => setPanelLayout((prev) => ({ ...prev, driverLanes: !prev.driverLanes }))}
-                    >
-                      Driver lanes
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={panelLayout.exceptions ? "secondary" : "ghost"}
-                      onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: !prev.exceptions }))}
-                    >
-                      Exceptions
-                    </Button>
-                  </div>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <FormField label="Exceptions dock" htmlFor="exceptionsDockMenu">
-                    <Select
-                      id="exceptionsDockMenu"
-                      value={panelLayout.exceptionsDock}
-                      onChange={(event) =>
-                        setPanelLayout((prev) => ({
-                          ...prev,
-                          exceptionsDock: event.target.value === "right" ? "right" : "left",
-                        }))
-                      }
-                    >
-                      <option value="left">Left</option>
-                      <option value="right">Right</option>
-                    </Select>
-                  </FormField>
-                  <div className="flex items-end">
-                    <Button size="sm" variant="secondary" onClick={() => setShowFilters((prev) => !prev)}>
-                      {showFilters ? "Hide refine filters" : "Show refine filters"}
-                    </Button>
-                  </div>
+                  <Button size="sm" variant="ghost" onClick={() => setShowFilters((prev) => !prev)}>
+                    {showFilters ? "Hide refine filters" : "Show refine filters"}
+                  </Button>
                 </div>
                 <div className="text-[11px] text-[color:var(--color-text-muted)]">Active view: {activeView.name}</div>
               </div>
-            </div>
-          </div>,
-          document.body
-        )
-      : null;
-
-  if (hasAccess === false) {
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
-      </AppShell>
-    );
-  }
-  if (hasAccess === null) {
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        <EmptyState title="Loading workspace..." description="Pulling dispatch and trip access." />
-      </AppShell>
-    );
-  }
-
-  if (!hasDispatchRole) {
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
-      </AppShell>
-    );
-  }
-
-  if (blocked) {
-    const isAdmin = user?.role === "ADMIN";
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        <BlockedScreen
-          isAdmin={isAdmin}
-          description={isAdmin ? blocked.message || "Finish setup to perform dispatch assignments." : undefined}
-          ctaHref={isAdmin ? blocked.ctaHref || "/onboarding" : undefined}
-        />
-      </AppShell>
-    );
-  }
-
-  return (
-    <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-      <div className="sticky top-0 z-20 -mx-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-2 py-2 backdrop-blur">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-semibold text-ink">Dispatch Spreadsheet</div>
-            <div className="text-xs text-[color:var(--color-text-muted)]">Primary canvas · inspector + lanes are dockable panels</div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <SegmentedControl
-              value={workspace}
-              options={[
-                { label: "Trips", value: "trips" },
-                { label: "Loads", value: "loads" },
-              ]}
-              onChange={(value) => onWorkspaceChange(value as DispatchWorkspace)}
-            />
-            {workspace === "loads" && workbenchMapHref ? (
-              <Button variant="secondary" size="sm" onClick={openWorkbenchMap}>
-                Live map
-              </Button>
             ) : null}
-            {workspace === "loads" && canCreateLoad ? (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => router.push("/loads?create=1")}
-              >
-                Create load
-              </Button>
+            {activeRibbonMenu === "panels" ? (
+              <div className="space-y-2">
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  <Button
+                    size="sm"
+                    variant={panelLayout.inspector ? "secondary" : "ghost"}
+                    onClick={() => setPanelLayout((prev) => ({ ...prev, inspector: !prev.inspector }))}
+                  >
+                    Inspector
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={panelLayout.tripInspector ? "secondary" : "ghost"}
+                    onClick={() => setPanelLayout((prev) => ({ ...prev, tripInspector: !prev.tripInspector }))}
+                  >
+                    Trip inspector
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={panelLayout.exceptions ? "secondary" : "ghost"}
+                    onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: !prev.exceptions }))}
+                  >
+                    Exceptions
+                  </Button>
+                </div>
+                <FormField label="Exceptions dock" htmlFor="exceptionsDockRibbon">
+                  <Select
+                    id="exceptionsDockRibbon"
+                    value={panelLayout.exceptionsDock}
+                    onChange={(event) =>
+                      setPanelLayout((prev) => ({
+                        ...prev,
+                        exceptionsDock: event.target.value === "right" ? "right" : "left",
+                      }))
+                    }
+                  >
+                    <option value="left">Left</option>
+                    <option value="right">Right</option>
+                  </Select>
+                </FormField>
+                {isTripWorkspace ? (
+                  <div className="text-[11px] text-[color:var(--color-text-muted)]">
+                    Trips workspace starts with right panels hidden. Enable Inspector or Trip inspector when needed.
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-[color:var(--color-text-muted)]">
+                    Panels persist by workspace and role.
+                  </div>
+                )}
+              </div>
             ) : null}
-            <div className="relative">
-              <button
-                type="button"
-                aria-label={showWorkbenchMenu ? "Close dispatch controls menu" : "Open dispatch controls menu"}
-                title={showWorkbenchMenu ? "Close dispatch controls menu" : "Open dispatch controls menu"}
-                onClick={() => setShowWorkbenchMenu((prev) => !prev)}
-                className="relative inline-flex h-[var(--icon-button-size-toolbar)] w-[var(--icon-button-size-toolbar)] items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)] transition hover:bg-[color:var(--color-bg-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-soft)]"
-              >
-                <svg
-                  aria-hidden="true"
-                  viewBox="0 0 24 24"
-                  className="h-[var(--icon-size-toolbar)] w-[var(--icon-size-toolbar)]"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                >
-                  <path d="M4 6h16M7 12h10M10 18h4" strokeLinecap="round" />
-                </svg>
-                {activeFilterCount > 0 ? (
-                  <span className="absolute -right-1 -top-1 inline-flex h-[var(--icon-badge-size)] min-w-[var(--icon-badge-size)] items-center justify-center rounded-full bg-[color:var(--color-accent)] px-1 text-[10px] font-semibold leading-none text-white">
-                    {activeFilterCount}
-                  </span>
-                ) : null}
-              </button>
-            </div>
-            <SegmentedControl
-              value={queueView}
-              options={[
-                { label: "Active", value: "active" },
-                { label: "Recent", value: "recent" },
-                { label: "History", value: "history" },
-              ]}
-              onChange={(value) => updateQueueViewParam(value as QueueView)}
-            />
-            <Button variant="secondary" size="sm" onClick={() => void loadDispatchLoads(filters, pageIndex)} disabled={queueLoading}>
-              {queueLoading ? "Refreshing..." : "Refresh"}
-            </Button>
-          </div>
-        </div>
-        <div className="mt-2 text-[11px] text-[color:var(--color-text-muted)]">
-          {formatDispatchRefreshTime(lastRefreshedAt)}
-        </div>
-        {workspace === "loads" ? (
-          <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
-              <div className="text-[color:var(--color-text-muted)]">In transit</div>
-              <div className="font-semibold text-ink">{dispatchSignals.inTransitCount}</div>
-            </div>
-            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
-              <div className="text-[color:var(--color-text-muted)]">At risk</div>
-              <div className="font-semibold text-ink">{dispatchSignals.atRiskCount}</div>
-            </div>
-            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
-              <div className="text-[color:var(--color-text-muted)]">Tracking continuity</div>
-              <div className="font-semibold text-ink">{dispatchSignals.trackingContinuity}%</div>
-            </div>
-            <div className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2 py-1.5 text-xs">
-              <div className="text-[color:var(--color-text-muted)]">ETA confidence</div>
-              <div className="font-semibold text-ink">{dispatchSignals.etaConfidence}</div>
             </div>
           </div>
         ) : null}
-      </div>
 
+        <div className="mt-0.5 flex items-center gap-1.5 overflow-x-auto whitespace-nowrap pb-0.5 text-[11px] text-[color:var(--color-text-muted)]">
+          <span>{formatDispatchRefreshTime(lastRefreshedAt)}</span>
+          {activeFilterCount > 0 ? (
+            <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+              Filters {activeFilterCount}
+            </Badge>
+          ) : null}
+          <span className="hidden text-[color:var(--color-text-subtle)] xl:inline">
+            · Shortcuts: <span className="font-medium text-[color:var(--color-text-muted)]">A</span> assign ·{" "}
+            <span className="font-medium text-[color:var(--color-text-muted)]">M</span> message ·{" "}
+            <span className="font-medium text-[color:var(--color-text-muted)]">S</span> share
+          </span>
+          {isDispatchGridWorkspace ? (
+            <>
+              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                In transit {dispatchSignals.inTransitCount}
+              </Badge>
+              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                At risk {dispatchSignals.atRiskCount}
+              </Badge>
+              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                Tracking {dispatchSignals.trackingContinuity}%
+              </Badge>
+              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                ETA {dispatchSignals.etaConfidence}
+              </Badge>
+            </>
+          ) : null}
+          {syncHealth ? (
+            <>
+              <Badge
+                className={
+                  syncSignals.status === "CONNECTED"
+                    ? "bg-[color:var(--color-success-soft)] text-[color:var(--color-success)]"
+                    : "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
+                }
+              >
+                Samsara {syncSignals.status === "CONNECTED" ? "connected" : "disconnected"}
+              </Badge>
+              <Badge
+                className={
+                  syncSignals.telemetryState === "fresh"
+                    ? "bg-[color:var(--color-success-soft)] text-[color:var(--color-success)]"
+                    : syncSignals.telemetryState === "stale"
+                      ? "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
+                      : "bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]"
+                }
+              >
+                Telematics {syncSignals.telemetryState}
+                {syncSignals.telemetryState === "stale" ? ` · ${syncSignals.staleInTransitLoads} stale` : ""}
+              </Badge>
+              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                Mappings {syncSignals.mappedTrucks}/{syncSignals.totalActiveTrucks} ({syncSignals.coveragePct}%)
+              </Badge>
+              {syncSignals.webhookRejected > 0 ? (
+                <Badge className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">
+                  Webhook rejected {syncSignals.webhookRejected}
+                </Badge>
+              ) : null}
+              {syncSignals.lastPingAt ? (
+                <span className="text-[10px] text-[color:var(--color-text-subtle)]">
+                  Last ping {formatDateTime24(new Date(syncSignals.lastPingAt), "-")}
+                </span>
+              ) : null}
+            </>
+          ) : null}
+          {queueView === "active" && deliveredHandoffPendingCount > 0 ? (
+            <Badge className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">
+              Delivered pending {deliveredHandoffPendingCount}
+            </Badge>
+          ) : null}
+        </div>
+        {isDispatchGridWorkspace && splitFocusMode ? (
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 border-t border-[color:var(--color-divider)] pt-1">
+            <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">Split focus</Badge>
+            <Button
+              size="sm"
+              variant={splitPrimaryPane === "grid" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => setSplitPrimaryPane("grid")}
+            >
+              Grid
+            </Button>
+            <Button
+              size="sm"
+              variant={splitPrimaryPane === "map" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => setSplitPrimaryPane("map")}
+            >
+              Map
+            </Button>
+            <Button
+              size="sm"
+              variant={splitPrimaryPane === "inspector" ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={() => setSplitPrimaryPane("inspector")}
+            >
+              Inspector
+            </Button>
+            <Button
+              size="sm"
+              variant={splitSecondaryOpen ? "secondary" : "ghost"}
+              className="h-7 px-2"
+              onClick={toggleSplitPeekPanel}
+            >
+              {splitSecondaryOpen ? "Hide peek" : "Show peek"}
+            </Button>
+            {splitSecondaryOpen ? (
+              <>
+                <Button
+                  size="sm"
+                  variant={splitSecondaryPane === "inspector" ? "secondary" : "ghost"}
+                  className="h-7 px-2"
+                  onClick={() => setSplitSecondaryPane("inspector")}
+                  disabled={splitPrimaryPane === "inspector"}
+                >
+                  Peek inspector
+                </Button>
+                <Button
+                  size="sm"
+                  variant={splitSecondaryPane === "map" ? "secondary" : "ghost"}
+                  className="h-7 px-2"
+                  onClick={() => setSplitSecondaryPane("map")}
+                  disabled={splitPrimaryPane === "map"}
+                >
+                  Peek map
+                </Button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+      </div>
       {selectedCount > 0 ? (
-        <div className="mt-3 flex flex-wrap items-end gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
+        <div className="mt-2 flex flex-wrap items-end gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
           <div className="text-sm font-medium text-ink">{selectedCount} selected</div>
           <FormField label="Bulk status" htmlFor="bulkStatus">
             <Select id="bulkStatus" value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value as BulkStatus)}>
@@ -2437,7 +4811,7 @@ function DispatchPageContent({
       ) : null}
 
       {showFilters ? (
-        <div className="mt-3">
+        <div className="mt-2">
           <RefinePanel>
             <div className="grid gap-3 lg:grid-cols-4">
               <FormField label="Search" htmlFor="dispatchSearch">
@@ -2609,12 +4983,34 @@ function DispatchPageContent({
       ) : null}
 
       {partialFailureMessages.length > 0 ? (
-        <div className="mt-3 rounded-[var(--radius-control)] border border-[color:var(--color-warning)]/45 bg-[color:var(--color-warning)]/10 px-3 py-2 text-xs text-[color:var(--color-warning)]">
-          Partial sync warning: {partialFailureMessages.join(" · ")}
+        <div className="mt-2 space-y-2 rounded-[var(--radius-control)] border border-[color:var(--color-warning)]/45 bg-[color:var(--color-warning)]/10 px-3 py-2 text-xs text-[color:var(--color-warning)]">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">
+              Partial sync warning
+            </Badge>
+            <span>{partialFailureMessages.join(" · ")}</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" onClick={() => void loadDispatchLoads(filters, pageIndex)} disabled={queueLoading}>
+              {queueLoading ? "Refreshing..." : "Retry queue refresh"}
+            </Button>
+            {syncHealthError ? (
+              <Button size="sm" variant="secondary" onClick={() => void loadDispatchSyncHealth()}>
+                Retry telematics health
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setPanelLayout((prev) => ({ ...prev, exceptions: true }))}
+            >
+              Open exceptions
+            </Button>
+          </div>
         </div>
       ) : null}
       {dispatchError ? (
-        <div className="mt-3 border-l-2 border-[color:var(--color-warning)] pl-3 text-sm text-[color:var(--color-warning)]">
+        <div className="mt-2 border-l-2 border-[color:var(--color-warning)] pl-3 text-sm text-[color:var(--color-warning)]">
           <div>{dispatchError}</div>
           <div className="mt-2">
             <Button size="sm" variant="secondary" onClick={() => void loadDispatchLoads(filters, pageIndex)} disabled={queueLoading}>
@@ -2623,18 +5019,49 @@ function DispatchPageContent({
           </div>
         </div>
       ) : null}
-      {dispatchActionNote ? <div className="mt-2 text-xs text-[color:var(--color-success)]">{dispatchActionNote}</div> : null}
+      {dispatchActionNote ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+          <Badge
+            className={
+              dispatchNoteTone(dispatchActionNote) === "success"
+                ? "bg-[color:var(--color-success-soft)] text-[color:var(--color-success)]"
+                : dispatchNoteTone(dispatchActionNote) === "warning"
+                  ? "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
+                  : dispatchNoteTone(dispatchActionNote) === "danger"
+                    ? "bg-[color:var(--color-danger-soft)] text-[color:var(--color-danger)]"
+                    : "bg-[color:var(--color-surface-muted)] text-[color:var(--color-text-muted)]"
+            }
+          >
+            {dispatchNoteTone(dispatchActionNote) === "success"
+              ? "Saved"
+              : dispatchNoteTone(dispatchActionNote) === "warning"
+                ? "Needs attention"
+                : dispatchNoteTone(dispatchActionNote) === "danger"
+                  ? "Action failed"
+                  : "Update"}
+          </Badge>
+          <span>{dispatchActionNote}</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto h-7 px-2"
+            onClick={() => setDispatchActionNote(null)}
+          >
+            Dismiss
+          </Button>
+        </div>
+      ) : null}
       {showInitialQueueLoadingState ? (
-        <div className="mt-3">
+        <div className="mt-2">
           <Card>
-            <EmptyState title="Loading dispatch queue..." description="Preparing trip-first execution rows." />
+            <EmptyState title="Loading dispatch queue..." description="Preparing shipment execution rows." />
           </Card>
         </div>
       ) : null}
       {showQueueEmptyState ? (
-        <div className="mt-3">
+        <div className="mt-2">
           <Card>
-            <EmptyState title="No queue rows match this view." description="Adjust filters or switch queue/lens to continue triage." />
+            <EmptyState title="No queue rows match this view." description="Adjust filters or switch queue view to continue triage." />
             <div className="mt-3 flex flex-wrap gap-2">
               <Button
                 size="sm"
@@ -2657,13 +5084,36 @@ function DispatchPageContent({
         </div>
       ) : null}
       {showQueueCanvas ? (
-      <div className="mt-4" style={{ display: "grid", gap: "12px", gridTemplateColumns: dispatchGridTemplateColumns }}>
-        {showExceptionsPanel && panelLayout.exceptionsDock === "left" ? (
+        <div className="mt-2 space-y-3">
+          {showMapPrimary ? mapPreviewPanel : null}
+          {showGridPrimary ? (
+            <div className="mt-1" style={{ display: "grid", gap: "12px", gridTemplateColumns: dispatchGridTemplateColumns }}>
+        {showGridExceptionsRail && panelLayout.exceptionsDock === "left" ? (
           <RefinePanel className="max-h-[62vh] overflow-auto">
             <SectionHeader
               title="Exceptions"
               subtitle={exceptionSubtitle}
             />
+            <div className="mt-2">
+              <FormField label="Owner lane" htmlFor="dispatchExceptionsOwnerLeft">
+                <Select
+                  id="dispatchExceptionsOwnerLeft"
+                  value={exceptionsOwnerFilter}
+                  onChange={(event) =>
+                    setExceptionsOwnerFilter(
+                      event.target.value as "ALL" | DispatchExceptionItem["owner"]
+                    )
+                  }
+                >
+                  <option value="ALL">All owners</option>
+                  <option value="DISPATCH">Dispatch</option>
+                  <option value="DRIVER">Driver</option>
+                  <option value="BILLING">Billing</option>
+                  <option value="CUSTOMER">Customer</option>
+                  <option value="SYSTEM">System</option>
+                </Select>
+              </FormField>
+            </div>
             <div className="mt-2 space-y-2">
               {exceptionRows.length ? (
                 exceptionRows.map((row) => (
@@ -2681,6 +5131,9 @@ function DispatchPageContent({
                       <div className="text-[11px] uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">
                         {row.status} · {row.severity} · {row.owner}
                       </div>
+                      <div className={row.sla?.overdue ? "text-[11px] text-[color:var(--color-danger)]" : "text-[11px] text-[color:var(--color-text-muted)]"}>
+                        {formatExceptionSlaDue(row.sla)}
+                      </div>
                       <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatExceptionAge(row.createdAt)}</div>
                     </button>
                     {row.actionable ? (
@@ -2690,6 +5143,14 @@ function DispatchPageContent({
                             Ack
                           </Button>
                         ) : null}
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => void runExceptionAssist(row)}
+                          disabled={exceptionAssistRunningId === row.id}
+                        >
+                          {exceptionAssistRunningId === row.id ? "Assisting..." : "Assist"}
+                        </Button>
                         <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
                           Resolve
                         </Button>
@@ -2716,7 +5177,10 @@ function DispatchPageContent({
             sortRules={gridSortRules}
             selectedLoadId={selectedLoadId}
             selectedRowIds={selectedRows}
-            columnVisibility={normalizeViewColumns(columnVisibility)}
+            columnVisibility={normalizedColumnVisibility}
+            columnOrder={normalizedGridColumnOrder}
+            onColumnOrderChange={setGridColumnOrder}
+            identityColumn={isTripWorkspace ? "trip" : isShipmentWorkspace ? "shipment" : "load"}
             density={gridDensity}
             loadingCellKey={cellSavingKey}
             readOnly={isQueueReadOnly}
@@ -2731,22 +5195,23 @@ function DispatchPageContent({
             onInlineEdit={handleInlineEdit}
             onQuickAssign={(loadId) => openInspectorForLoad(loadId, "assignment")}
             onQuickOpenInspector={openInspectorForLoad}
+            onQuickOpenTripInspector={openTripInspectorForLoad}
+            onQuickMessage={(loadId) => openInspectorForLoad(loadId, "timeline")}
+            onQuickShare={(loadId) => void copyShipmentShareLink(loadId)}
             onQuickUploadPod={openUploadPodForLoad}
-            workflowMacros={WORKFLOW_QUEUE_PRESETS.map((preset) => ({ id: preset.id, label: preset.label }))}
-            onApplyWorkflowMacro={(macroId) => applyWorkflowQueuePreset(macroId as WorkflowQueuePresetId)}
+            externalCommand={gridCommand}
+            hideCommandMenus
           />
-          {showDriverLanesPanel ? (
-            <DriverLanesPanel
-              drivers={availableDrivers}
-              loads={gridRows}
-              assigningLaneKey={laneAssigningKey}
-              onAssignLoadToDriver={assignLoadFromLane}
-            />
-          ) : null}
         </div>
 
-        {showInspectorPanel || showTripInspectorPanel ? (
-          <div className="min-h-0 max-h-[calc(100dvh-24rem)] space-y-3 overflow-y-auto">
+        {showGridInspectorRail ? (
+          <div
+            className="min-h-0 self-start space-y-3 overflow-y-auto lg:sticky"
+            style={{
+              top: `${inspectorStickyTop}px`,
+              maxHeight: `calc(100dvh - ${inspectorStickyTop + 12}px)`,
+            }}
+          >
             {showInspectorPanel
               ? (workbenchRightPane ?? (
                   <Card>
@@ -2758,63 +5223,134 @@ function DispatchPageContent({
           </div>
         ) : null}
 
-        {showExceptionsPanel && panelLayout.exceptionsDock === "right" ? (
-          <RefinePanel className="max-h-[62vh] overflow-auto">
-            <SectionHeader
-              title="Exceptions"
-              subtitle={exceptionSubtitle}
-            />
-            <div className="mt-2 space-y-2">
-              {exceptionRows.length ? (
-                exceptionRows.map((row) => (
-                  <div
-                    key={row.id}
-                    className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-2 text-xs"
+        {showGridExceptionsRail && panelLayout.exceptionsDock === "right" ? (
+          <div
+            className="min-h-0 self-start overflow-y-auto lg:sticky"
+            style={{
+              top: `${inspectorStickyTop}px`,
+              maxHeight: `calc(100dvh - ${inspectorStickyTop + 12}px)`,
+            }}
+          >
+            <RefinePanel className="max-h-full overflow-auto">
+              <SectionHeader
+                title="Exceptions"
+                subtitle={exceptionSubtitle}
+              />
+              <div className="mt-2">
+                <FormField label="Owner lane" htmlFor="dispatchExceptionsOwnerRight">
+                  <Select
+                    id="dispatchExceptionsOwnerRight"
+                    value={exceptionsOwnerFilter}
+                    onChange={(event) =>
+                      setExceptionsOwnerFilter(
+                        event.target.value as "ALL" | DispatchExceptionItem["owner"]
+                      )
+                    }
                   >
-                    <button
-                      type="button"
-                      onClick={() => openInspectorForLoad(row.loadId, "exceptions")}
-                      className="w-full text-left hover:text-[color:var(--color-text)]"
+                    <option value="ALL">All owners</option>
+                    <option value="DISPATCH">Dispatch</option>
+                    <option value="DRIVER">Driver</option>
+                    <option value="BILLING">Billing</option>
+                    <option value="CUSTOMER">Customer</option>
+                    <option value="SYSTEM">System</option>
+                  </Select>
+                </FormField>
+              </div>
+              <div className="mt-2 space-y-2">
+                {exceptionRows.length ? (
+                  exceptionRows.map((row) => (
+                    <div
+                      key={row.id}
+                      className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-2 text-xs"
                     >
-                      <div className="font-semibold text-ink">{row.loadNumber}</div>
-                      <div className="text-[color:var(--color-text-muted)]">{row.title}</div>
-                      <div className="text-[11px] uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">
-                        {row.status} · {row.severity} · {row.owner}
-                      </div>
-                      <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatExceptionAge(row.createdAt)}</div>
-                    </button>
-                    {row.actionable ? (
-                      <div className="mt-2 flex gap-2">
-                        {row.status !== "ACKNOWLEDGED" ? (
-                          <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
-                            Ack
+                      <button
+                        type="button"
+                        onClick={() => openInspectorForLoad(row.loadId, "exceptions")}
+                        className="w-full text-left hover:text-[color:var(--color-text)]"
+                      >
+                        <div className="font-semibold text-ink">{row.loadNumber}</div>
+                        <div className="text-[color:var(--color-text-muted)]">{row.title}</div>
+                        <div className="text-[11px] uppercase tracking-[0.12em] text-[color:var(--color-text-subtle)]">
+                          {row.status} · {row.severity} · {row.owner}
+                        </div>
+                        <div className={row.sla?.overdue ? "text-[11px] text-[color:var(--color-danger)]" : "text-[11px] text-[color:var(--color-text-muted)]"}>
+                          {formatExceptionSlaDue(row.sla)}
+                        </div>
+                        <div className="text-[11px] text-[color:var(--color-text-muted)]">{formatExceptionAge(row.createdAt)}</div>
+                      </button>
+                      {row.actionable ? (
+                        <div className="mt-2 flex gap-2">
+                          {row.status !== "ACKNOWLEDGED" ? (
+                            <Button size="sm" variant="ghost" onClick={() => void acknowledgeException(row.id)}>
+                              Ack
+                            </Button>
+                          ) : null}
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => void runExceptionAssist(row)}
+                            disabled={exceptionAssistRunningId === row.id}
+                          >
+                            {exceptionAssistRunningId === row.id ? "Assisting..." : "Assist"}
                           </Button>
-                        ) : null}
-                        <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
-                          Resolve
-                        </Button>
-                        {row.status === "ACKNOWLEDGED" ? (
-                          <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
-                            Reopen
+                          <Button size="sm" variant="ghost" onClick={() => void resolveException(row.id)}>
+                            Resolve
                           </Button>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
-                ))
-              ) : (
-                <div className="text-xs text-[color:var(--color-text-muted)]">No open exceptions.</div>
-              )}
-            </div>
-          </RefinePanel>
+                          {row.status === "ACKNOWLEDGED" ? (
+                            <Button size="sm" variant="ghost" onClick={() => void reopenException(row.id)}>
+                              Reopen
+                            </Button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-xs text-[color:var(--color-text-muted)]">No open exceptions.</div>
+                )}
+              </div>
+            </RefinePanel>
+          </div>
         ) : null}
-      </div>
+            </div>
+          ) : null}
+          {showInspectorPrimary ? (
+            <Card>
+              <SectionHeader title="Inspector focus" subtitle="Single-pane execution detail" />
+              <div className="mt-3">{splitInspectorContent}</div>
+            </Card>
+          ) : null}
+        </div>
+      ) : null}
+      {showQueueCanvas && splitFocusMode && splitSecondaryOpen && splitSecondaryContent ? (
+        <div
+          className={`fixed right-3 ${splitPeekZClass} w-[min(540px,calc(100vw-1.5rem))]`}
+          style={{ top: `${Math.max(dispatchHeaderOffset + 8, 80)}px`, maxHeight: "calc(100dvh - 96px)" }}
+        >
+          <div className="h-full overflow-hidden rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] shadow-[0_18px_45px_rgba(0,0,0,0.22)]">
+            <div className="flex items-center justify-between border-b border-[color:var(--color-divider)] px-3 py-2">
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">{splitSecondaryTitle}</div>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2"
+                onClick={() => {
+                  setSplitSecondaryOpen(false);
+                  setLayerFocus("base");
+                }}
+              >
+                Close peek
+              </Button>
+            </div>
+            <div className="max-h-[calc(100dvh-140px)] overflow-auto p-3">{splitSecondaryContent}</div>
+          </div>
+        </div>
       ) : null}
 
-      {showQueueCanvas ? (
+      {showQueueCanvas && showGridPrimary ? (
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs text-[color:var(--color-text-muted)]">
-          Page {pageIndex + 1} of {totalPages} - {totalCount} loads
+          Page {pageIndex + 1} of {totalPages} · {queueScopedLoads.length} shown ({totalCount} total)
         </div>
         <div className="flex gap-2">
           <Button size="sm" variant="secondary" onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))} disabled={pageIndex === 0}>
@@ -2832,107 +5368,35 @@ function DispatchPageContent({
       </div>
       ) : null}
 
-      <DispatchDocUploadDrawer
-        open={Boolean(docUploadTarget)}
-        loadId={docUploadTarget?.loadId ?? null}
-        loadNumber={docUploadTarget?.loadNumber ?? null}
-        onClose={() => setDocUploadTarget(null)}
-        onUploaded={(payload) => void handleDocUploaded({ loadId: payload.loadId, docType: payload.docType })}
-      />
-      {workbenchMenuOverlay}
+      <>
+        <DispatchDocUploadDrawer
+          open={Boolean(docUploadTarget)}
+          loadId={docUploadTarget?.loadId ?? null}
+          loadNumber={docUploadTarget?.loadNumber ?? null}
+          onClose={() => setDocUploadTarget(null)}
+          onUploaded={(payload) => void handleDocUploaded({ loadId: payload.loadId, docType: payload.docType })}
+        />
+        <CreateLoadDrawer
+          open={createLoadDrawerOpen && canCreateLoadInActiveWorkspace}
+          defaultMovementMode={movementView}
+          operatingEntities={operatingEntities}
+          onClose={closeCreateLoadDrawer}
+          onCreated={(load) => handleCreateLoadFromDispatch(load)}
+        />
+      </>
 
-    </AppShell>
-  );
-}
-
-function DispatchTripsContent({
-  workspace,
-  onWorkspaceChange,
-}: {
-  workspace: DispatchWorkspace;
-  onWorkspaceChange: (next: DispatchWorkspace) => void;
-}) {
-  return (
-    <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-      <div className="sticky top-0 z-20 -mx-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-2 py-2 backdrop-blur">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-semibold text-ink">Dispatch Trips Workspace</div>
-            <div className="text-xs text-[color:var(--color-text-muted)]">
-              Trip execution is primary in carrier mode.
-            </div>
-          </div>
-          <SegmentedControl
-            value={workspace}
-            options={[
-              { label: "Trips", value: "trips" },
-              { label: "Loads", value: "loads" },
-            ]}
-            onChange={(value) => onWorkspaceChange(value as DispatchWorkspace)}
-          />
-        </div>
-      </div>
-      <TripsWorkspace />
     </AppShell>
   );
 }
 
 function DispatchWorkspaceRouter() {
-  const { user, org, loading } = useUser();
-  const router = useRouter();
-  const pathname = usePathname();
   const searchParams = useSearchParams();
-
   const workspaceParam = searchParams.get("workspace");
-  const workspace = workspaceParam === "trips" || workspaceParam === "loads" ? workspaceParam : null;
-
-  const setWorkspace = useCallback(
-    (next: DispatchWorkspace) => {
-      const params = new URLSearchParams(searchParams.toString());
-      params.set("workspace", next);
-      if (next === "trips") {
-        params.delete("loadId");
-      } else {
-        params.delete("tripId");
-      }
-      const query = params.toString();
-      router.replace(query ? `${pathname}?${query}` : pathname);
-    },
-    [pathname, router, searchParams]
-  );
-
-  useEffect(() => {
-    if (loading || workspace) return;
-    setWorkspace(
-      getDefaultDispatchWorkspace({
-        role: user?.role,
-        operatingMode: (org?.operatingMode as "CARRIER" | "BROKER" | "BOTH" | null | undefined) ?? null,
-      })
-    );
-  }, [loading, org?.operatingMode, setWorkspace, user?.role, workspace]);
-
-  if (loading || !workspace) {
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        <EmptyState title="Loading dispatch workspace..." description="Applying your role-based default view." />
-      </AppShell>
-    );
-  }
-
-  const capabilities = getRoleCapabilities(user?.role);
-  if (!capabilities.canAccessDispatch) {
-    return (
-      <AppShell title="Dispatch" subtitle="Trip-first assignment and execution">
-        <NoAccess title="No access to Dispatch" description="You do not have permission to view dispatch execution." />
-      </AppShell>
-    );
-  }
-
-  if (workspace === "trips") {
-    return <DispatchTripsContent workspace={workspace} onWorkspaceChange={setWorkspace} />;
-  }
-
-  return <DispatchPageContent workspace={workspace} onWorkspaceChange={setWorkspace} />;
+  const workspace: DispatchWorkspace =
+    workspaceParam === "trips" || workspaceParam === "shipments" || workspaceParam === "loads"
+      ? workspaceParam
+      : "loads";
+  return <DispatchPageContent workspace={workspace} />;
 }
 
 export default function DispatchPage() {

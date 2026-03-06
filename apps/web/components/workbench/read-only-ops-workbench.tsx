@@ -113,11 +113,11 @@ const WORKBENCH_CONFIG: Record<
     role: "SAFETY",
     title: "Safety Workbench",
     subtitle: "Compliance and operational risk monitoring for active loads and trips",
-    primaryQueueLabel: "Compliance-expiring loads",
-    secondaryQueueLabel: "Tracking-risk loads",
+    primaryQueueLabel: "Tracking-risk loads",
+    secondaryQueueLabel: "Missing POD loads",
     tertiaryQueueLabel: "Compliance-expired loads",
-    primaryChip: "compliance-expiring",
-    secondaryChip: "tracking-off",
+    primaryChip: "tracking-off",
+    secondaryChip: "missing-pod",
     tertiaryChip: "issue:COMPLIANCE_EXPIRED",
   },
   support: {
@@ -125,11 +125,11 @@ const WORKBENCH_CONFIG: Record<
     title: "Support Workbench",
     subtitle: "Read-only troubleshooting workspace across dispatch and execution timelines",
     primaryQueueLabel: "Delivered-unbilled loads",
-    secondaryQueueLabel: "QBO-failed loads",
-    tertiaryQueueLabel: "Active loads",
+    secondaryQueueLabel: "Active loads",
+    tertiaryQueueLabel: "QBO-failed loads",
     primaryChip: "delivered-unbilled",
-    secondaryChip: "qbo-failed",
-    tertiaryChip: "active",
+    secondaryChip: "active",
+    tertiaryChip: "qbo-failed",
   },
 };
 
@@ -465,8 +465,6 @@ export function ReadOnlyOpsWorkbench({ kind }: { kind: WorkbenchKind }) {
       <NoAccess
         title={`No access to ${config.title}`}
         description="This workspace is restricted to the assigned role."
-        ctaLabel="Open profile"
-        ctaHref="/profile"
       />
     );
   }

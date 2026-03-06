@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { StatusChip } from "@/components/ui/status-chip";
-import { formatDateTime as formatDateTime24 } from "@/lib/date-time";
+import { formatDate as formatDate24, formatDateTime as formatDateTime24, formatTime as formatTime24 } from "@/lib/date-time";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -21,7 +21,7 @@ type DispatchStatus =
   | "PAID"
   | "CANCELLED";
 
-export type DispatchInspectorFocusSection = "stops" | "documents" | "tracking" | "assignment" | "exceptions";
+export type DispatchInspectorFocusSection = "stops" | "documents" | "tracking" | "assignment" | "timeline" | "exceptions";
 
 type DispatchIssueTag = {
   type: string;
@@ -48,9 +48,32 @@ export type DispatchGridColumnKey =
   | "risk"
   | "nextAction"
   | "tripNumber"
+  | "tripStatus"
+  | "tripMode"
+  | "tripOrigin"
+  | "tripDestination"
+  | "tripDeparture"
+  | "tripArrival"
+  | "tripLoads"
   | "updatedAt";
 
 export type DispatchGridDensity = "compact" | "comfortable";
+
+export type DispatchGridCommandType =
+  | "copyFiltered"
+  | "morningSort"
+  | "clearSort"
+  | "clearoutPlanningNoise"
+  | "clearoutCompleted"
+  | "clearoutInTransit"
+  | "clearoutFirefighting"
+  | "clearoutReset"
+  | "openExport";
+
+export type DispatchGridCommand = {
+  token: number;
+  type: DispatchGridCommandType;
+};
 
 export type DispatchGridRow = {
   id: string;
@@ -65,6 +88,12 @@ export type DispatchGridRow = {
     id: string;
     tripNumber: string;
     status: string;
+    movementMode?: string | null;
+    origin?: string | null;
+    destination?: string | null;
+    plannedDepartureAt?: string | null;
+    plannedArrivalAt?: string | null;
+    loadsCount?: number | null;
   } | null;
   assignment?: {
     driver?: { id: string; name: string } | null;
@@ -76,6 +105,10 @@ export type DispatchGridRow = {
     shipperState?: string | null;
     consigneeCity?: string | null;
     consigneeState?: string | null;
+    shipperAppointmentStart?: string | null;
+    shipperAppointmentEnd?: string | null;
+    consigneeAppointmentStart?: string | null;
+    consigneeAppointmentEnd?: string | null;
   };
   nextStop?: {
     appointmentStart?: string | null;
@@ -161,6 +194,8 @@ type ColumnFilterState = {
   loadNumber?: TextFilterState;
   customer?: TextFilterState;
   status?: StatusFilterState;
+  tripStatus?: StatusFilterState;
+  tripMode?: StatusFilterState;
   pickupAppt?: AppointmentFilterState;
   deliveryAppt?: AppointmentFilterState;
   assignment?: AssignmentFilterState;
@@ -184,10 +219,12 @@ const STATUS_OPTIONS: DispatchStatus[] = [
   "PAID",
   "CANCELLED",
 ];
+const TRIP_STATUS_OPTIONS = ["PLANNED", "ASSIGNED", "IN_TRANSIT", "ARRIVED", "COMPLETE", "CANCELLED"] as const;
+const TRIP_MODE_OPTIONS = ["FTL", "LTL", "POOL_DISTRIBUTION"] as const;
 
 export const DISPATCH_GRID_COLUMNS: DispatchGridColumn[] = [
   { key: "select", label: "", width: 44, frozen: true, required: true, align: "center" },
-  { key: "loadNumber", label: "Load #", width: 190, frozen: true, required: true, filterable: true, sortable: true },
+  { key: "loadNumber", label: "Shipment #", width: 190, frozen: true, required: true, filterable: true, sortable: true },
   { key: "status", label: "Status", width: 132, frozen: true, required: true, editable: true, filterable: true, sortable: true },
   { key: "customer", label: "Customer", width: 180, required: true, editable: true, filterable: true, sortable: true },
   { key: "pickupAppt", label: "Pickup", width: 220, required: true, filterable: true, sortable: true },
@@ -202,6 +239,13 @@ export const DISPATCH_GRID_COLUMNS: DispatchGridColumn[] = [
   { key: "risk", label: "Risk", width: 128, required: true, align: "center", filterable: true, sortable: true },
   { key: "nextAction", label: "Next Best Action", width: 220, required: true, sortable: true },
   { key: "tripNumber", label: "Trip #", width: 140, required: false, sortable: true },
+  { key: "tripStatus", label: "Trip Status", width: 140, required: false, filterable: true, sortable: true },
+  { key: "tripMode", label: "Trip Mode", width: 120, required: false, filterable: true, sortable: true },
+  { key: "tripOrigin", label: "Trip Origin", width: 190, required: false, sortable: true },
+  { key: "tripDestination", label: "Trip Destination", width: 190, required: false, sortable: true },
+  { key: "tripDeparture", label: "Trip Depart", width: 170, required: false, sortable: true },
+  { key: "tripArrival", label: "Trip Arrive", width: 170, required: false, sortable: true },
+  { key: "tripLoads", label: "Trip Loads", width: 110, required: false, align: "right", sortable: true },
   { key: "updatedAt", label: "Updated", width: 160, required: false, sortable: true },
 ];
 
@@ -302,6 +346,49 @@ function routeLabel(city?: string | null, state?: string | null) {
   return city ?? state ?? "-";
 }
 
+function formatDatePart(value?: string | null) {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "-";
+  return formatDate24(parsed);
+}
+
+function formatTimePart(value?: string | null) {
+  return formatTime24(value, "-");
+}
+
+function resolveAppointmentWindow(
+  row: DispatchGridRow,
+  column: "pickupAppt" | "deliveryAppt"
+): { from: string | null; to: string | null } {
+  if (column === "pickupAppt") {
+    const from = row.route?.shipperAppointmentStart ?? row.nextStop?.appointmentStart ?? null;
+    const to = row.route?.shipperAppointmentEnd ?? row.route?.shipperAppointmentStart ?? row.nextStop?.appointmentEnd ?? from;
+    return { from, to };
+  }
+  const from = row.route?.consigneeAppointmentStart ?? row.nextStop?.appointmentEnd ?? null;
+  const to = row.route?.consigneeAppointmentEnd ?? row.route?.consigneeAppointmentStart ?? row.nextStop?.appointmentEnd ?? from;
+  return { from, to };
+}
+
+function formatAppointmentWindowText(row: DispatchGridRow, column: "pickupAppt" | "deliveryAppt") {
+  const window = resolveAppointmentWindow(row, column);
+  return {
+    dateRange: `${formatDatePart(window.from)} → ${formatDatePart(window.to)}`,
+    timeRange: `${formatTimePart(window.from)} → ${formatTimePart(window.to)}`,
+    relative: formatRelativeAppointment(window.from ?? window.to),
+  };
+}
+
+function isTerminalRowStatus(status?: string | null) {
+  return ["DELIVERED", "COMPLETE", "CANCELLED", "INVOICED", "PAID"].includes((status ?? "").toUpperCase());
+}
+
+function isAssignmentSignal(value?: string | null) {
+  const normalized = String(value ?? "").toUpperCase();
+  return normalized.includes("ASSIGN");
+}
+
 function normalizeRate(rate?: number | string | null) {
   if (rate === null || rate === undefined || rate === "") return "-";
   const numeric = typeof rate === "string" ? Number(rate) : rate;
@@ -321,10 +408,12 @@ function buildDocsBadgeRow(row: DispatchGridRow) {
 }
 
 function buildExceptions(row: DispatchGridRow) {
+  const terminal = isTerminalRowStatus(row.status);
   const normalized: Array<{ label: string; tone: "warning" | "danger" }> = [];
   const seen = new Set<string>();
   for (const exception of row.exceptions ?? []) {
     if (!exception || exception.status === "RESOLVED") continue;
+    if (terminal && isAssignmentSignal(exception.type ?? exception.code ?? exception.title ?? exception.message)) continue;
     const label = (exception.title ?? exception.message ?? exception.code ?? exception.type ?? "Issue").trim();
     if (!label || seen.has(label)) continue;
     seen.add(label);
@@ -336,7 +425,7 @@ function buildExceptions(row: DispatchGridRow) {
   if (normalized.length) return normalized;
 
   const fallback: Array<{ label: string; tone: "warning" | "danger" }> = [];
-  if (row.riskFlags?.needsAssignment) fallback.push({ label: "Needs assignment", tone: "danger" });
+  if (!terminal && row.riskFlags?.needsAssignment) fallback.push({ label: "Needs assignment", tone: "danger" });
   if (row.riskFlags?.trackingOffInTransit) fallback.push({ label: "Tracking off", tone: "warning" });
   if (row.riskFlags?.overdueStopWindow) fallback.push({ label: "Overdue stop", tone: "warning" });
   return fallback;
@@ -355,21 +444,29 @@ function noteIndicatorLabel(row: DispatchGridRow) {
 }
 
 function buildNextBestAction(row: DispatchGridRow) {
-  if (row.issuesTop?.length) {
+  const terminal = isTerminalRowStatus(row.status);
+  const filteredIssuesTop = (row.issuesTop ?? []).filter((issue) => !(terminal && isAssignmentSignal(issue.type ?? issue.label)));
+  if (filteredIssuesTop.length) {
     return {
       label: "Resolve issue",
-      reason: row.issuesTop[0]?.label ?? row.issuesText ?? "Action needed",
+      reason: filteredIssuesTop[0]?.label ?? row.issuesText ?? "Action needed",
     };
   }
   const unresolved = (row.exceptions ?? []).filter((exception) => exception.status !== "RESOLVED");
-  const blocker = unresolved.find((exception) => exception.severity === "BLOCKER");
+  const unresolvedFiltered = terminal
+    ? unresolved.filter((exception) => !isAssignmentSignal(exception.type ?? exception.code ?? exception.title ?? exception.message))
+    : unresolved;
+  const blocker = unresolvedFiltered.find((exception) => exception.severity === "BLOCKER");
   if (blocker) {
     return { label: "Resolve blocker", reason: blocker.title ?? blocker.type ?? "Dispatch exception" };
   }
-  if (unresolved.length) {
-    return { label: "Acknowledge exception", reason: unresolved[0].title ?? unresolved[0].type ?? "Dispatch issue" };
+  if (unresolvedFiltered.length) {
+    return {
+      label: "Acknowledge exception",
+      reason: unresolvedFiltered[0].title ?? unresolvedFiltered[0].type ?? "Dispatch issue",
+    };
   }
-  if (row.riskFlags?.needsAssignment) {
+  if (!terminal && row.riskFlags?.needsAssignment) {
     return { label: "Assign driver + assets", reason: "Missing assignment" };
   }
   if (row.riskFlags?.trackingOffInTransit) {
@@ -382,6 +479,7 @@ function buildNextBestAction(row: DispatchGridRow) {
 }
 
 function buildRiskIndicators(row: DispatchGridRow, exceptions: Array<{ label: string; tone: "warning" | "danger" }>) {
+  const terminal = isTerminalRowStatus(row.status);
   const indicators: Array<{
     key: string;
     label: string;
@@ -390,8 +488,9 @@ function buildRiskIndicators(row: DispatchGridRow, exceptions: Array<{ label: st
     focusSection: DispatchInspectorFocusSection;
     issueType?: string;
   }> = [];
-  if (row.issuesTop?.length) {
-    for (const issue of row.issuesTop.slice(0, 2)) {
+  const issuesTop = (row.issuesTop ?? []).filter((issue) => !(terminal && isAssignmentSignal(issue.type ?? issue.label)));
+  if (issuesTop.length) {
+    for (const issue of issuesTop.slice(0, 2)) {
       indicators.push({
         key: `issue:${issue.type}`,
         issueType: issue.type,
@@ -422,7 +521,8 @@ function buildRiskIndicators(row: DispatchGridRow, exceptions: Array<{ label: st
       focusSection: "documents",
     });
   }
-  const missingAssign = !row.assignment?.driver?.id || !row.assignment?.truck?.id || !row.assignment?.trailer?.id;
+  const missingAssign =
+    !terminal && (!row.assignment?.driver?.id || !row.assignment?.truck?.id || !row.assignment?.trailer?.id);
   if (missingAssign) {
     indicators.push({
       key: "assign",
@@ -469,18 +569,22 @@ function parseInlineValue(field: InlineEditField, value: string): { ok: true; pa
   return { ok: true, parsed: numeric };
 }
 
-function buildCellValue(row: DispatchGridRow, column: DispatchGridColumnKey): string {
+function buildCellValue(row: DispatchGridRow, column: DispatchGridColumnKey, identityColumn: IdentityColumnMode = "load"): string {
   switch (column) {
     case "loadNumber":
-      return row.loadNumber;
+      return identityColumn === "trip" ? row.trip?.tripNumber ?? row.loadNumber : row.loadNumber;
     case "status":
       return row.status;
     case "customer":
       return row.customerName ?? "";
-    case "pickupAppt":
-      return `${routeLabel(row.route?.shipperCity, row.route?.shipperState)} ${formatDateTime(row.nextStop?.appointmentStart ?? null)}`;
-    case "deliveryAppt":
-      return `${routeLabel(row.route?.consigneeCity, row.route?.consigneeState)} ${formatDateTime(row.nextStop?.appointmentEnd ?? null)}`;
+    case "pickupAppt": {
+      const windowText = formatAppointmentWindowText(row, "pickupAppt");
+      return `${routeLabel(row.route?.shipperCity, row.route?.shipperState)} ${windowText.dateRange} ${windowText.timeRange}`.trim();
+    }
+    case "deliveryAppt": {
+      const windowText = formatAppointmentWindowText(row, "deliveryAppt");
+      return `${routeLabel(row.route?.consigneeCity, row.route?.consigneeState)} ${windowText.dateRange} ${windowText.timeRange}`.trim();
+    }
     case "assignment":
       return `${row.assignment?.driver?.name ?? "Unassigned"} ${row.assignment?.truck?.unit ?? ""} ${row.assignment?.trailer?.unit ?? ""}`.trim();
     case "miles":
@@ -493,6 +597,20 @@ function buildCellValue(row: DispatchGridRow, column: DispatchGridColumnKey): st
       return row.notesIndicator ?? "NONE";
     case "tripNumber":
       return row.trip?.tripNumber ?? "-";
+    case "tripStatus":
+      return row.trip?.status ?? "-";
+    case "tripMode":
+      return row.trip?.movementMode ?? "-";
+    case "tripOrigin":
+      return row.trip?.origin ?? "-";
+    case "tripDestination":
+      return row.trip?.destination ?? "-";
+    case "tripDeparture":
+      return row.trip?.plannedDepartureAt ?? "";
+    case "tripArrival":
+      return row.trip?.plannedArrivalAt ?? "";
+    case "tripLoads":
+      return row.trip?.loadsCount == null ? "" : String(row.trip.loadsCount);
     case "updatedAt":
       return row.updatedAt ?? "";
     default:
@@ -500,20 +618,24 @@ function buildCellValue(row: DispatchGridRow, column: DispatchGridColumnKey): st
   }
 }
 
-function buildExportCellValue(row: DispatchGridRow, column: DispatchGridColumnKey): string {
+function buildExportCellValue(row: DispatchGridRow, column: DispatchGridColumnKey, identityColumn: IdentityColumnMode = "load"): string {
   const nextAction = buildNextBestAction(row);
   const exceptions = buildExceptions(row);
   switch (column) {
     case "loadNumber":
-      return row.loadNumber;
+      return identityColumn === "trip" ? row.trip?.tripNumber ?? row.loadNumber : row.loadNumber;
     case "status":
       return row.status;
     case "customer":
       return row.customerName ?? "";
-    case "pickupAppt":
-      return `${routeLabel(row.route?.shipperCity, row.route?.shipperState)} | ${formatDateTime(row.nextStop?.appointmentStart ?? null)}`;
-    case "deliveryAppt":
-      return `${routeLabel(row.route?.consigneeCity, row.route?.consigneeState)} | ${formatDateTime(row.nextStop?.appointmentEnd ?? null)}`;
+    case "pickupAppt": {
+      const windowText = formatAppointmentWindowText(row, "pickupAppt");
+      return `${routeLabel(row.route?.shipperCity, row.route?.shipperState)} | ${windowText.dateRange} | ${windowText.timeRange}`;
+    }
+    case "deliveryAppt": {
+      const windowText = formatAppointmentWindowText(row, "deliveryAppt");
+      return `${routeLabel(row.route?.consigneeCity, row.route?.consigneeState)} | ${windowText.dateRange} | ${windowText.timeRange}`;
+    }
     case "assignment":
       return `${row.assignment?.driver?.name ?? "Unassigned"} | ${row.assignment?.truck?.unit ?? "No truck"} | ${row.assignment?.trailer?.unit ?? "No trailer"}`;
     case "miles":
@@ -535,6 +657,20 @@ function buildExportCellValue(row: DispatchGridRow, column: DispatchGridColumnKe
       return `${nextAction.label} | ${nextAction.reason}`;
     case "tripNumber":
       return row.trip?.tripNumber ?? "";
+    case "tripStatus":
+      return row.trip?.status ?? "";
+    case "tripMode":
+      return row.trip?.movementMode ?? "";
+    case "tripOrigin":
+      return row.trip?.origin ?? "";
+    case "tripDestination":
+      return row.trip?.destination ?? "";
+    case "tripDeparture":
+      return formatDateTime(row.trip?.plannedDepartureAt);
+    case "tripArrival":
+      return formatDateTime(row.trip?.plannedArrivalAt);
+    case "tripLoads":
+      return row.trip?.loadsCount == null ? "" : String(row.trip.loadsCount);
     case "updatedAt":
       return formatDateTime(row.updatedAt);
     default:
@@ -543,7 +679,8 @@ function buildExportCellValue(row: DispatchGridRow, column: DispatchGridColumnKe
 }
 
 function appointmentValue(row: DispatchGridRow, column: "pickupAppt" | "deliveryAppt") {
-  return column === "pickupAppt" ? row.nextStop?.appointmentStart ?? null : row.nextStop?.appointmentEnd ?? null;
+  const window = resolveAppointmentWindow(row, column);
+  return window.from ?? window.to ?? null;
 }
 
 function appointmentDateKey(value?: string | null) {
@@ -558,6 +695,25 @@ function appointmentDateKey(value?: string | null) {
 
 function columnLabel(columnKey: DispatchGridColumnKey) {
   return DISPATCH_GRID_COLUMNS.find((column) => column.key === columnKey)?.label ?? columnKey;
+}
+
+function normalizeColumnOrder(order?: DispatchGridColumnKey[]) {
+  const allowed = new Set<DispatchGridColumnKey>(DISPATCH_GRID_COLUMNS.map((column) => column.key));
+  const frozen = new Set<DispatchGridColumnKey>(DISPATCH_FROZEN_COLUMNS);
+  const seen = new Set<DispatchGridColumnKey>();
+  const normalized: DispatchGridColumnKey[] = [];
+  for (const key of order ?? []) {
+    if (!allowed.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(key);
+  }
+  for (const column of DISPATCH_GRID_COLUMNS) {
+    if (seen.has(column.key)) continue;
+    seen.add(column.key);
+    normalized.push(column.key);
+  }
+  const movable = normalized.filter((key) => !frozen.has(key));
+  return [...DISPATCH_FROZEN_COLUMNS, ...movable];
 }
 
 function humanizeEnum(value: string) {
@@ -649,6 +805,8 @@ function normalizeColumnFilters(value: DispatchGridFilterState | undefined): Col
     loadNumber: raw.loadNumber ? normalizeTextFilter(raw.loadNumber) : undefined,
     customer: raw.customer ? normalizeTextFilter(raw.customer) : undefined,
     status: raw.status ? normalizeStatusFilter(raw.status) : undefined,
+    tripStatus: raw.tripStatus ? normalizeStatusFilter(raw.tripStatus) : undefined,
+    tripMode: raw.tripMode ? normalizeStatusFilter(raw.tripMode) : undefined,
     pickupAppt: raw.pickupAppt ? normalizeAppointmentFilter(raw.pickupAppt) : undefined,
     deliveryAppt: raw.deliveryAppt ? normalizeAppointmentFilter(raw.deliveryAppt) : undefined,
     assignment: raw.assignment ? normalizeAssignmentFilter(raw.assignment) : undefined,
@@ -674,6 +832,14 @@ function includeExcludeChipLabel(prefix: string, filter: IncludeExcludeFilterSta
 
 function statusFilterChipLabel(statusFilter: StatusFilterState) {
   return includeExcludeChipLabel("Status", statusFilter, humanizeEnum);
+}
+
+function tripStatusFilterChipLabel(statusFilter: StatusFilterState) {
+  return includeExcludeChipLabel("Trip status", statusFilter, humanizeEnum);
+}
+
+function tripModeFilterChipLabel(modeFilter: StatusFilterState) {
+  return includeExcludeChipLabel("Trip mode", modeFilter, humanizeEnum);
 }
 
 function matchesIncludeExclude(value: string, filter: IncludeExcludeFilterState) {
@@ -728,6 +894,7 @@ type SortDirection = "asc" | "desc";
 type SortRule = { column: DispatchGridColumnKey; direction: SortDirection };
 export type DispatchGridSortRule = SortRule;
 type DispatchWorkflowMacro = { id: string; label: string };
+type IdentityColumnMode = "load" | "shipment" | "trip";
 
 type ExportScope = "filtered" | "selected" | "all";
 type ExportColumnMode = "visible" | "choose";
@@ -754,10 +921,20 @@ function sortDateNullable(left?: string | null, right?: string | null) {
   return leftTs - rightTs;
 }
 
-function compareRowsForSort(left: DispatchGridRow, right: DispatchGridRow, column: DispatchGridColumnKey) {
+function compareRowsForSort(
+  left: DispatchGridRow,
+  right: DispatchGridRow,
+  column: DispatchGridColumnKey,
+  identityColumn: IdentityColumnMode = "load"
+) {
   switch (column) {
-    case "loadNumber":
-      return left.loadNumber.localeCompare(right.loadNumber);
+    case "loadNumber": {
+      const leftIdentity =
+        identityColumn === "trip" ? (left.trip?.tripNumber ?? left.loadNumber ?? "") : (left.loadNumber ?? "");
+      const rightIdentity =
+        identityColumn === "trip" ? (right.trip?.tripNumber ?? right.loadNumber ?? "") : (right.loadNumber ?? "");
+      return leftIdentity.localeCompare(rightIdentity);
+    }
     case "status":
       return STATUS_OPTIONS.indexOf(left.status as DispatchStatus) - STATUS_OPTIONS.indexOf(right.status as DispatchStatus);
     case "customer":
@@ -805,6 +982,20 @@ function compareRowsForSort(left: DispatchGridRow, right: DispatchGridRow, colum
       return buildNextBestAction(left).label.localeCompare(buildNextBestAction(right).label);
     case "tripNumber":
       return (left.trip?.tripNumber ?? "").localeCompare(right.trip?.tripNumber ?? "");
+    case "tripStatus":
+      return (left.trip?.status ?? "").localeCompare(right.trip?.status ?? "");
+    case "tripMode":
+      return (left.trip?.movementMode ?? "").localeCompare(right.trip?.movementMode ?? "");
+    case "tripOrigin":
+      return (left.trip?.origin ?? "").localeCompare(right.trip?.origin ?? "");
+    case "tripDestination":
+      return (left.trip?.destination ?? "").localeCompare(right.trip?.destination ?? "");
+    case "tripDeparture":
+      return sortDateNullable(left.trip?.plannedDepartureAt ?? null, right.trip?.plannedDepartureAt ?? null);
+    case "tripArrival":
+      return sortDateNullable(left.trip?.plannedArrivalAt ?? null, right.trip?.plannedArrivalAt ?? null);
+    case "tripLoads":
+      return sortNumericNullable(left.trip?.loadsCount ?? null, right.trip?.loadsCount ?? null);
     case "updatedAt":
       return sortDateNullable(left.updatedAt ?? null, right.updatedAt ?? null);
     default:
@@ -812,12 +1003,12 @@ function compareRowsForSort(left: DispatchGridRow, right: DispatchGridRow, colum
   }
 }
 
-function applySortRules(sourceRows: DispatchGridRow[], rules: SortRule[]) {
+function applySortRules(sourceRows: DispatchGridRow[], rules: SortRule[], identityColumn: IdentityColumnMode = "load") {
   if (!rules.length) return sourceRows;
   const withIndex = sourceRows.map((row, index) => ({ row, index }));
   withIndex.sort((left, right) => {
     for (const rule of rules) {
-      const compared = compareRowsForSort(left.row, right.row, rule.column);
+      const compared = compareRowsForSort(left.row, right.row, rule.column, identityColumn);
       if (compared !== 0) return rule.direction === "asc" ? compared : -compared;
     }
     return left.index - right.index;
@@ -934,6 +1125,26 @@ function FilterFunnelIcon({ active = false }: { active?: boolean }) {
   );
 }
 
+function QuickMessageIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" aria-hidden>
+      <path d="M2.6 3.5h10.8v7.2H8.8l-2.4 2.2v-2.2H2.6z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M5 6.2h6M5 8h4.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function QuickShareIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" aria-hidden>
+      <path d="M6.4 8.1 9.8 6M6.4 7.9 9.8 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="4.9" cy="8" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="11.2" cy="5.6" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="11.2" cy="10.4" r="1.7" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
 export function DispatchSpreadsheetGrid({
   rows,
   filters,
@@ -941,6 +1152,7 @@ export function DispatchSpreadsheetGrid({
   selectedLoadId,
   selectedRowIds,
   columnVisibility,
+  columnOrder,
   density,
   loadingCellKey,
   readOnly,
@@ -954,8 +1166,15 @@ export function DispatchSpreadsheetGrid({
   onQuickUploadPod,
   onQuickAssign,
   onQuickOpenInspector,
+  onQuickOpenTripInspector,
+  onQuickMessage,
+  onQuickShare,
   workflowMacros,
   onApplyWorkflowMacro,
+  externalCommand,
+  hideCommandMenus,
+  identityColumn,
+  onColumnOrderChange,
 }: {
   rows: DispatchGridRow[];
   filters: DispatchGridFilterState;
@@ -963,6 +1182,7 @@ export function DispatchSpreadsheetGrid({
   selectedLoadId: string | null;
   selectedRowIds: Set<string>;
   columnVisibility: Partial<Record<DispatchGridColumnKey, boolean>>;
+  columnOrder?: DispatchGridColumnKey[];
   density: DispatchGridDensity;
   loadingCellKey?: string | null;
   readOnly?: boolean;
@@ -976,8 +1196,15 @@ export function DispatchSpreadsheetGrid({
   onQuickUploadPod?: (loadId: string) => void;
   onQuickAssign?: (loadId: string) => void;
   onQuickOpenInspector?: (loadId: string, focusSection?: DispatchInspectorFocusSection) => void;
+  onQuickOpenTripInspector?: (loadId: string) => void;
+  onQuickMessage?: (loadId: string) => void;
+  onQuickShare?: (loadId: string) => void;
   workflowMacros?: DispatchWorkflowMacro[];
   onApplyWorkflowMacro?: (macroId: string) => void;
+  externalCommand?: DispatchGridCommand | null;
+  hideCommandMenus?: boolean;
+  identityColumn?: IdentityColumnMode;
+  onColumnOrderChange?: (next: DispatchGridColumnKey[]) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const filterPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -991,6 +1218,10 @@ export function DispatchSpreadsheetGrid({
   const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
   const [openFilterColumn, setOpenFilterColumn] = useState<DispatchGridColumnKey | null>(null);
   const [statusEditMode, setStatusEditMode] = useState<"include" | "exclude">("include");
+  const [tripFilterMode, setTripFilterMode] = useState<Record<"tripStatus" | "tripMode", "include" | "exclude">>({
+    tripStatus: "include",
+    tripMode: "include",
+  });
   const [textFilterMode, setTextFilterMode] = useState<Record<"loadNumber" | "customer", "include" | "exclude">>({
     loadNumber: "include",
     customer: "include",
@@ -1012,6 +1243,7 @@ export function DispatchSpreadsheetGrid({
   const [highlightedRowIds, setHighlightedRowIds] = useState<Set<string>>(new Set());
   const [workflowMenuOpen, setWorkflowMenuOpen] = useState(false);
   const [clearoutMenuOpen, setClearoutMenuOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<ExportScope>("filtered");
   const [exportColumnMode, setExportColumnMode] = useState<ExportColumnMode>("visible");
@@ -1019,6 +1251,8 @@ export function DispatchSpreadsheetGrid({
   const [includeRowHighlights, setIncludeRowHighlights] = useState(true);
   const [exportPreparing, setExportPreparing] = useState(false);
   const [copyPreparing, setCopyPreparing] = useState(false);
+  const [draggingHeaderColumn, setDraggingHeaderColumn] = useState<DispatchGridColumnKey | null>(null);
+  const lastExternalCommandTokenRef = useRef<number | null>(null);
 
   const columnFilters = useMemo(() => normalizeColumnFilters(filters), [filters]);
 
@@ -1040,24 +1274,76 @@ export function DispatchSpreadsheetGrid({
   );
 
   const rowHeight = density === "compact" ? 72 : 84;
+  const orderedColumnKeys = useMemo(() => normalizeColumnOrder(columnOrder), [columnOrder]);
+  const columnByKey = useMemo(
+    () => new Map<DispatchGridColumnKey, DispatchGridColumn>(DISPATCH_GRID_COLUMNS.map((column) => [column.key, column])),
+    []
+  );
 
   const visibleColumns = useMemo(() => {
-    return DISPATCH_GRID_COLUMNS.filter((column) => {
-      if (column.required) return true;
-      return columnVisibility[column.key] !== false;
-    });
-  }, [columnVisibility]);
+    return orderedColumnKeys
+      .map((key) => columnByKey.get(key) ?? null)
+      .filter((column): column is DispatchGridColumn => Boolean(column))
+      .filter((column) => {
+        if (column.required) return true;
+        return columnVisibility[column.key] !== false;
+      });
+  }, [columnByKey, columnVisibility, orderedColumnKeys]);
+  const effectiveIdentityColumn: IdentityColumnMode = identityColumn ?? "load";
+  const identityLabel =
+    effectiveIdentityColumn === "trip" ? "Trip #" : effectiveIdentityColumn === "shipment" ? "Shipment #" : "Load #";
+  const identityCountLabel =
+    effectiveIdentityColumn === "trip"
+      ? "Trips"
+      : effectiveIdentityColumn === "shipment"
+        ? "Shipments"
+        : "Loads";
+  const resolveIdentityValue = useCallback(
+    (row: DispatchGridRow) =>
+      effectiveIdentityColumn === "trip"
+        ? (row.trip?.tripNumber?.trim() || row.loadNumber || "")
+        : (row.loadNumber ?? ""),
+    [effectiveIdentityColumn]
+  );
+
+  const reorderColumn = useCallback(
+    (from: DispatchGridColumnKey, target: DispatchGridColumnKey) => {
+      if (!onColumnOrderChange || from === target) return;
+      const base = normalizeColumnOrder(orderedColumnKeys);
+      if (DISPATCH_FROZEN_COLUMNS.includes(from) || DISPATCH_FROZEN_COLUMNS.includes(target)) return;
+      const movable = base.filter((key) => !DISPATCH_FROZEN_COLUMNS.includes(key));
+      const fromIndex = movable.indexOf(from);
+      const targetIndex = movable.indexOf(target);
+      if (fromIndex < 0 || targetIndex < 0) return;
+      const nextMovable = [...movable];
+      const [moved] = nextMovable.splice(fromIndex, 1);
+      const insertIndex = nextMovable.indexOf(target);
+      if (insertIndex < 0) return;
+      nextMovable.splice(insertIndex, 0, moved);
+      let pointer = 0;
+      const nextOrder = base.map((key) => {
+        if (DISPATCH_FROZEN_COLUMNS.includes(key)) return key;
+        const replacement = nextMovable[pointer];
+        pointer += 1;
+        return replacement;
+      });
+      onColumnOrderChange(nextOrder);
+    },
+    [onColumnOrderChange, orderedColumnKeys]
+  );
 
   const filterValueOptions = useMemo(() => {
     const optionsFor = (values: string[]) => Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)).slice(0, 60);
     return {
-      loadNumber: optionsFor(rows.map((row) => row.loadNumber ?? "")),
+      loadNumber: optionsFor(rows.map((row) => resolveIdentityValue(row))),
       customer: optionsFor(rows.map((row) => row.customerName ?? "")),
+      tripStatus: optionsFor([...TRIP_STATUS_OPTIONS, ...rows.map((row) => row.trip?.status ?? "")]),
+      tripMode: optionsFor([...TRIP_MODE_OPTIONS, ...rows.map((row) => row.trip?.movementMode ?? "")]),
       pickupCity: optionsFor(rows.map((row) => routeLabel(row.route?.shipperCity, row.route?.shipperState))),
       deliveryCity: optionsFor(rows.map((row) => routeLabel(row.route?.consigneeCity, row.route?.consigneeState))),
       drivers: optionsFor(rows.map((row) => row.assignment?.driver?.name ?? "")),
     };
-  }, [rows]);
+  }, [resolveIdentityValue, rows]);
 
   const columnFilterActive = useCallback(
     (key: DispatchGridColumnKey) => {
@@ -1067,6 +1353,12 @@ export function DispatchSpreadsheetGrid({
       }
       if (key === "status") {
         return isIncludeExcludeActive(columnFilters.status);
+      }
+      if (key === "tripStatus") {
+        return isIncludeExcludeActive(columnFilters.tripStatus);
+      }
+      if (key === "tripMode") {
+        return isIncludeExcludeActive(columnFilters.tripMode);
       }
       if (key === "pickupAppt" || key === "deliveryAppt") {
         const value = columnFilters[key];
@@ -1112,8 +1404,8 @@ export function DispatchSpreadsheetGrid({
         id: "loadNumber",
         column: "loadNumber",
         label: [
-          loadNumberFilter.search.trim() ? `Load # contains "${loadNumberFilter.search.trim()}"` : null,
-          isIncludeExcludeActive(loadNumberFilter) ? includeExcludeChipLabel("Load #", loadNumberFilter) : null,
+          loadNumberFilter.search.trim() ? `${identityLabel} contains "${loadNumberFilter.search.trim()}"` : null,
+          isIncludeExcludeActive(loadNumberFilter) ? includeExcludeChipLabel(identityLabel, loadNumberFilter) : null,
         ]
           .filter(Boolean)
           .join(" · "),
@@ -1134,6 +1426,12 @@ export function DispatchSpreadsheetGrid({
     }
     if (columnFilters.status && isIncludeExcludeActive(columnFilters.status)) {
       chips.push({ id: "status", column: "status", label: statusFilterChipLabel(columnFilters.status) });
+    }
+    if (columnFilters.tripStatus && isIncludeExcludeActive(columnFilters.tripStatus)) {
+      chips.push({ id: "tripStatus", column: "tripStatus", label: tripStatusFilterChipLabel(columnFilters.tripStatus) });
+    }
+    if (columnFilters.tripMode && isIncludeExcludeActive(columnFilters.tripMode)) {
+      chips.push({ id: "tripMode", column: "tripMode", label: tripModeFilterChipLabel(columnFilters.tripMode) });
     }
     const pickupFilter = columnFilters.pickupAppt;
     if (
@@ -1237,13 +1535,13 @@ export function DispatchSpreadsheetGrid({
       });
     }
     return chips;
-  }, [columnFilters]);
+  }, [columnFilters, identityLabel]);
 
   const filteredRows = useMemo(() => {
     return rows.filter((row) => {
       const loadFilter = columnFilters.loadNumber;
       if (loadFilter) {
-        const value = row.loadNumber ?? "";
+        const value = resolveIdentityValue(row);
         if (loadFilter.search.trim() && !value.toLowerCase().includes(loadFilter.search.trim().toLowerCase())) return false;
         if (!matchesIncludeExclude(value, loadFilter)) return false;
       }
@@ -1258,6 +1556,18 @@ export function DispatchSpreadsheetGrid({
       const statusFilter = columnFilters.status;
       if (statusFilter && !matchesIncludeExclude(row.status, statusFilter)) {
         return false;
+      }
+      const tripStatusFilter = columnFilters.tripStatus;
+      if (tripStatusFilter && isIncludeExcludeActive(tripStatusFilter)) {
+        if (!matchesIncludeExclude(row.trip?.status ?? "", tripStatusFilter)) {
+          return false;
+        }
+      }
+      const tripModeFilter = columnFilters.tripMode;
+      if (tripModeFilter && isIncludeExcludeActive(tripModeFilter)) {
+        if (!matchesIncludeExclude(row.trip?.movementMode ?? "", tripModeFilter)) {
+          return false;
+        }
       }
 
       const pickupFilter = columnFilters.pickupAppt;
@@ -1366,13 +1676,16 @@ export function DispatchSpreadsheetGrid({
       }
       return true;
     });
-  }, [columnFilters, rows]);
+  }, [columnFilters, resolveIdentityValue, rows]);
 
   const sortedRows = useMemo(() => {
-    return applySortRules(filteredRows, sortRules);
-  }, [filteredRows, sortRules]);
+    return applySortRules(filteredRows, sortRules, effectiveIdentityColumn);
+  }, [effectiveIdentityColumn, filteredRows, sortRules]);
 
-  const sortedAllRows = useMemo(() => applySortRules(rows, sortRules), [rows, sortRules]);
+  const sortedAllRows = useMemo(
+    () => applySortRules(rows, sortRules, effectiveIdentityColumn),
+    [rows, effectiveIdentityColumn, sortRules]
+  );
 
   const visibleTripCount = useMemo(() => {
     const ids = new Set<string>();
@@ -1428,11 +1741,12 @@ export function DispatchSpreadsheetGrid({
   }, [openFilterColumn]);
 
   useEffect(() => {
-    if (!genericContextMenu && !clearoutMenuOpen && !workflowMenuOpen) return;
+    if (!genericContextMenu && !clearoutMenuOpen && !workflowMenuOpen && !moreMenuOpen) return;
     const dismiss = () => {
       setGenericContextMenu(null);
       setClearoutMenuOpen(false);
       setWorkflowMenuOpen(false);
+      setMoreMenuOpen(false);
     };
     // Use click so menu-item onClick handlers run before global dismiss.
     document.addEventListener("click", dismiss);
@@ -1441,7 +1755,7 @@ export function DispatchSpreadsheetGrid({
       document.removeEventListener("click", dismiss);
       document.removeEventListener("scroll", dismiss, true);
     };
-  }, [clearoutMenuOpen, genericContextMenu, workflowMenuOpen]);
+  }, [clearoutMenuOpen, genericContextMenu, workflowMenuOpen, moreMenuOpen]);
 
   useEffect(() => {
     if (focusedCell.rowIndex < sortedRows.length) return;
@@ -1482,7 +1796,7 @@ export function DispatchSpreadsheetGrid({
       const row = sortedRows.find((item) => item.id === rowId);
       if (!row) return;
       setEditingCell({ rowId, column });
-      setEditingValue(buildCellValue(row, column));
+      setEditingValue(buildCellValue(row, column, effectiveIdentityColumn));
       setInlineError(null);
     },
     [readOnly, sortedRows]
@@ -1562,7 +1876,7 @@ export function DispatchSpreadsheetGrid({
         const row = sortedRows[focusedCell.rowIndex];
         const column = visibleColumns[focusedCell.columnIndex];
         if (!row || !column) return;
-        const value = buildCellValue(row, column.key);
+        const value = buildCellValue(row, column.key, effectiveIdentityColumn);
         if (value && navigator.clipboard?.writeText) {
           event.preventDefault();
           await navigator.clipboard.writeText(value);
@@ -1650,9 +1964,9 @@ export function DispatchSpreadsheetGrid({
     () =>
       effectiveExportColumns.map((column) => ({
         key: column,
-        label: columnLabel(column),
+        label: column === "loadNumber" ? identityLabel : columnLabel(column),
       })),
-    [effectiveExportColumns]
+    [effectiveExportColumns, identityLabel]
   );
 
   const exportRows = useMemo(() => {
@@ -1680,6 +1994,8 @@ export function DispatchSpreadsheetGrid({
   }, [defaultVisibleExportColumns, exportColumnMode, exportColumns.length, exportOpen]);
 
   const statusFilter = columnFilters.status ?? emptyStatusFilter();
+  const tripStatusFilter = columnFilters.tripStatus ?? emptyStatusFilter();
+  const tripModeFilter = columnFilters.tripMode ?? emptyStatusFilter();
 
   const setIncludeExclude = useCallback(
     <T extends string>(
@@ -1819,7 +2135,7 @@ export function DispatchSpreadsheetGrid({
         window.requestAnimationFrame(() => resolve());
       });
       const headers = exportColumnLabels.map((column) => column.label);
-      const rowValues = exportRows.map((row) => exportColumnLabels.map((column) => buildExportCellValue(row, column.key)));
+      const rowValues = exportRows.map((row) => exportColumnLabels.map((column) => buildExportCellValue(row, column.key, effectiveIdentityColumn)));
       const datePart = new Date().toISOString().slice(0, 10);
       let scopePart: string = exportScope;
       if (statusFilter.includeValues.length || statusFilter.excludeValues.length) {
@@ -1905,7 +2221,7 @@ export function DispatchSpreadsheetGrid({
       const lines = [
         columnsToCopy.map((column) => sanitize(columnLabel(column))).join("\t"),
         ...rowsToCopy.map((row) =>
-          columnsToCopy.map((column) => sanitize(buildExportCellValue(row, column))).join("\t")
+          columnsToCopy.map((column) => sanitize(buildExportCellValue(row, column, effectiveIdentityColumn))).join("\t")
         ),
       ];
       await navigator.clipboard.writeText(lines.join("\n"));
@@ -1920,6 +2236,48 @@ export function DispatchSpreadsheetGrid({
       setCopyPreparing(false);
     }
   }, [defaultVisibleExportColumns, selectedRowsForExport, sortedRows]);
+
+  useEffect(() => {
+    if (!externalCommand) return;
+    if (lastExternalCommandTokenRef.current === externalCommand.token) return;
+    lastExternalCommandTokenRef.current = externalCommand.token;
+    if (externalCommand.type === "copyFiltered") {
+      void copyRowsToClipboard();
+      return;
+    }
+    if (externalCommand.type === "morningSort") {
+      applyMorningDispatchSort();
+      return;
+    }
+    if (externalCommand.type === "clearSort") {
+      setSortRules([]);
+      return;
+    }
+    if (externalCommand.type === "clearoutPlanningNoise") {
+      applyClearoutMacro("planningNoise");
+      return;
+    }
+    if (externalCommand.type === "clearoutCompleted") {
+      applyClearoutMacro("completed");
+      return;
+    }
+    if (externalCommand.type === "clearoutInTransit") {
+      applyClearoutMacro("inTransit");
+      return;
+    }
+    if (externalCommand.type === "clearoutFirefighting") {
+      applyClearoutMacro("firefighting");
+      return;
+    }
+    if (externalCommand.type === "clearoutReset") {
+      applyClearoutMacro("reset");
+      return;
+    }
+    setExportOpen(true);
+    setExportColumns(defaultVisibleExportColumns);
+    setExportColumnMode("visible");
+    setExportScope("filtered");
+  }, [applyClearoutMacro, applyMorningDispatchSort, copyRowsToClipboard, defaultVisibleExportColumns, externalCommand, setSortRules]);
 
   const clearColumnFilter = (column: DispatchGridColumnKey | "mode" | "issues") => {
     setColumnFilters((prev) => {
@@ -1941,7 +2299,10 @@ export function DispatchSpreadsheetGrid({
 
   const contextValueForCell = useCallback(
     (row: DispatchGridRow, column: DispatchGridColumnKey) => {
-      if (column === "loadNumber") return { column: "loadNumber" as const, value: row.loadNumber || "", displayValue: row.loadNumber || "-" };
+      if (column === "loadNumber") {
+        const value = resolveIdentityValue(row);
+        return { column: "loadNumber" as const, value, displayValue: value || "-" };
+      }
       if (column === "status") return { column: "status" as const, value: row.status || "", displayValue: humanizeEnum(row.status || "") };
       if (column === "customer") {
         const value = (row.customerName ?? "").trim();
@@ -1961,7 +2322,7 @@ export function DispatchSpreadsheetGrid({
       }
       return null;
     },
-    []
+    [resolveIdentityValue]
   );
 
   return (
@@ -1970,119 +2331,152 @@ export function DispatchSpreadsheetGrid({
         <div className="flex flex-wrap items-center gap-2">
           <span>Spreadsheet dispatch grid</span>
           <span className="inline-flex items-center rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] px-2 py-0.5 text-[11px] font-medium text-ink">
-            Loads {sortedRows.length}
+            {identityCountLabel} {effectiveIdentityColumn === "trip" ? visibleTripCount : sortedRows.length}
           </span>
-          <span className="inline-flex items-center rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] px-2 py-0.5 text-[11px] font-medium text-ink">
-            Trips {visibleTripCount}
-          </span>
+          {effectiveIdentityColumn !== "trip" ? (
+            <span className="inline-flex items-center rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] px-2 py-0.5 text-[11px] font-medium text-ink">
+              Trips {visibleTripCount}
+            </span>
+          ) : null}
           {sortedRows.length !== rows.length ? (
             <span className="text-[11px] text-[color:var(--color-text-subtle)]">of {rows.length} loaded</span>
           ) : null}
         </div>
-        <div className="flex items-center gap-2">
-          {workflowMacros?.length ? (
+        {hideCommandMenus ? (
+          <div className="text-[11px] text-[color:var(--color-text-subtle)]">
+            Use Dispatch ribbon for queues, clear-out, and export tools.
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            {workflowMacros?.length ? (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setWorkflowMenuOpen((prev) => !prev);
+                  }}
+                  className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)]"
+                >
+                  ⚡ Queues ▾
+                </button>
+                {workflowMenuOpen ? (
+                  <div className="absolute right-0 top-[calc(100%+6px)] z-50 min-w-[220px] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] p-1 shadow-[var(--shadow-card)]">
+                    {workflowMacros.map((macro) => (
+                      <button
+                        key={macro.id}
+                        type="button"
+                        className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]"
+                        onClick={() => {
+                          onApplyWorkflowMacro?.(macro.id);
+                          setWorkflowMenuOpen(false);
+                        }}
+                      >
+                        {macro.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="relative">
               <button
                 type="button"
                 onClick={(event) => {
                   event.stopPropagation();
-                  setWorkflowMenuOpen((prev) => !prev);
+                  setClearoutMenuOpen((prev) => !prev);
                 }}
                 className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)]"
               >
-                ⚡ Queues ▾
+                🧹 Clear out ▾
               </button>
-              {workflowMenuOpen ? (
-                <div className="absolute right-0 top-[calc(100%+6px)] z-50 min-w-[220px] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] p-1 shadow-[var(--shadow-card)]">
-                  {workflowMacros.map((macro) => (
-                    <button
-                      key={macro.id}
-                      type="button"
-                      className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]"
-                      onClick={() => {
-                        onApplyWorkflowMacro?.(macro.id);
-                        setWorkflowMenuOpen(false);
-                      }}
-                    >
-                      {macro.label}
-                    </button>
-                  ))}
+              {clearoutMenuOpen ? (
+                <div className="absolute right-0 top-[calc(100%+6px)] z-50 min-w-[210px] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] p-1 shadow-[var(--shadow-card)]">
+                  <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("planningNoise"); setClearoutMenuOpen(false); }}>
+                    Clear out planning noise
+                  </button>
+                  <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("completed"); setClearoutMenuOpen(false); }}>
+                    Clear out completed
+                  </button>
+                  <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("inTransit"); setClearoutMenuOpen(false); }}>
+                    In-Transit only
+                  </button>
+                  <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("firefighting"); setClearoutMenuOpen(false); }}>
+                    Firefighting mode
+                  </button>
+                  <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("reset"); setClearoutMenuOpen(false); }}>
+                    Reset filters
+                  </button>
                 </div>
               ) : null}
             </div>
-          ) : null}
-          <div className="relative">
             <button
               type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                setClearoutMenuOpen((prev) => !prev);
+              onClick={() => {
+                setExportOpen(true);
+                setExportColumns(defaultVisibleExportColumns);
+                setExportColumnMode("visible");
+                setExportScope("filtered");
               }}
               className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)]"
             >
-              🧹 Clear out ▾
+              Export
             </button>
-            {clearoutMenuOpen ? (
-              <div className="absolute right-0 top-[calc(100%+6px)] z-50 min-w-[210px] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] p-1 shadow-[var(--shadow-card)]">
-                <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("planningNoise"); setClearoutMenuOpen(false); }}>
-                  Clear out planning noise
-                </button>
-                <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("completed"); setClearoutMenuOpen(false); }}>
-                  Clear out completed
-                </button>
-                <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("inTransit"); setClearoutMenuOpen(false); }}>
-                  In-Transit only
-                </button>
-                <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("firefighting"); setClearoutMenuOpen(false); }}>
-                  Firefighting mode
-                </button>
-                <button type="button" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]" onClick={() => { applyClearoutMacro("reset"); setClearoutMenuOpen(false); }}>
-                  Reset filters
-                </button>
-              </div>
-            ) : null}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMoreMenuOpen((prev) => !prev);
+                }}
+                className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)]"
+              >
+                More ▾
+              </button>
+              {moreMenuOpen ? (
+                <div className="absolute right-0 top-[calc(100%+6px)] z-50 min-w-[220px] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] p-1 shadow-[var(--shadow-card)]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void copyRowsToClipboard();
+                      setMoreMenuOpen(false);
+                    }}
+                    disabled={copyPreparing || sortedRows.length === 0}
+                    className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {copyPreparing
+                      ? "Copying..."
+                      : selectedRowsForExport.length > 0
+                        ? `Copy selected (${selectedRowsForExport.length})`
+                        : "Copy filtered"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      applyMorningDispatchSort();
+                      setMoreMenuOpen(false);
+                    }}
+                    className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]"
+                  >
+                    Morning dispatch sort
+                  </button>
+                  {sortRules.length ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSortRules([]);
+                        setMoreMenuOpen(false);
+                      }}
+                      className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[color:var(--color-bg-muted)]"
+                    >
+                      Clear sort
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setExportOpen(true);
-              setExportColumns(defaultVisibleExportColumns);
-              setExportColumnMode("visible");
-              setExportScope("filtered");
-            }}
-            className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)]"
-          >
-            Export
-          </button>
-          <button
-            type="button"
-            onClick={() => void copyRowsToClipboard()}
-            disabled={copyPreparing || sortedRows.length === 0}
-            className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)] disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {copyPreparing
-              ? "Copying..."
-              : selectedRowsForExport.length > 0
-                ? `Copy selected (${selectedRowsForExport.length})`
-                : "Copy filtered"}
-          </button>
-          <button
-            type="button"
-            onClick={applyMorningDispatchSort}
-            className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)]"
-            >
-              Morning dispatch
-            </button>
-          {sortRules.length ? (
-            <button
-              type="button"
-              onClick={() => setSortRules([])}
-              className="rounded-[var(--radius-control)] border border-[color:var(--color-divider)] px-2 py-1 text-[11px] hover:bg-[color:var(--color-bg-muted)]"
-            >
-              Clear sort
-            </button>
-          ) : null}
-        </div>
+        )}
       </div>
       <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2">
         {activeFilterChips.length ? (
@@ -2121,6 +2515,7 @@ export function DispatchSpreadsheetGrid({
               {visibleColumns.map((column) => {
                 const stickyLeft = column.frozen ? stickyOffsets.get(column.key) ?? 0 : undefined;
                 const filterActive = columnFilterActive(column.key);
+                const isMovableHeader = Boolean(onColumnOrderChange) && !DISPATCH_FROZEN_COLUMNS.includes(column.key);
                 return (
                   <div
                     key={column.key}
@@ -2139,6 +2534,26 @@ export function DispatchSpreadsheetGrid({
                           }
                         : undefined
                     }
+                    draggable={isMovableHeader}
+                    onDragStart={(event) => {
+                      if (!isMovableHeader) return;
+                      setDraggingHeaderColumn(column.key);
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", column.key);
+                    }}
+                    onDragOver={(event) => {
+                      if (!isMovableHeader || !draggingHeaderColumn || draggingHeaderColumn === column.key) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                    }}
+                    onDrop={(event) => {
+                      if (!isMovableHeader) return;
+                      event.preventDefault();
+                      if (!draggingHeaderColumn || draggingHeaderColumn === column.key) return;
+                      reorderColumn(draggingHeaderColumn, column.key);
+                      setDraggingHeaderColumn(null);
+                    }}
+                    onDragEnd={() => setDraggingHeaderColumn(null)}
                   >
                     {column.key === "select" ? (
                       <input
@@ -2166,13 +2581,15 @@ export function DispatchSpreadsheetGrid({
                           )}
                           title={
                             column.filterable
-                              ? `Filter ${column.label} (Alt+click to sort)`
+                              ? `Filter ${column.key === "loadNumber" ? identityLabel : column.label} (Alt+click to sort)`
                               : column.sortable
-                              ? `Sort ${column.label}${sortStateForColumn(column.key) ? ` (${sortDirectionLabel(sortStateForColumn(column.key)!.direction)})` : ""}`
+                              ? `Sort ${column.key === "loadNumber" ? identityLabel : column.label}${
+                                  sortStateForColumn(column.key) ? ` (${sortDirectionLabel(sortStateForColumn(column.key)!.direction)})` : ""
+                                }`
                               : undefined
                           }
                         >
-                          <span className="truncate">{column.label}</span>
+                          <span className="truncate">{column.key === "loadNumber" ? identityLabel : column.label}</span>
                           {column.sortable ? (
                             <span
                               className={cn(
@@ -2209,7 +2626,7 @@ export function DispatchSpreadsheetGrid({
                               filterActive && "border-[color:var(--color-divider)] bg-[color:var(--color-bg)] opacity-100",
                               "hover:border-[color:var(--color-divider)] hover:bg-[color:var(--color-bg)]"
                             )}
-                            aria-label={`Filter ${column.label}`}
+                            aria-label={`Filter ${column.key === "loadNumber" ? identityLabel : column.label}`}
                           >
                             <FilterFunnelIcon active={filterActive} />
                           </button>
@@ -2220,7 +2637,7 @@ export function DispatchSpreadsheetGrid({
                             className="absolute left-1 top-[calc(100%+4px)] z-50 w-[260px] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] p-3 text-xs normal-case tracking-normal text-ink shadow-[var(--shadow-card)]"
                           >
                             <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">
-                              {column.label} filter
+                              {column.key === "loadNumber" ? identityLabel : column.label} filter
                             </div>
 
                             {(column.key === "loadNumber" || column.key === "customer") && (() => {
@@ -2311,6 +2728,58 @@ export function DispatchSpreadsheetGrid({
                                 </div>
                               </div>
                             )}
+
+                            {(column.key === "tripStatus" || column.key === "tripMode") && (() => {
+                              const tripKey: "tripStatus" | "tripMode" = column.key;
+                              const mode = tripFilterMode[tripKey];
+                              const filter = tripKey === "tripStatus" ? tripStatusFilter : tripModeFilter;
+                              const activeValues = mode === "include" ? filter.includeValues : filter.excludeValues;
+                              const options = tripKey === "tripStatus" ? filterValueOptions.tripStatus : filterValueOptions.tripMode;
+                              return (
+                                <div className="space-y-2">
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      className={cn(
+                                        "rounded-[var(--radius-control)] border px-2 py-1 text-[11px]",
+                                        mode === "include" ? "border-[color:var(--color-accent)]" : "border-[color:var(--color-divider)]"
+                                      )}
+                                      onClick={() => setTripFilterMode((prev) => ({ ...prev, [tripKey]: "include" }))}
+                                    >
+                                      Include
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={cn(
+                                        "rounded-[var(--radius-control)] border px-2 py-1 text-[11px]",
+                                        mode === "exclude" ? "border-[color:var(--color-accent)]" : "border-[color:var(--color-divider)]"
+                                      )}
+                                      onClick={() => setTripFilterMode((prev) => ({ ...prev, [tripKey]: "exclude" }))}
+                                    >
+                                      Exclude
+                                    </button>
+                                  </div>
+                                  <div className="max-h-40 space-y-1 overflow-auto rounded-[var(--radius-control)] border border-[color:var(--color-divider)] p-2">
+                                    {options.map((value) => (
+                                      <label key={value} className="flex items-center gap-2">
+                                        <input
+                                          type="checkbox"
+                                          checked={activeValues.includes(value)}
+                                          onChange={(event) => {
+                                            const next = setIncludeExclude(filter, mode, value, event.target.checked);
+                                            setColumnFilters((prev) => ({ ...prev, [tripKey]: next }));
+                                          }}
+                                        />
+                                        <span>{humanizeEnum(value)}</span>
+                                      </label>
+                                    ))}
+                                    {!options.length ? (
+                                      <div className="text-[color:var(--color-text-muted)]">No values.</div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              );
+                            })()}
 
                             {(column.key === "pickupAppt" || column.key === "deliveryAppt") && (() => {
                               const appointmentKey: "pickupAppt" | "deliveryAppt" = column.key;
@@ -2619,7 +3088,7 @@ export function DispatchSpreadsheetGrid({
                                 checked={selectedRowIds.has(row.id)}
                                 onChange={(event) => onToggleRowSelection(row.id, event.target.checked)}
                                 onClick={(event) => event.stopPropagation()}
-                                aria-label={`Select ${row.loadNumber}`}
+                                aria-label={`Select ${resolveIdentityValue(row) || row.loadNumber}`}
                               />
                             );
                           case "status":
@@ -2628,37 +3097,33 @@ export function DispatchSpreadsheetGrid({
                             return <div className="truncate">{row.customerName ?? "-"}</div>;
                           case "pickupAppt": {
                             const city = routeLabel(row.route?.shipperCity, row.route?.shipperState);
-                            const appt = formatDateTime(row.nextStop?.appointmentStart);
-                            const relative = formatRelativeAppointment(row.nextStop?.appointmentStart);
+                            const windowText = formatAppointmentWindowText(row, "pickupAppt");
                             return (
                               <div className="min-w-0">
                                 <div className="truncate">{city}</div>
                                 <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
-                                  {appt === "-" ? "—" : appt}
+                                  {windowText.dateRange}
                                 </div>
-                                {relative ? (
-                                  <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
-                                    {relative}
-                                  </div>
-                                ) : null}
+                                <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
+                                  {windowText.timeRange}
+                                  {windowText.relative ? ` · ${windowText.relative}` : ""}
+                                </div>
                               </div>
                             );
                           }
                           case "deliveryAppt": {
                             const city = routeLabel(row.route?.consigneeCity, row.route?.consigneeState);
-                            const appt = formatDateTime(row.nextStop?.appointmentEnd);
-                            const relative = formatRelativeAppointment(row.nextStop?.appointmentEnd);
+                            const windowText = formatAppointmentWindowText(row, "deliveryAppt");
                             return (
                               <div className="min-w-0">
                                 <div className="truncate">{city}</div>
                                 <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
-                                  {appt === "-" ? "—" : appt}
+                                  {windowText.dateRange}
                                 </div>
-                                {relative ? (
-                                  <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
-                                    {relative}
-                                  </div>
-                                ) : null}
+                                <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
+                                  {windowText.timeRange}
+                                  {windowText.relative ? ` · ${windowText.relative}` : ""}
+                                </div>
                               </div>
                             );
                           }
@@ -2819,14 +3284,69 @@ export function DispatchSpreadsheetGrid({
                               </div>
                             );
                           case "tripNumber":
-                            return <div className="truncate text-[color:var(--color-text-muted)]">{row.trip?.tripNumber ?? "-"}</div>;
+                            return row.trip?.tripNumber ? (
+                              <button
+                                type="button"
+                                className="truncate text-left text-[color:var(--color-text-muted)] underline decoration-dotted underline-offset-2 hover:text-ink"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  if (onQuickOpenTripInspector) {
+                                    onQuickOpenTripInspector(row.id);
+                                    return;
+                                  }
+                                  onSelectLoad(row.id);
+                                }}
+                                title="Open trip inspector"
+                              >
+                                {row.trip.tripNumber}
+                              </button>
+                            ) : (
+                              <div className="truncate text-[color:var(--color-text-subtle)]">-</div>
+                            );
+                          case "tripStatus":
+                            return row.trip?.status ? (
+                              <StatusChip tone={statusTone(row.trip.status)} label={row.trip.status} />
+                            ) : (
+                              <div className="truncate text-[color:var(--color-text-subtle)]">-</div>
+                            );
+                          case "tripMode":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{row.trip?.movementMode ?? "-"}</div>;
+                          case "tripOrigin":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{row.trip?.origin ?? "-"}</div>;
+                          case "tripDestination":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{row.trip?.destination ?? "-"}</div>;
+                          case "tripDeparture":
+                            return (
+                              <div className="truncate text-[color:var(--color-text-muted)]">
+                                {formatDateTime(row.trip?.plannedDepartureAt)}
+                              </div>
+                            );
+                          case "tripArrival":
+                            return (
+                              <div className="truncate text-[color:var(--color-text-muted)]">
+                                {formatDateTime(row.trip?.plannedArrivalAt)}
+                              </div>
+                            );
+                          case "tripLoads":
+                            return (
+                              <div className="truncate text-right text-[color:var(--color-text-muted)]">
+                                {row.trip?.loadsCount == null ? "-" : row.trip.loadsCount}
+                              </div>
+                            );
                           case "updatedAt":
                             return <div className="truncate text-[color:var(--color-text-muted)]">{formatDateTime(row.updatedAt)}</div>;
                           case "loadNumber":
                           default:
                             return (
                               <div className="flex w-full items-center justify-between gap-2">
-                                <div className="truncate font-semibold text-ink">{row.loadNumber}</div>
+                                <div className="min-w-0">
+                                  <div className="truncate font-semibold text-ink">{resolveIdentityValue(row) || "-"}</div>
+                                  {effectiveIdentityColumn === "trip" ? (
+                                    <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
+                                      Load {row.loadNumber}
+                                    </div>
+                                  ) : null}
+                                </div>
                                 {hoveredRowId === row.id ? (
                                   <div className="flex items-center gap-1">
                                     <button
@@ -2885,6 +3405,23 @@ export function DispatchSpreadsheetGrid({
                                     </button>
                                     <button
                                       type="button"
+                                      title="Message / add note"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        if (onQuickMessage) {
+                                          onQuickMessage(row.id);
+                                        } else if (onQuickOpenInspector) {
+                                          onQuickOpenInspector(row.id, "timeline");
+                                        } else {
+                                          onSelectLoad(row.id);
+                                        }
+                                      }}
+                                      className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
+                                    >
+                                      <QuickMessageIcon />
+                                    </button>
+                                    <button
+                                      type="button"
                                       title={highlighted ? "Remove highlight" : "Highlight row"}
                                       onClick={(event) => {
                                         event.stopPropagation();
@@ -2898,6 +3435,17 @@ export function DispatchSpreadsheetGrid({
                                       )}
                                     >
                                       ★
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="Copy shipment link"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        onQuickShare?.(row.id);
+                                      }}
+                                      className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
+                                    >
+                                      <QuickShareIcon />
                                     </button>
                                   </div>
                                 ) : null}
@@ -3181,7 +3729,7 @@ export function DispatchSpreadsheetGrid({
                       >
                         {exportColumnLabels.map((column) => (
                           <td key={`${row.id}:${column.key}`} className="border-b border-r border-[color:var(--color-divider)] px-2 py-1">
-                            {buildExportCellValue(row, column.key)}
+                            {buildExportCellValue(row, column.key, effectiveIdentityColumn)}
                           </td>
                         ))}
                       </tr>

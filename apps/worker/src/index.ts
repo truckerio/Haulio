@@ -10,12 +10,18 @@ import {
   StopType,
   LoadStatus,
   DocStatus,
+  ShipmentWebhookDeliveryStatus,
 } from "@truckerio/db";
 import { processLoadConfirmations } from "./load-confirmations";
 import { syncSamsaraFuelSummaries } from "./samsara-fuel";
 import { persistFinanceSnapshotForLoad } from "../../api/src/lib/finance-snapshot";
 import { enqueueFinanceStatusUpdatedEvent } from "../../api/src/lib/finance-outbox";
 import { enqueueQboInvoiceSyncJob, isQuickbooksConnectedFromEnv, processQueuedQboSyncJobs } from "../../api/src/lib/qbo-sync";
+import {
+  SHIPMENT_WEBHOOK_VERSION_V1,
+  nextShipmentWebhookBackoffMinutes,
+  signShipmentWebhookPayload,
+} from "../../api/src/lib/shipment-webhooks";
 
 const FUEL_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -368,6 +374,139 @@ async function processFinanceOutboxEvents(limit = 25) {
   }
 }
 
+async function processShipmentWebhookDeliveries(limit = 25) {
+  const now = new Date();
+  const deliveries = await prisma.shipmentWebhookDelivery.findMany({
+    where: {
+      status: { in: [ShipmentWebhookDeliveryStatus.PENDING, ShipmentWebhookDeliveryStatus.FAILED] },
+      nextAttemptAt: { lte: now },
+    },
+    orderBy: [{ nextAttemptAt: "asc" }, { createdAt: "asc" }],
+    take: limit,
+    include: {
+      subscription: {
+        select: {
+          id: true,
+          endpointUrl: true,
+          signingSecret: true,
+          timeoutMs: true,
+          enabled: true,
+          version: true,
+        },
+      },
+    },
+  });
+
+  for (const delivery of deliveries) {
+    const claim = await prisma.shipmentWebhookDelivery.updateMany({
+      where: {
+        id: delivery.id,
+        status: { in: [ShipmentWebhookDeliveryStatus.PENDING, ShipmentWebhookDeliveryStatus.FAILED] },
+      },
+      data: {
+        status: ShipmentWebhookDeliveryStatus.PROCESSING,
+        attemptCount: { increment: 1 },
+        lastError: null,
+      },
+    });
+    if (claim.count === 0) continue;
+
+    const correlationId = `shipment-webhook-${delivery.id}`;
+    let lastHttpStatus: number | null = null;
+    try {
+      const subscription = delivery.subscription;
+      if (!subscription?.enabled) {
+        throw new Error("Webhook subscription is disabled");
+      }
+      if (subscription.version !== SHIPMENT_WEBHOOK_VERSION_V1) {
+        throw new Error(`Unsupported webhook version: ${subscription.version}`);
+      }
+
+      const payloadText = JSON.stringify(delivery.payload ?? {});
+      const signature = signShipmentWebhookPayload(subscription.signingSecret, payloadText);
+      const timeoutMs = Math.min(30000, Math.max(1000, Number(subscription.timeoutMs || 8000)));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      let response: Awaited<ReturnType<typeof fetch>>;
+      try {
+        response = await fetch(subscription.endpointUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": "Haulio-Shipment-Webhook/1.0",
+            "X-Haulio-Event-Id": delivery.eventId,
+            "X-Haulio-Event-Type": delivery.eventType,
+            "X-Haulio-Event-Version": delivery.eventVersion,
+            "X-Haulio-Signature": signature,
+          },
+          body: payloadText,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      lastHttpStatus = response.status;
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Webhook request failed (${response.status}): ${body.slice(0, 400)}`);
+      }
+
+      await prisma.shipmentWebhookDelivery.update({
+        where: { id: delivery.id },
+        data: {
+          status: ShipmentWebhookDeliveryStatus.DELIVERED,
+          deliveredAt: new Date(),
+          nextAttemptAt: now,
+          lastHttpStatus: response.status,
+          lastError: null,
+        },
+      });
+      await prisma.shipmentWebhookSubscription.update({
+        where: { id: subscription.id },
+        data: { lastDeliveryAt: new Date(), lastError: null },
+      });
+      console.info("shipment.webhook.delivered", {
+        correlationId,
+        deliveryId: delivery.id,
+        eventType: delivery.eventType,
+        endpointUrl: subscription.endpointUrl,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const latest = await prisma.shipmentWebhookDelivery.findFirst({
+        where: { id: delivery.id },
+        select: { attemptCount: true, subscriptionId: true },
+      });
+      const attempts = latest?.attemptCount ?? delivery.attemptCount + 1;
+      const retryAt = new Date(Date.now() + nextShipmentWebhookBackoffMinutes(attempts) * 60 * 1000);
+
+      await prisma.shipmentWebhookDelivery.update({
+        where: { id: delivery.id },
+        data: {
+          status: ShipmentWebhookDeliveryStatus.FAILED,
+          lastError: message,
+          nextAttemptAt: retryAt,
+          lastHttpStatus: lastHttpStatus ?? null,
+        },
+      });
+      if (latest?.subscriptionId) {
+        await prisma.shipmentWebhookSubscription.update({
+          where: { id: latest.subscriptionId },
+          data: { lastError: message },
+        });
+      }
+      console.error("shipment.webhook.failed", {
+        correlationId,
+        deliveryId: delivery.id,
+        eventType: delivery.eventType,
+        error: message,
+      });
+    }
+  }
+}
+
 let lastLearningPruneAt: number | null = null;
 let lastFuelSyncAt: number | null = null;
 
@@ -403,6 +542,7 @@ async function pruneLearningExamples() {
 async function runLoop() {
   try {
     await processFinanceOutboxEvents(40);
+    await processShipmentWebhookDeliveries(40);
     await processQueuedQboSyncJobs({ limit: 20 });
     await ensureMissingPodTasks();
     await cleanupMissingPodTasks();

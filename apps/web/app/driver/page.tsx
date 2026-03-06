@@ -14,6 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { DocType } from "@truckerio/shared";
 import { enqueueUpload, listQueuedUploads, removeQueuedUpload, type QueuedUpload } from "@/lib/offlineQueue";
 import { deriveDriverState, getComplianceStatus, type DriverState } from "@/lib/driver-ops";
+import { formatDate as formatDate24, formatDateTime as formatDateTime24, formatTime as formatTime24 } from "@/lib/date-time";
 import { formatDocStatusLabel, formatSettlementStatusLabel } from "@/lib/status-format";
 
 const FALLBACK_DISPATCH_PHONE = (process.env.NEXT_PUBLIC_DISPATCH_PHONE ?? "").trim();
@@ -788,17 +789,11 @@ export default function DriverPage() {
   };
 
   const formatDateTime = (value?: string | null) => {
-    if (!value) return "—";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "—";
-    return date.toLocaleString();
+    return formatDateTime24(value, "—");
   };
 
   const formatDateOnly = (value?: string | null) => {
-    if (!value) return "—";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "—";
-    return date.toLocaleDateString();
+    return formatDate24(value, "—");
   };
 
   const stopTypeLabel = (type: StopType) => {
@@ -978,7 +973,7 @@ export default function DriverPage() {
                   </div>
                   <div className="font-semibold">{settlement.weekLabel ?? "Pay period"}</div>
                   <div className="text-xs text-[color:var(--color-text-muted)]">
-                    {new Date(settlement.periodStart).toLocaleDateString()} → {new Date(settlement.periodEnd).toLocaleDateString()}
+                    {formatDate24(settlement.periodStart)} → {formatDate24(settlement.periodEnd)}
                   </div>
                   <div className="text-sm text-[color:var(--color-text-muted)]">Net ${settlement.net ?? settlement.gross ?? "0.00"}</div>
                 </div>
@@ -1066,7 +1061,7 @@ export default function DriverPage() {
           ) : null}
           <div className="text-sm text-[color:var(--color-text-muted)]">
             Status: {trackingActive ? "ON" : "OFF"} · Last ping{" "}
-            {trackingPing?.capturedAt ? new Date(trackingPing.capturedAt).toLocaleTimeString() : "—"}
+            {formatTime24(trackingPing?.capturedAt, "—")}
           </div>
           <div className="flex flex-wrap gap-2">
             {trackingSession?.status === "ON" ? (
@@ -1178,7 +1173,7 @@ export default function DriverPage() {
             <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-4 py-3 text-xs text-[color:var(--color-text-muted)]">
               <div className="text-[11px] uppercase tracking-[0.2em]">Map preview</div>
               <div className="mt-1">Destination: {nextStop?.city ?? finalStop?.city ?? "—"}, {nextStop?.state ?? finalStop?.state ?? "—"}</div>
-              <div>Last ping: {trackingPing?.capturedAt ? new Date(trackingPing.capturedAt).toLocaleTimeString() : "—"}</div>
+              <div>Last ping: {formatTime24(trackingPing?.capturedAt, "—")}</div>
               <div>{trackingActive ? "Tracking on" : "Tracking off"}</div>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -1309,7 +1304,7 @@ export default function DriverPage() {
               <div key={item.id} className="flex items-center justify-between rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-white/70 px-4 py-3">
                 <div>
                   <div className="font-semibold">{item.type}</div>
-                  <div className="text-xs text-[color:var(--color-text-muted)]">Queued · {new Date(item.createdAt).toLocaleTimeString()}</div>
+                  <div className="text-xs text-[color:var(--color-text-muted)]">Queued · {formatTime24(item.createdAt, "—")}</div>
                 </div>
                 <Button variant="secondary" onClick={flushQueue}>
                   Retry

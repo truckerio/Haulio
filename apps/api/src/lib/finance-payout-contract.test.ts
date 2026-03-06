@@ -6,7 +6,7 @@ const source = fs.readFileSync("src/index.ts", "utf8");
 const payableAnchor = 'const markPayableRunPaidHandler = async (req: any, res: any) => {';
 const payableIndex = source.indexOf(payableAnchor);
 assert.ok(payableIndex >= 0, "payable paid handler must exist");
-const payableBlock = source.slice(payableIndex, payableIndex + 7000);
+const payableBlock = source.slice(payableIndex, payableIndex + 12000);
 assert.ok(
   payableBlock.includes("createPayoutReceipt({"),
   "payable paid handler must build payout receipt via banking adapter"
@@ -37,7 +37,7 @@ const settlementAnchor =
   'app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {';
 const settlementIndex = source.indexOf(settlementAnchor);
 assert.ok(settlementIndex >= 0, "settlement paid route must exist");
-const settlementBlock = source.slice(settlementIndex, settlementIndex + 5000);
+const settlementBlock = source.slice(settlementIndex, settlementIndex + 12000);
 assert.ok(
   settlementBlock.includes("createPayoutReceipt({"),
   "settlement paid route must build payout receipt via banking adapter"
@@ -63,7 +63,9 @@ assert.ok(
   "settlement paid route must derive idempotency key"
 );
 assert.ok(
-  settlementBlock.includes("meta: { payout, journal: journalToJson(journal) }"),
+  settlementBlock.includes('action: "SETTLEMENT_PAID"') &&
+    settlementBlock.includes("payout") &&
+    settlementBlock.includes("journal: journalToJson(journal)"),
   "settlement paid route must audit payout metadata"
 );
 

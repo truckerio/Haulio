@@ -3,6 +3,15 @@
 Last updated: March 2, 2026  
 Repository: `demo-truckerio1-phase1`
 
+Long-horizon companion plan:
+- `docs/TRIP_ROOT_5_YEAR_MATURITY_PLAN.md` (trip-root shipment unification roadmap, quarterly gates, KPI/SLO model, rollback and risk controls)
+- `docs/PHASE_COMMAND_NAMESPACES.md` (canonical phase command naming: `shipment:*` vs `platform:*`)
+
+## Command Namespace
+- Shipment/LTL refactor phases use `shipment:phase1..shipment:phase5`.
+- Existing god-level rollout gates use `platform:ci:phase4..platform:ci:phase17` and `platform:smoke:phase4..platform:smoke:phase17`.
+- Legacy `ci:phase*` and `demo:smoke:phase*` commands are compatibility aliases.
+
 ## 1) Purpose
 This document is the execution tracker to consolidate Haulio into a role-first, trip-first TMS OS without rewriting core workflows.
 
@@ -35,6 +44,22 @@ Primary outcomes:
 - Weeks 5-8: Phase C (state kernel shadow + endpoint migration)
 - Weeks 9-12: Phase D (UI workbench hardening + role routing/nav)
 - Weeks 13-16: Phase E (enforcement + rollout + drift prevention)
+
+### Phase 6 Validation Gate (Full Usage)
+- Add one end-to-end validation phase that runs:
+  - API typecheck + worker typecheck + web typecheck
+  - API finance/dispatch/kernel/driver contract tests
+  - Web dispatch/finance/loads/trips/today/ux contract tests
+  - Runtime smoke flows (`phase3`, `phase4`, `phase5`, `roles`, `enforce`, dispatch+finance UI smoke)
+- Required environment:
+  - `DATABASE_URL` (API/db scripts)
+  - `API_BASE` (defaults to `http://localhost:4000` if omitted)
+  - `ORG_ID` (recommended for enforce smoke) or `ORG_NAME`
+- Local prerequisite:
+  - Ensure Postgres/API are up before running Phase 6 (for example: `pnpm prod:local`).
+- Commands:
+  - `pnpm demo:smoke:phase6`
+  - `pnpm ci:phase6`
 
 ## 5) Master Tracker
 Use this table as the top-level PM tracker.

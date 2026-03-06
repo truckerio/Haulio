@@ -10,6 +10,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { RouteGuard } from "@/components/rbac/route-guard";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
+import { formatDate as formatDate24, formatDateTime as formatDateTime24 } from "@/lib/date-time";
 
 export default function AuditPage() {
   const { capabilities } = useUser();
@@ -29,7 +30,7 @@ export default function AuditPage() {
   }, [canAccess, loadAudits]);
 
   const grouped = audits.reduce<Record<string, any[]>>((acc, audit) => {
-    const dateKey = new Date(audit.createdAt).toLocaleDateString();
+    const dateKey = formatDate24(audit.createdAt, "-");
     if (!acc[dateKey]) acc[dateKey] = [];
     acc[dateKey].push(audit);
     return acc;
@@ -58,7 +59,7 @@ export default function AuditPage() {
                     <div className="text-xs uppercase tracking-[0.2em] text-[color:var(--color-text-subtle)]">{audit.action}</div>
                     <div className="text-sm font-semibold text-ink">{audit.summary}</div>
                     <div className="text-xs text-[color:var(--color-text-muted)]">
-                      {audit.user?.name ?? audit.user?.email} · {new Date(audit.createdAt).toLocaleString()}
+                      {audit.user?.name ?? audit.user?.email} · {formatDateTime24(audit.createdAt, "-")}
                     </div>
                   </div>
                 ))}

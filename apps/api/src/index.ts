@@ -49,6 +49,11 @@ import {
   BillingStatus,
   BillingSubmissionChannel,
   BillingSubmissionStatus,
+  ARCaseStatus,
+  ARCaseType,
+  CashApplicationBatchStatus,
+  CashApplicationMatchStatus,
+  FactoringTransactionType,
   FinanceDeliveredDocRequirement,
   FinancePaymentMethod,
   FinanceRateConRequirement,
@@ -57,7 +62,10 @@ import {
   PayableHoldOwner,
   PayablePartyType,
   PayableRunStatus,
+  MoveContractStatus,
+  MoveContractTemplate,
   QboSyncJobStatus,
+  VendorBillStatus,
   AccessorialStatus,
   AccessorialType,
   AppearanceColorPreset,
@@ -84,6 +92,8 @@ import {
   DispatchExceptionOwner,
   DispatchExceptionSeverity,
   DispatchExceptionStatus,
+  ShipmentWebhookDeliveryStatus,
+  ShipmentWebhookEventType,
   add,
   formatUSD,
   mul,
@@ -124,13 +134,41 @@ import {
 import { logAudit } from "./lib/audit";
 import { createEvent } from "./lib/events";
 import { completeTask, calculateStorageCharge, ensureTask, buildTaskKey, getTaskEntity } from "./lib/tasks";
-import { logLoadFieldAudit, logStopTimeAudit } from "./lib/load-audit";
+import { buildFieldDiff, logLoadFieldAudit, logStopTimeAudit } from "./lib/load-audit";
 import { generateInvoicePdf } from "./lib/invoice";
 import { generatePacketZip } from "./lib/packet";
 import { hasPermission, requireCapability, requirePermission } from "./lib/permissions";
 import { requireOrgEntity } from "./lib/tenant";
 import { requireOperationalOrg } from "./lib/onboarding";
-import { fetchSamsaraVehicleLocation, fetchSamsaraVehicles, formatSamsaraError, validateSamsaraToken } from "./lib/samsara";
+import {
+  exchangeSamsaraOAuthCode,
+  fetchSamsaraVehicleLocation,
+  fetchSamsaraVehicles,
+  formatSamsaraError,
+  refreshSamsaraOAuthToken,
+  validateSamsaraToken,
+} from "./lib/samsara";
+import {
+  extractSamsaraAuthMode,
+  buildSamsaraConfigJson,
+  extractSamsaraApiToken,
+  extractSamsaraOAuthClientId,
+  extractSamsaraOAuthClientSecret,
+  extractSamsaraOAuthRefreshToken,
+  extractSamsaraOAuthScope,
+  extractSamsaraOAuthTokenExpiresAt,
+  extractSamsaraOrgExternalId,
+  extractSamsaraWebhookSigningSecret,
+  hasEncryptedSamsaraCredentials,
+  migrateLegacySamsaraConfig,
+  writeSamsaraOAuthClientConfig,
+  writeSamsaraOAuthCredentials,
+} from "./lib/samsara-config";
+import {
+  extractSamsaraLocationEvents,
+  extractSamsaraWebhookEventIdentity,
+  verifySamsaraWebhookSignature,
+} from "./lib/samsara-webhooks";
 import { assertLoadStatusTransition, formatLoadStatusLabel, mapExternalLoadStatus } from "./lib/load-status";
 import { evaluateBillingReadiness, evaluateBillingReadinessSnapshot } from "./lib/billing-readiness";
 import {
@@ -139,12 +177,31 @@ import {
   listFinanceReceivables,
   mapReceivablesToLegacyReadiness,
 } from "./lib/finance-receivables";
+import {
+  evaluateFinanceCompliance,
+  resolveFinanceCompliancePolicy,
+  type FinancePayeeType,
+} from "./lib/finance-compliance";
 import { canRoleOverrideReadiness, financePolicyPayloadSchema, normalizeFinancePolicy } from "./lib/finance-policy";
 import {
   enqueueDispatchLoadUpdatedEvent,
+  enqueueFactoringRequestedEvent,
   enqueueFinanceStatusUpdatedEvent,
   enqueueQboSyncRequestedEvent,
 } from "./lib/finance-outbox";
+import {
+  SHIPMENT_WEBHOOK_SUPPORTED_EVENTS,
+  SHIPMENT_WEBHOOK_VERSION_V1,
+  buildShipmentWebhookPayloadV1,
+  computeShipmentProjectionLagMetrics,
+  enqueueShipmentWebhookEvent,
+  normalizeShipmentWebhookEventTypes,
+} from "./lib/shipment-webhooks";
+import {
+  buildExceptionAssistDecision,
+  scoreShipmentEtaRisk,
+  simulateEtaRiskScenario,
+} from "./lib/dispatch-assist";
 import {
   enqueueQboInvoiceSyncJob,
   getQuickbooksStatusForOrg,
@@ -246,7 +303,15 @@ import {
 } from "./lib/payables-engine";
 import { buildTripSettlementPreview } from "./lib/trip-settlement-preview";
 import { createPayoutReceipt } from "./lib/finance-banking-adapter";
-import { buildPayableRunPaidJournal, buildSettlementPaidJournal, journalToJson } from "./lib/finance-ledger";
+import {
+  buildFactoringTransactionJournal,
+  buildInvoiceIssuedJournal,
+  buildInvoicePaymentReceivedJournal,
+  buildPayableRunPaidJournal,
+  buildSettlementPaidJournal,
+  buildVendorBillPaidJournal,
+  journalToJson,
+} from "./lib/finance-ledger";
 import { persistFinanceJournalEntry } from "./lib/finance-ledger-store";
 import { evaluatePayableRunHold, evaluateSettlementHold } from "./lib/finance-hold-policy";
 import { aggregateFinanceWalletBalances } from "./lib/finance-wallet";
@@ -278,6 +343,19 @@ const STATE_KERNEL_ENFORCE_ORGS = new Set(
   String(process.env.STATE_KERNEL_ENFORCE_ORGS ?? "")
     .split(",")
     .map((value) => value.trim())
+    .filter(Boolean)
+);
+const SHIPMENT_WORKFLOW_ROLLOUT_ENABLED = String(process.env.SHIPMENT_WORKFLOW_ROLLOUT_ENABLED ?? "true") !== "false";
+const SHIPMENT_WORKFLOW_ORGS = new Set(
+  String(process.env.SHIPMENT_WORKFLOW_ORGS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
+const SHIPMENT_WORKFLOW_ROLES = new Set(
+  String(process.env.SHIPMENT_WORKFLOW_ROLES ?? "ADMIN,HEAD_DISPATCHER,DISPATCHER,BILLING,SAFETY,SUPPORT")
+    .split(",")
+    .map((value) => value.trim().toUpperCase())
     .filter(Boolean)
 );
 
@@ -648,6 +726,13 @@ function isKernelEnforceEnabledForOrg(orgId: string) {
   if (!STATE_KERNEL_ENFORCE) return false;
   if (STATE_KERNEL_ENFORCE_ORGS.size === 0) return false;
   return STATE_KERNEL_ENFORCE_ORGS.has(orgId);
+}
+
+function isShipmentWorkflowEnabledForUser(params: { orgId: string; role?: string | null }) {
+  if (!SHIPMENT_WORKFLOW_ROLLOUT_ENABLED) return false;
+  if (SHIPMENT_WORKFLOW_ORGS.size > 0 && !SHIPMENT_WORKFLOW_ORGS.has(params.orgId)) return false;
+  if (SHIPMENT_WORKFLOW_ROLES.size === 0) return true;
+  return SHIPMENT_WORKFLOW_ROLES.has(String(params.role ?? "").toUpperCase());
 }
 
 async function maybeLogLoadKernelShadow(params: {
@@ -1251,21 +1336,26 @@ async function buildEntityTimeline(params: {
         select: { loadId: true },
       });
       const loadIds = tripLoads.map((entry) => entry.loadId);
-      if (!loadIds.length) return [];
-      const [events, docs, exceptions] = await Promise.all([
+      const loadIdFilter = loadIds.length ? { in: loadIds } : "__no_trip_loads__";
+      const [events, docs, exceptions, audits] = await Promise.all([
         prisma.event.findMany({
-          where: { orgId: params.orgId, loadId: { in: loadIds } },
+          where: { orgId: params.orgId, loadId: loadIdFilter },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           include: { user: { select: { id: true, name: true, role: true } } },
         }),
         prisma.document.findMany({
-          where: { orgId: params.orgId, loadId: { in: loadIds } },
+          where: { orgId: params.orgId, loadId: loadIdFilter },
           orderBy: [{ uploadedAt: "desc" }, { id: "desc" }],
           include: { uploadedBy: { select: { id: true, name: true, role: true } } },
         }),
         prisma.dispatchException.findMany({
-          where: { orgId: params.orgId, OR: [{ tripId: params.entityId }, { loadId: { in: loadIds } }] },
+          where: { orgId: params.orgId, OR: [{ tripId: params.entityId }, { loadId: loadIdFilter }] },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        }),
+        prisma.auditLog.findMany({
+          where: { orgId: params.orgId, entity: "Trip", entityId: params.entityId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          include: { user: { select: { id: true, name: true, role: true } } },
         }),
       ]);
       const tripItems: TimelineItem[] = events.map((event) => ({
@@ -1324,6 +1414,25 @@ async function buildEntityTimeline(params: {
           type: "EXCEPTION_OPENED",
           message: exception.title,
           time: exception.createdAt,
+        });
+      }
+      for (const audit of audits) {
+        tripItems.push({
+          id: `audit:${audit.id}`,
+          kind: "SYSTEM_EVENT",
+          timestamp: audit.createdAt,
+          actor: audit.user ? { id: audit.user.id, name: audit.user.name, role: audit.user.role } : null,
+          payload: {
+            auditId: audit.id,
+            action: audit.action,
+            summary: audit.summary,
+            meta: audit.meta ?? null,
+            before: audit.before ?? null,
+            after: audit.after ?? null,
+          },
+          type: `AUDIT_${audit.action}`,
+          message: audit.summary,
+          time: audit.createdAt,
         });
       }
       return tripItems;
@@ -1455,10 +1564,17 @@ async function refreshFinanceAfterMutation(params: {
   dedupeSuffix?: string | null;
 }) {
   await evaluateBillingReadiness(params.loadId);
-  await persistFinanceSnapshotForLoad({
+  const snapshot = await persistFinanceSnapshotForLoad({
     orgId: params.orgId,
     loadId: params.loadId,
     quickbooksConnected: isQuickbooksConnectedFromEnv(),
+  });
+  await enqueueFinanceStatusUpdatedEvent(prisma as any, {
+    orgId: params.orgId,
+    loadId: params.loadId,
+    stage: snapshot?.billingStage ?? null,
+    billingStatus: snapshot?.readinessSnapshot.isReady ? BillingStatus.READY : BillingStatus.BLOCKED,
+    dedupeSuffix: `${params.trigger}:${params.dedupeSuffix ?? "latest"}`,
   });
   await enqueueDispatchLoadUpdatedEvent(prisma as any, {
     orgId: params.orgId,
@@ -1467,6 +1583,193 @@ async function refreshFinanceAfterMutation(params: {
     trigger: params.trigger,
     dedupeSuffix: params.dedupeSuffix ?? null,
   });
+}
+
+function toMoneyCents(value: Prisma.Decimal | number | string | null | undefined) {
+  if (value === null || value === undefined) return 0;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.round(parsed * 100);
+}
+
+async function persistInvoiceIssuedJournal(params: {
+  orgId: string;
+  invoiceId: string;
+  amountCents: number;
+  userId: string;
+  source: string;
+}) {
+  if (!Number.isFinite(params.amountCents) || params.amountCents <= 0) return null;
+  const journal = buildInvoiceIssuedJournal({
+    orgId: params.orgId,
+    invoiceId: params.invoiceId,
+    amountCents: params.amountCents,
+    idempotencyKey: `invoice:${params.invoiceId}:issued`,
+  });
+  await prisma.$transaction(async (tx) => {
+    await persistFinanceJournalEntry(tx as any, {
+      journal,
+      createdById: params.userId,
+      metadata: { source: params.source },
+    });
+    await applyFinanceWalletWriteThrough(tx as any, { journal });
+  });
+  return journal;
+}
+
+async function persistInvoicePaymentReceivedJournal(params: {
+  orgId: string;
+  invoiceId: string;
+  amountCents: number;
+  userId: string;
+  source: string;
+  idempotencyKey: string;
+}) {
+  if (!Number.isFinite(params.amountCents) || params.amountCents <= 0) return null;
+  const journal = buildInvoicePaymentReceivedJournal({
+    orgId: params.orgId,
+    invoiceId: params.invoiceId,
+    amountCents: params.amountCents,
+    idempotencyKey: params.idempotencyKey,
+  });
+  await prisma.$transaction(async (tx) => {
+    await persistFinanceJournalEntry(tx as any, {
+      journal,
+      createdById: params.userId,
+      metadata: { source: params.source },
+    });
+    await applyFinanceWalletWriteThrough(tx as any, { journal });
+  });
+  return journal;
+}
+
+const INVOICE_PREFLIGHT_INVOICE_READINESS_WARNING = "Invoice required before ready";
+
+type InvoicePreflightResult = {
+  ok: boolean;
+  blockingReasons: string[];
+  warnings: string[];
+  metrics: {
+    detentionMinutesTotal: number;
+    chargeLineCount: number;
+    accessorialCount: number;
+    unresolvedAccessorialCount: number;
+    proofMissingAccessorialCount: number;
+    hasLinehaulCharge: boolean;
+  };
+};
+
+const INVOICE_PREFLIGHT_LOAD_INCLUDE = {
+  stops: true,
+  docs: true,
+  charges: true,
+  accessorials: true,
+  invoices: { select: { status: true } },
+} as const;
+
+type InvoicePreflightLoad = Prisma.LoadGetPayload<{ include: typeof INVOICE_PREFLIGHT_LOAD_INCLUDE }>;
+
+const INVOICE_PREFLIGHT_SETTINGS_SELECT = {
+  requiredDocs: true,
+  ...FINANCE_POLICY_SELECT,
+} as const;
+
+type InvoicePreflightSettings = Prisma.OrgSettingsGetPayload<{ select: typeof INVOICE_PREFLIGHT_SETTINGS_SELECT }>;
+
+function evaluateInvoicePreflightSnapshot(params: {
+  load: InvoicePreflightLoad;
+  settings: InvoicePreflightSettings;
+}): InvoicePreflightResult {
+  const { load, settings } = params;
+  const policy = normalizeFinancePolicy(settings);
+  const readiness = evaluateBillingReadinessSnapshot(
+    {
+      load,
+      stops: load.stops,
+      docs: load.docs,
+      accessorials: load.accessorials,
+      invoices: load.invoices.map((invoice) => ({ status: invoice.status })),
+    },
+    policy
+  );
+
+  const blockers = new Set<string>();
+  const warnings = new Set<string>();
+  for (const reason of readiness.blockingReasons) {
+    if (reason === INVOICE_PREFLIGHT_INVOICE_READINESS_WARNING) {
+      warnings.add(reason);
+      continue;
+    }
+    blockers.add(reason);
+  }
+
+  const missingRequiredDocs = settings.requiredDocs.filter(
+    (requiredType) => !load.docs.some((doc) => doc.type === (requiredType as DocType) && doc.status === DocStatus.VERIFIED)
+  );
+  if (missingRequiredDocs.length > 0) {
+    blockers.add(`Missing required docs: ${missingRequiredDocs.join(", ")}`);
+  }
+
+  const hasLinehaulCharge = load.charges.some((charge) => charge.type === LoadChargeType.LINEHAUL);
+  const loadRate = toDecimal(load.rate);
+  const hasLoadRate = Boolean(loadRate && !loadRate.isZero());
+  if (!hasLinehaulCharge && !hasLoadRate) {
+    blockers.add("Missing base commercial amount: add linehaul charge or load rate before invoice generation.");
+  }
+
+  const detentionMinutesTotal = load.stops.reduce((sum, stop) => sum + Math.max(0, stop.detentionMinutes ?? 0), 0);
+  const hasDetentionCharge = load.charges.some((charge) => charge.type === LoadChargeType.DETENTION);
+  const hasDetentionAccessorial = load.accessorials.some(
+    (accessorial) => accessorial.type === AccessorialType.DETENTION && accessorial.status !== AccessorialStatus.REJECTED
+  );
+  if (detentionMinutesTotal > 0 && !hasDetentionCharge && !hasDetentionAccessorial) {
+    warnings.add(
+      `Detention recorded (${detentionMinutesTotal} min) but no detention commercial line exists.`
+    );
+  }
+
+  const unresolvedAccessorialCount = load.accessorials.filter(
+    (item) => item.status !== AccessorialStatus.APPROVED && item.status !== AccessorialStatus.REJECTED
+  ).length;
+  const proofMissingAccessorialCount = load.accessorials.filter(
+    (item) => item.requiresProof && !item.proofDocumentId && item.status !== AccessorialStatus.REJECTED
+  ).length;
+
+  const blockingReasons = Array.from(blockers);
+  return {
+    ok: blockingReasons.length === 0,
+    blockingReasons,
+    warnings: Array.from(warnings),
+    metrics: {
+      detentionMinutesTotal,
+      chargeLineCount: load.charges.length,
+      accessorialCount: load.accessorials.length,
+      unresolvedAccessorialCount,
+      proofMissingAccessorialCount,
+      hasLinehaulCharge,
+    },
+  };
+}
+
+async function evaluateInvoicePreflightForLoad(params: { orgId: string; loadId: string }) {
+  const [load, settings] = await Promise.all([
+    prisma.load.findFirst({
+      where: { id: params.loadId, orgId: params.orgId, deletedAt: null },
+      include: INVOICE_PREFLIGHT_LOAD_INCLUDE,
+    }),
+    prisma.orgSettings.findFirst({
+      where: { orgId: params.orgId },
+      select: INVOICE_PREFLIGHT_SETTINGS_SELECT,
+    }),
+  ]);
+  if (!load) {
+    throw new Error("Load not found");
+  }
+  if (!settings) {
+    throw new Error("Settings not configured");
+  }
+  const preflight = evaluateInvoicePreflightSnapshot({ load, settings });
+  return { load, settings, preflight };
 }
 
 function hashToken(token: string) {
@@ -1589,6 +1892,449 @@ function buildFactoringPacketLink(orgId: string, packetPath: string) {
   }
   const apiOrigin = process.env.API_PUBLIC_ORIGIN || `http://localhost:${process.env.PORT || "4000"}`;
   return `${apiOrigin.replace(/\/+$/, "")}/public/files/packets/${encodeURIComponent(path.basename(packetPath))}?token=${encodeURIComponent(token)}`;
+}
+
+const SHIPMENT_LTL_ONLY_ERROR =
+  "Shipment commands are currently limited to LTL. Use /trips for execution updates and /loads for commercial updates on non-LTL moves.";
+const LEGACY_TRIP_ADAPTER_SUNSET = "Wed, 31 Dec 2026 23:59:59 GMT";
+const SHIPMENT_COMMAND_AUDIT_ACTION = "SHIPMENT_COMMAND_RECORDED";
+const SHIPMENT_COMMAND_LOOKBACK_DAYS = 14;
+type LtlQueueOwnership = "INBOUND" | "OUTBOUND" | "NETWORK";
+const SHIPMENT_EXECUTION_AUDIT_FIELDS = [
+  "status",
+  "driverId",
+  "truckId",
+  "trailerId",
+  "plannedDepartureAt",
+  "plannedArrivalAt",
+  "departedAt",
+  "arrivedAt",
+] as const;
+const SHIPMENT_COMMERCIAL_LOCKED_STATUSES = new Set<LoadStatus>([
+  LoadStatus.INVOICED,
+  LoadStatus.PAID,
+  LoadStatus.CANCELLED,
+]);
+
+function isLtlMovementMode(mode: MovementMode | null | undefined) {
+  return mode === MovementMode.LTL;
+}
+
+function sendShipmentLtlGuard(res: Response) {
+  res.status(400).json({ error: SHIPMENT_LTL_ONLY_ERROR });
+}
+
+function setLegacyTripAdapterHeaders(res: Response, adapter: "trips.assign->shipments.execution" | "trips.status->shipments.execution") {
+  res.setHeader("X-Legacy-Route-Adapter", adapter);
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Sunset", LEGACY_TRIP_ADAPTER_SUNSET);
+  res.setHeader("Link", '</shipments/:id/execution>; rel="successor-version"');
+}
+
+function normalizeLtlOwnershipQuery(value?: string | null): LtlQueueOwnership | null {
+  const normalized = String(value ?? "").trim().toUpperCase();
+  if (normalized === "INBOUND") return "INBOUND";
+  if (normalized === "OUTBOUND") return "OUTBOUND";
+  if (normalized === "NETWORK") return "NETWORK";
+  return null;
+}
+
+function inferLtlOwnership(params: {
+  movementMode: MovementMode | null | undefined;
+  status: LoadStatus;
+  nextStopType: StopType | null | undefined;
+}): LtlQueueOwnership {
+  if (!isLtlMovementMode(params.movementMode)) return "NETWORK";
+  if (params.status === LoadStatus.PLANNED || params.status === LoadStatus.ASSIGNED) return "OUTBOUND";
+  switch (params.status) {
+    case LoadStatus.IN_TRANSIT:
+    case LoadStatus.DELIVERED:
+    case LoadStatus.POD_RECEIVED:
+    case LoadStatus.READY_TO_INVOICE:
+    case LoadStatus.INVOICED:
+    case LoadStatus.PAID:
+      return "INBOUND";
+    default:
+      break;
+  }
+  if (params.nextStopType === StopType.PICKUP || params.nextStopType === StopType.YARD) return "OUTBOUND";
+  if (params.nextStopType === StopType.DELIVERY) return "INBOUND";
+  return "NETWORK";
+}
+
+function applyLtlOwnershipFilter(where: Prisma.LoadWhereInput, ownership: LtlQueueOwnership | null) {
+  if (!ownership) return;
+  const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+  if (ownership === "OUTBOUND") {
+    andConditions.push({ status: { in: [LoadStatus.PLANNED, LoadStatus.ASSIGNED] } });
+  } else if (ownership === "INBOUND") {
+    andConditions.push({
+      status: {
+        in: [
+          LoadStatus.IN_TRANSIT,
+          LoadStatus.DELIVERED,
+          LoadStatus.POD_RECEIVED,
+          LoadStatus.READY_TO_INVOICE,
+          LoadStatus.INVOICED,
+          LoadStatus.PAID,
+        ],
+      },
+    });
+  } else {
+    andConditions.push({ status: { in: [LoadStatus.CANCELLED, LoadStatus.DRAFT] } });
+  }
+  if (andConditions.length > 0) where.AND = andConditions;
+}
+
+function resolveExceptionOwnerBySla(params: {
+  owner?: DispatchExceptionOwner;
+  type: string;
+  title: string;
+  source?: string | null;
+}): { owner: DispatchExceptionOwner; routingReason: string } {
+  if (params.owner) {
+    return { owner: params.owner, routingReason: "explicit-owner" };
+  }
+  const haystack = [params.type, params.title, params.source ?? ""].join(" ").toUpperCase();
+  if (haystack.includes("POD") || haystack.includes("BOL") || haystack.includes("INVOICE") || haystack.includes("BILL")) {
+    return { owner: DispatchExceptionOwner.BILLING, routingReason: "billing-doc-or-invoice" };
+  }
+  if (haystack.includes("TRACK") || haystack.includes("DRIVER") || haystack.includes("HOS")) {
+    return { owner: DispatchExceptionOwner.DRIVER, routingReason: "driver-or-tracking" };
+  }
+  if (haystack.includes("CUSTOMER")) {
+    return { owner: DispatchExceptionOwner.CUSTOMER, routingReason: "customer-visible" };
+  }
+  return { owner: DispatchExceptionOwner.DISPATCH, routingReason: "dispatch-default" };
+}
+
+function resolveExceptionSlaHours(params: {
+  severity: DispatchExceptionSeverity;
+  owner: DispatchExceptionOwner;
+  type: string;
+}): number {
+  if (params.severity === DispatchExceptionSeverity.BLOCKER) return 2;
+  if (params.owner === DispatchExceptionOwner.BILLING) return 4;
+  if (params.owner === DispatchExceptionOwner.CUSTOMER) return 3;
+  if (params.type.toUpperCase().includes("SAFETY")) return 2;
+  return 8;
+}
+
+function readExceptionSla(meta: Prisma.JsonValue | null) {
+  if (!meta || typeof meta !== "object") return null;
+  const payload = meta as Record<string, unknown>;
+  const dueAt = typeof payload.slaDueAt === "string" ? payload.slaDueAt : null;
+  const hours = typeof payload.slaHours === "number" ? payload.slaHours : null;
+  if (!dueAt || !hours) return null;
+  const dueAtDate = new Date(dueAt);
+  if (Number.isNaN(dueAtDate.getTime())) return null;
+  return {
+    dueAt,
+    hours,
+    overdue: dueAtDate.getTime() < Date.now(),
+  };
+}
+
+function buildLoadRiskScore(params: {
+  now?: Date;
+  load: {
+    status: LoadStatus;
+    assignedDriverId: string | null;
+    truckId: string | null;
+    trailerId: string | null;
+    stops: Array<{
+      type: StopType;
+      appointmentStart: Date | null;
+      appointmentEnd: Date | null;
+      arrivedAt: Date | null;
+      departedAt: Date | null;
+      sequence: number;
+    }>;
+    trackingSessions: Array<{ status: TrackingSessionStatus }>;
+    locationPings: Array<{ capturedAt: Date }>;
+    dispatchExceptions: Array<{ status: DispatchExceptionStatus; severity: DispatchExceptionSeverity }>;
+  };
+}) {
+  const now = params.now ?? new Date();
+  const stops = [...params.load.stops].sort((a, b) => a.sequence - b.sequence);
+  const nextStop = stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ?? null;
+  const hasActiveTracking = params.load.trackingSessions.some((session) => session.status === TrackingSessionStatus.ON);
+  const trackingOffInTransit = params.load.status === LoadStatus.IN_TRANSIT && !hasActiveTracking;
+  const openExceptions = params.load.dispatchExceptions.filter(
+    (exception) =>
+      exception.status === DispatchExceptionStatus.OPEN || exception.status === DispatchExceptionStatus.ACKNOWLEDGED
+  );
+  const blockingExceptions = openExceptions.filter(
+    (exception) => exception.severity === DispatchExceptionSeverity.BLOCKER
+  );
+  const lastPingAt = params.load.locationPings[0]?.capturedAt ?? null;
+
+  const risk = scoreShipmentEtaRisk({
+    now,
+    status: params.load.status,
+    nextStopType: nextStop?.type ?? null,
+    nextStopAppointmentEnd: nextStop?.appointmentEnd ?? null,
+    trackingOffInTransit,
+    openExceptions: openExceptions.length,
+    blockingExceptions: blockingExceptions.length,
+    hasDriver: Boolean(params.load.assignedDriverId),
+    hasTruck: Boolean(params.load.truckId),
+    hasTrailer: Boolean(params.load.trailerId),
+    lastPingAt,
+  });
+
+  return {
+    risk,
+    context: {
+      nextStop: nextStop
+        ? {
+            type: nextStop.type,
+            appointmentStart: nextStop.appointmentStart,
+            appointmentEnd: nextStop.appointmentEnd,
+            arrivedAt: nextStop.arrivedAt,
+            departedAt: nextStop.departedAt,
+            sequence: nextStop.sequence,
+          }
+        : null,
+      trackingOffInTransit,
+      openExceptions: openExceptions.length,
+      blockingExceptions: blockingExceptions.length,
+      hasDriver: Boolean(params.load.assignedDriverId),
+      hasTruck: Boolean(params.load.truckId),
+      hasTrailer: Boolean(params.load.trailerId),
+      lastPingAt,
+    },
+  };
+}
+
+async function fetchExceptionAssistContext(params: { orgId: string; exceptionId: string }) {
+  return prisma.dispatchException.findFirst({
+    where: { id: params.exceptionId, orgId: params.orgId },
+    include: {
+      trip: {
+        select: {
+          id: true,
+          tripNumber: true,
+          status: true,
+        },
+      },
+      load: {
+        select: {
+          id: true,
+          loadNumber: true,
+          status: true,
+          movementMode: true,
+          assignedDriverId: true,
+          truckId: true,
+          trailerId: true,
+          stops: {
+            select: {
+              type: true,
+              appointmentStart: true,
+              appointmentEnd: true,
+              arrivedAt: true,
+              departedAt: true,
+              sequence: true,
+            },
+            orderBy: { sequence: "asc" },
+          },
+          trackingSessions: {
+            where: { status: TrackingSessionStatus.ON },
+            select: { status: true },
+            take: 1,
+          },
+          locationPings: {
+            orderBy: { capturedAt: "desc" },
+            select: { capturedAt: true },
+            take: 1,
+          },
+          dispatchExceptions: {
+            where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+            select: { id: true, severity: true, status: true },
+          },
+        },
+      },
+    },
+  });
+}
+
+async function enqueueShipmentLifecycleWebhook(params: {
+  orgId: string;
+  userId?: string | null;
+  role?: string | null;
+  eventId: string;
+  eventType: ShipmentWebhookEventType;
+  loadId: string;
+  tripId: string | null;
+  loadNumber?: string | null;
+  tripNumber?: string | null;
+  movementMode?: MovementMode | null;
+  changes?: Prisma.JsonValue;
+  metadata?: Prisma.JsonValue;
+}) {
+  const payload = buildShipmentWebhookPayloadV1({
+    eventId: params.eventId,
+    eventType: params.eventType,
+    orgId: params.orgId,
+    loadId: params.loadId,
+    tripId: params.tripId,
+    loadNumber: params.loadNumber ?? null,
+    tripNumber: params.tripNumber ?? null,
+    movementMode: params.movementMode ?? null,
+    actor: {
+      userId: params.userId ?? null,
+      role: params.role ?? null,
+    },
+    changes: params.changes ?? null,
+    metadata: params.metadata ?? null,
+  });
+  return enqueueShipmentWebhookEvent(prisma as any, {
+    orgId: params.orgId,
+    eventId: params.eventId,
+    eventType: params.eventType,
+    payload: payload as unknown as Prisma.InputJsonValue,
+  });
+}
+
+function clampShipmentWebhookTimeoutMs(value: number | null | undefined) {
+  if (!Number.isFinite(Number(value))) return 8000;
+  return Math.min(30000, Math.max(1000, Math.round(Number(value))));
+}
+
+type ShipmentCommandName =
+  | "shipment.create"
+  | "shipment.assignResources"
+  | "shipment.transitionExecution"
+  | "shipment.updateCommercial";
+
+type ShipmentCommandRecord = {
+  idempotencyKey: string;
+  command: ShipmentCommandName;
+  commandHash: string;
+  loadId: string | null;
+  tripId: string | null;
+  route: string | null;
+};
+
+function normalizeShipmentCommandHashInput(value: unknown): unknown {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Prisma.Decimal) return value.toString();
+  if (Array.isArray(value)) return value.map((entry) => normalizeShipmentCommandHashInput(entry));
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const normalized: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) {
+      normalized[key] = normalizeShipmentCommandHashInput(obj[key]);
+    }
+    return normalized;
+  }
+  return value;
+}
+
+function buildShipmentCommandHash(input: unknown) {
+  const normalized = normalizeShipmentCommandHashInput(input);
+  return crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function resolveShipmentCommandIdempotencyKey(
+  req: any,
+  params: { command: ShipmentCommandName; scope: string; commandHash: string }
+) {
+  const fallback = `${params.command}:${params.scope}:${params.commandHash.slice(0, 24)}`;
+  return resolveIdempotencyKey(req, fallback);
+}
+
+function parseShipmentCommandRecord(meta: Prisma.JsonValue | null): ShipmentCommandRecord | null {
+  if (!meta || typeof meta !== "object") return null;
+  const candidate = meta as Record<string, unknown>;
+  const idempotencyKey = typeof candidate.idempotencyKey === "string" ? candidate.idempotencyKey : "";
+  const command = typeof candidate.command === "string" ? candidate.command : "";
+  const commandHash = typeof candidate.commandHash === "string" ? candidate.commandHash : "";
+  if (!idempotencyKey || !command || !commandHash) return null;
+  return {
+    idempotencyKey,
+    command: command as ShipmentCommandName,
+    commandHash,
+    loadId: typeof candidate.loadId === "string" ? candidate.loadId : null,
+    tripId: typeof candidate.tripId === "string" ? candidate.tripId : null,
+    route: typeof candidate.route === "string" ? candidate.route : null,
+  };
+}
+
+async function findShipmentCommandRecord(orgId: string, idempotencyKey: string) {
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      orgId,
+      action: SHIPMENT_COMMAND_AUDIT_ACTION,
+      createdAt: { gte: addDays(new Date(), -SHIPMENT_COMMAND_LOOKBACK_DAYS) },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 400,
+    select: { meta: true, createdAt: true },
+  });
+  for (const row of rows) {
+    const parsed = parseShipmentCommandRecord(row.meta as Prisma.JsonValue | null);
+    if (!parsed) continue;
+    if (parsed.idempotencyKey !== idempotencyKey) continue;
+    return { ...parsed, createdAt: row.createdAt };
+  }
+  return null;
+}
+
+async function recordShipmentCommand(params: {
+  orgId: string;
+  userId: string;
+  idempotencyKey: string;
+  command: ShipmentCommandName;
+  commandHash: string;
+  route: string;
+  loadId: string | null;
+  tripId: string | null;
+}) {
+  await logAudit({
+    orgId: params.orgId,
+    userId: params.userId,
+    action: SHIPMENT_COMMAND_AUDIT_ACTION,
+    entity: "ShipmentCommand",
+    entityId: params.loadId ?? params.tripId ?? null,
+    summary: `Recorded ${params.command} command`,
+    meta: {
+      idempotencyKey: params.idempotencyKey,
+      command: params.command,
+      commandHash: params.commandHash,
+      route: params.route,
+      loadId: params.loadId,
+      tripId: params.tripId,
+    },
+  });
+}
+
+async function fetchShipmentEnvelope(orgId: string, loadId: string) {
+  const load = await prisma.load.findFirst({
+    where: { id: loadId, orgId, deletedAt: null },
+    include: {
+      tripLoads: {
+        take: 1,
+        include: {
+          trip: {
+            include: TRIP_INCLUDE,
+          },
+        },
+      },
+    },
+  });
+  if (!load) return null;
+  const trip = load.tripLoads[0]?.trip ?? null;
+  return {
+    shipment: {
+      id: load.id,
+      loadId: load.id,
+      tripId: trip?.id ?? null,
+      load,
+      trip,
+    },
+  };
 }
 
 function mapLoadTypeForInput(value?: string | null) {
@@ -2180,9 +2926,19 @@ const LOAD_EXECUTION_STATUSES = new Set<LoadStatus>([
 
 const TERMINAL_LOAD_STATUSES: LoadStatus[] = [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED];
 const READY_STAGE_LOAD_STATUSES: LoadStatus[] = [LoadStatus.DELIVERED, LoadStatus.POD_RECEIVED, LoadStatus.READY_TO_INVOICE];
+const DISPATCH_ASSIGNMENT_CLOSED_STATUSES = new Set<LoadStatus>([
+  LoadStatus.DELIVERED,
+  LoadStatus.POD_RECEIVED,
+  LoadStatus.READY_TO_INVOICE,
+  LoadStatus.INVOICED,
+  LoadStatus.PAID,
+  LoadStatus.CANCELLED,
+]);
 const REMINDER_INVOICE_STATUSES: InvoiceStatus[] = [InvoiceStatus.SENT, InvoiceStatus.ACCEPTED, InvoiceStatus.DISPUTED];
 const TRIP_EDITABLE_STATUSES: TripStatus[] = [TripStatus.PLANNED, TripStatus.ASSIGNED];
 const TRIP_DISPATCHED_STATUSES: TripStatus[] = [TripStatus.ASSIGNED, TripStatus.IN_TRANSIT];
+const TRIP_EDIT_FIELDS = ["origin", "destination", "plannedDepartureAt", "plannedArrivalAt", "movementMode"] as const;
+const TRIP_IN_TRANSIT_EDIT_FIELDS = ["destination", "plannedArrivalAt"] as const;
 
 async function logLegacyExecutionMutationRejected(params: {
   orgId: string;
@@ -2770,10 +3526,73 @@ async function setDefaultOperatingEntity(orgId: string, entityId: string) {
   });
 }
 
-function extractSamsaraToken(config: Prisma.JsonValue | null) {
-  if (!config || typeof config !== "object") return null;
-  const token = (config as { apiToken?: unknown }).apiToken;
-  return typeof token === "string" && token.trim().length > 0 ? token : null;
+async function resolveSamsaraCredentialsForIntegration(integration: {
+  id: string;
+  configJson: Prisma.JsonValue | null;
+}) {
+  let configJson = integration.configJson;
+  const migration = migrateLegacySamsaraConfig(configJson);
+  if (migration.changed) {
+    const updated = await prisma.trackingIntegration.update({
+      where: { id: integration.id },
+      data: { configJson: migration.configJson },
+      select: { configJson: true },
+    });
+    configJson = updated.configJson;
+  }
+  const authMode = extractSamsaraAuthMode(configJson);
+  const oauthRefreshToken = extractSamsaraOAuthRefreshToken(configJson);
+  const oauthScope = extractSamsaraOAuthScope(configJson);
+  const oauthTokenExpiresAt = extractSamsaraOAuthTokenExpiresAt(configJson);
+  let apiToken = extractSamsaraApiToken(configJson);
+
+  // OAuth tokens expire quickly; refresh before use to avoid runtime 401 churn.
+  if (authMode === "oauth2" && oauthRefreshToken) {
+    const oauthClient = resolveSamsaraOAuthClient(configJson);
+    const shouldRefresh =
+      !apiToken || !oauthTokenExpiresAt || oauthTokenExpiresAt.getTime() <= Date.now() + 60 * 1000;
+    if (shouldRefresh && oauthClient.configured) {
+      try {
+        const refreshed = await refreshSamsaraOAuthToken({
+          clientId: oauthClient.clientId,
+          clientSecret: oauthClient.clientSecret,
+          refreshToken: oauthRefreshToken,
+        });
+        const nextConfig = writeSamsaraOAuthCredentials({
+          previousConfig: configJson,
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken,
+          expiresInSeconds: refreshed.expiresIn,
+          scope: refreshed.scope ?? oauthScope,
+          tokenType: refreshed.tokenType,
+        });
+        const updated = await prisma.trackingIntegration.update({
+          where: { id: integration.id },
+          data: { configJson: nextConfig, errorMessage: null, status: TrackingIntegrationStatus.CONNECTED },
+          select: { configJson: true },
+        });
+        configJson = updated.configJson;
+        apiToken = extractSamsaraApiToken(configJson);
+      } catch (error) {
+        const info = formatSamsaraError(error);
+        await prisma.trackingIntegration.update({
+          where: { id: integration.id },
+          data: { errorMessage: info.message },
+        });
+      }
+    }
+  }
+
+  return {
+    configJson,
+    apiToken,
+    authMode,
+    oauthScope,
+    oauthTokenExpiresAt: extractSamsaraOAuthTokenExpiresAt(configJson),
+    webhookSigningSecret: extractSamsaraWebhookSigningSecret(configJson),
+    orgExternalId: extractSamsaraOrgExternalId(configJson),
+    credentialsEncrypted: hasEncryptedSamsaraCredentials(configJson),
+  };
 }
 
 function sendSamsaraError(res: Response, error: unknown) {
@@ -3029,6 +3848,370 @@ app.use((req, res, next) => {
     credentials: true,
   })(req, res, next);
 });
+
+const samsaraWebhookRawParser = express.raw({ type: "application/json", limit: "1mb" });
+const SAMSARA_OAUTH_AUTHORIZE_URL =
+  process.env.SAMSARA_OAUTH_AUTHORIZE_URL?.trim() || "https://cloud.samsara.com/oauth2/authorize";
+const SAMSARA_OAUTH_SCOPES =
+  process.env.SAMSARA_OAUTH_SCOPES?.trim() || "read_fleet,read_safety_events,read_hos";
+const SAMSARA_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const ACTIVE_TRACKED_LOAD_STATUSES: LoadStatus[] = [
+  LoadStatus.PLANNED,
+  LoadStatus.ASSIGNED,
+  LoadStatus.IN_TRANSIT,
+  LoadStatus.DELIVERED,
+  LoadStatus.POD_RECEIVED,
+  LoadStatus.READY_TO_INVOICE,
+];
+
+function readHeaderValue(value: string | string[] | undefined) {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return typeof value === "string" ? value : null;
+}
+
+function toSamsaraBase64Url(value: Buffer | string) {
+  const raw = typeof value === "string" ? Buffer.from(value, "utf8") : value;
+  return raw
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function fromSamsaraBase64Url(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+  return Buffer.from(padded, "base64");
+}
+
+function resolveSamsaraOAuthClient(configJson?: Prisma.JsonValue | null) {
+  const orgClientId = extractSamsaraOAuthClientId(configJson ?? null) ?? "";
+  const orgClientSecret = extractSamsaraOAuthClientSecret(configJson ?? null) ?? "";
+  const envClientId = process.env.SAMSARA_OAUTH_CLIENT_ID?.trim() || "";
+  const envClientSecret = process.env.SAMSARA_OAUTH_CLIENT_SECRET?.trim() || "";
+  const useOrgCredentials = Boolean(orgClientId && orgClientSecret);
+  const clientId = useOrgCredentials ? orgClientId : envClientId;
+  const clientSecret = useOrgCredentials ? orgClientSecret : envClientSecret;
+  return {
+    clientId,
+    clientSecret,
+    configured: Boolean(clientId && clientSecret),
+    source: useOrgCredentials ? ("org" as const) : envClientId && envClientSecret ? ("env" as const) : ("missing" as const),
+  };
+}
+
+function resolveSamsaraOAuthStateSecret() {
+  return (
+    process.env.SAMSARA_OAUTH_STATE_SECRET?.trim() ||
+    process.env.INTEGRATION_SECRET?.trim() ||
+    process.env.API_JWT_SECRET?.trim() ||
+    process.env.NEXTAUTH_SECRET?.trim() ||
+    ""
+  );
+}
+
+function signSamsaraOAuthState(payloadSegment: string) {
+  const secret = resolveSamsaraOAuthStateSecret();
+  if (!secret) return "";
+  const digest = crypto.createHmac("sha256", secret).update(payloadSegment).digest();
+  return toSamsaraBase64Url(digest);
+}
+
+function buildSamsaraOAuthState(params: { orgId: string; userId: string }) {
+  const now = Date.now();
+  const payload = {
+    orgId: params.orgId,
+    userId: params.userId,
+    issuedAt: now,
+    expiresAt: now + SAMSARA_OAUTH_STATE_TTL_MS,
+    nonce: crypto.randomBytes(12).toString("hex"),
+  };
+  const payloadSegment = toSamsaraBase64Url(JSON.stringify(payload));
+  const signatureSegment = signSamsaraOAuthState(payloadSegment);
+  return `${payloadSegment}.${signatureSegment}`;
+}
+
+function verifySamsaraOAuthState(state: string | null | undefined) {
+  if (!state || typeof state !== "string") return null;
+  const [payloadSegment, signatureSegment] = state.split(".");
+  if (!payloadSegment || !signatureSegment) return null;
+  const expected = signSamsaraOAuthState(payloadSegment);
+  if (!expected) return null;
+  const expectedBuffer = fromSamsaraBase64Url(expected);
+  const providedBuffer = fromSamsaraBase64Url(signatureSegment);
+  if (expectedBuffer.length !== providedBuffer.length) return null;
+  if (!crypto.timingSafeEqual(expectedBuffer, providedBuffer)) return null;
+  try {
+    const payload = JSON.parse(fromSamsaraBase64Url(payloadSegment).toString("utf8"));
+    if (!payload || typeof payload !== "object") return null;
+    const orgId = typeof payload.orgId === "string" ? payload.orgId : null;
+    const userId = typeof payload.userId === "string" ? payload.userId : null;
+    const expiresAt = Number(payload.expiresAt);
+    if (!orgId || !userId || !Number.isFinite(expiresAt) || Date.now() > expiresAt) return null;
+    return { orgId, userId };
+  } catch {
+    return null;
+  }
+}
+
+function resolveApiOrigin(req: express.Request) {
+  const forwardedProto = readHeaderValue(req.headers["x-forwarded-proto"])?.split(",")[0]?.trim();
+  const forwardedHost = readHeaderValue(req.headers["x-forwarded-host"])?.split(",")[0]?.trim();
+  const proto = forwardedProto || req.protocol;
+  const host = forwardedHost || req.get("host") || "localhost:4000";
+  return `${proto}://${host}`;
+}
+
+function resolveSamsaraOAuthRedirectUri(req: express.Request) {
+  const envUri = process.env.SAMSARA_OAUTH_REDIRECT_URI?.trim();
+  if (envUri) return envUri;
+  return `${resolveApiOrigin(req)}/api/integrations/samsara/oauth/callback`;
+}
+
+async function ingestSamsaraWebhookPayloadForOrg(params: {
+  orgId: string;
+  payload: unknown;
+  maxEvents?: number;
+}) {
+  const cappedMaxEvents = Math.min(1000, Math.max(1, params.maxEvents ?? 250));
+  const locationEvents = extractSamsaraLocationEvents(params.payload).slice(0, cappedMaxEvents);
+  if (locationEvents.length === 0) {
+    return {
+      locationEventsIngested: 0,
+      locationPingsCreated: 0,
+      mappedTrucksMatched: 0,
+    };
+  }
+
+  const externalIds = Array.from(new Set(locationEvents.map((event) => event.externalVehicleId)));
+  const mappings = await prisma.truckTelematicsMapping.findMany({
+    where: {
+      orgId: params.orgId,
+      providerType: TrackingProviderType.SAMSARA,
+      externalId: { in: externalIds },
+    },
+    select: { truckId: true, externalId: true },
+  });
+  const mappingByExternalId = new Map(mappings.map((mapping) => [mapping.externalId, mapping.truckId]));
+  const trackedTruckIds = Array.from(new Set(mappings.map((mapping) => mapping.truckId)));
+  const activeLoads = trackedTruckIds.length
+    ? await prisma.load.findMany({
+        where: {
+          orgId: params.orgId,
+          deletedAt: null,
+          truckId: { in: trackedTruckIds },
+          status: { in: ACTIVE_TRACKED_LOAD_STATUSES },
+        },
+        select: { id: true, truckId: true },
+      })
+    : [];
+  const loadIdsByTruckId = new Map<string, string[]>();
+  for (const load of activeLoads) {
+    if (!load.truckId) continue;
+    const bucket = loadIdsByTruckId.get(load.truckId) ?? [];
+    bucket.push(load.id);
+    loadIdsByTruckId.set(load.truckId, bucket);
+  }
+
+  const rows: Prisma.LocationPingCreateManyInput[] = [];
+  for (const event of locationEvents) {
+    const truckId = mappingByExternalId.get(event.externalVehicleId);
+    if (!truckId) continue;
+    const loadIds = loadIdsByTruckId.get(truckId) ?? [];
+    if (loadIds.length === 0) {
+      rows.push({
+        orgId: params.orgId,
+        loadId: null,
+        truckId,
+        driverId: null,
+        providerType: TrackingProviderType.SAMSARA,
+        lat: new Prisma.Decimal(event.lat),
+        lng: new Prisma.Decimal(event.lng),
+        speedMph: event.speedMph,
+        heading: event.heading,
+        capturedAt: event.capturedAt,
+      });
+      continue;
+    }
+    for (const loadId of loadIds) {
+      rows.push({
+        orgId: params.orgId,
+        loadId,
+        truckId,
+        driverId: null,
+        providerType: TrackingProviderType.SAMSARA,
+        lat: new Prisma.Decimal(event.lat),
+        lng: new Prisma.Decimal(event.lng),
+        speedMph: event.speedMph,
+        heading: event.heading,
+        capturedAt: event.capturedAt,
+      });
+    }
+  }
+
+  const created = rows.length > 0 ? await prisma.locationPing.createMany({ data: rows }) : { count: 0 };
+  return {
+    locationEventsIngested: locationEvents.length,
+    locationPingsCreated: created.count,
+    mappedTrucksMatched: trackedTruckIds.length,
+  };
+}
+
+app.post("/webhooks/samsara", samsaraWebhookRawParser, async (req, res) => {
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+  let payload: unknown = null;
+  try {
+    payload = rawBody.length > 0 ? JSON.parse(rawBody.toString("utf8")) : null;
+  } catch {
+    res.status(400).json({ ok: false, error: "Invalid JSON payload" });
+    return;
+  }
+
+  const signatureHeader = readHeaderValue(req.headers["x-samsara-signature"]);
+  const timestampHeader =
+    readHeaderValue(req.headers["x-samsara-timestamp"]) ??
+    readHeaderValue(req.headers["x-samsara-request-timestamp"]);
+  const requestId =
+    readHeaderValue(req.headers["x-samsara-request-id"]) ??
+    readHeaderValue(req.headers["x-request-id"]);
+  const orgExternalId = readHeaderValue(req.headers["x-samsara-org-id"]);
+  const identity = extractSamsaraWebhookEventIdentity(payload);
+
+  const integrations = await prisma.trackingIntegration.findMany({
+    where: {
+      providerType: TrackingProviderType.SAMSARA,
+      status: TrackingIntegrationStatus.CONNECTED,
+    },
+    select: { id: true, orgId: true, configJson: true },
+  });
+
+  const candidates = integrations
+    .map((integration) => ({
+      id: integration.id,
+      orgId: integration.orgId,
+      webhookSigningSecret: extractSamsaraWebhookSigningSecret(integration.configJson ?? null),
+      mappedExternalOrgId: extractSamsaraOrgExternalId(integration.configJson ?? null),
+    }))
+    .filter((entry): entry is { id: string; orgId: string; webhookSigningSecret: string; mappedExternalOrgId: string | null } =>
+      Boolean(entry.webhookSigningSecret)
+    );
+
+  const narrowedByOrg =
+    orgExternalId && candidates.some((entry) => entry.mappedExternalOrgId === orgExternalId)
+      ? candidates.filter((entry) => entry.mappedExternalOrgId === orgExternalId)
+      : candidates;
+
+  const matchedIntegration = narrowedByOrg.find((entry) =>
+    verifySamsaraWebhookSignature({
+      signatureHeader,
+      timestampHeader,
+      secret: entry.webhookSigningSecret,
+      rawBody,
+    })
+  );
+
+  if (!matchedIntegration) {
+    await prisma.samsaraWebhookReceipt.create({
+      data: {
+        orgId:
+          narrowedByOrg.length === 1
+            ? narrowedByOrg[0].orgId
+            : null,
+        providerType: TrackingProviderType.SAMSARA,
+        requestId: requestId ?? null,
+        eventId: identity.eventId ?? null,
+        eventType: identity.eventType ?? null,
+        orgExternalId: orgExternalId ?? null,
+        signatureTimestamp: timestampHeader ?? null,
+        verified: false,
+        replay: false,
+        reason: "signature_verification_failed",
+        payload: (payload ?? null) as Prisma.InputJsonValue,
+        headers: {
+          "x-samsara-signature": signatureHeader,
+          "x-samsara-timestamp": timestampHeader,
+          "x-samsara-org-id": orgExternalId,
+          "x-samsara-request-id": requestId,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    res.status(401).json({ ok: false, error: "Signature verification failed" });
+    return;
+  }
+
+  const replaySignals = [
+    ...(requestId ? [{ requestId }] : []),
+    ...(identity.eventId ? [{ eventId: identity.eventId }] : []),
+  ];
+
+  if (replaySignals.length > 0) {
+    const replayMatch = await prisma.samsaraWebhookReceipt.findFirst({
+      where: {
+        orgId: matchedIntegration.orgId,
+        providerType: TrackingProviderType.SAMSARA,
+        verified: true,
+        OR: replaySignals,
+      },
+      select: { id: true },
+    });
+    if (replayMatch) {
+      await prisma.samsaraWebhookReceipt.update({
+        where: { id: replayMatch.id },
+        data: {
+          replay: true,
+          reason: "replay_detected",
+          receivedAt: new Date(),
+        },
+      });
+      res.status(202).json({ ok: true, replay: true });
+      return;
+    }
+  }
+
+  const ingestResult = await ingestSamsaraWebhookPayloadForOrg({
+    orgId: matchedIntegration.orgId,
+    payload,
+    maxEvents: 250,
+  });
+
+  try {
+    await prisma.samsaraWebhookReceipt.create({
+      data: {
+        orgId: matchedIntegration.orgId,
+        providerType: TrackingProviderType.SAMSARA,
+        requestId: requestId ?? null,
+        eventId: identity.eventId ?? null,
+        eventType: identity.eventType ?? null,
+        orgExternalId: orgExternalId ?? null,
+        signatureTimestamp: timestampHeader ?? null,
+        verified: true,
+        replay: false,
+        reason: ingestResult.locationEventsIngested > 0 ? "location_events_ingested" : "accepted",
+        payload: (payload ?? null) as Prisma.InputJsonValue,
+        headers: {
+          "x-samsara-signature": signatureHeader,
+          "x-samsara-timestamp": timestampHeader,
+          "x-samsara-org-id": orgExternalId,
+          "x-samsara-request-id": requestId,
+        } as Prisma.InputJsonValue,
+      },
+    });
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === "P2002") {
+      res.status(202).json({ ok: true, replay: true });
+      return;
+    }
+    throw error;
+  }
+
+  res.status(202).json({
+    ok: true,
+    replay: false,
+    locationEventsIngested: ingestResult.locationEventsIngested,
+    locationPingsCreated: ingestResult.locationPingsCreated,
+  });
+});
+
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use((req, _res, next) => {
@@ -3230,6 +4413,69 @@ const DISPATCH_VIEW_GRID_DEFAULTS: {
     },
   ],
 };
+const DISPATCH_TRIPS_WORKSPACE_VIEW_NAME = "__dispatch_trips_workspace__";
+const DISPATCH_LOADS_WORKSPACE_VIEW_NAME = "__dispatch_loads_workspace__";
+const DISPATCH_SHIPMENTS_WORKSPACE_VIEW_NAME = "__dispatch_shipments_workspace__";
+const DISPATCH_WORKSPACE_GRID_ALLOWED_COLUMNS = [
+  "select",
+  "loadNumber",
+  "status",
+  "customer",
+  "pickupAppt",
+  "deliveryAppt",
+  "assignment",
+  "miles",
+  "paidMiles",
+  "rate",
+  "notes",
+  "docs",
+  "exceptions",
+  "risk",
+  "nextAction",
+  "tripNumber",
+  "tripStatus",
+  "tripMode",
+  "tripOrigin",
+  "tripDestination",
+  "tripDeparture",
+  "tripArrival",
+  "tripLoads",
+  "updatedAt",
+] as const;
+const DISPATCH_WORKSPACE_GRID_REQUIRED_COLUMNS = ["select", "loadNumber", "status"] as const;
+const DISPATCH_WORKSPACE_GRID_FROZEN_COLUMNS = ["select", "loadNumber", "status"] as const;
+const DISPATCH_WORKSPACE_GRID_DEFAULTS = {
+  density: "comfortable" as const,
+  columnVisibility: DISPATCH_WORKSPACE_GRID_ALLOWED_COLUMNS.reduce<Record<string, boolean>>((acc, column) => {
+    acc[column] = true;
+    return acc;
+  }, {}),
+  columnOrder: [...DISPATCH_WORKSPACE_GRID_ALLOWED_COLUMNS],
+};
+const DISPATCH_TRIPS_ALLOWED_COLUMNS = [
+  "select",
+  "tripNumber",
+  "status",
+  "movementMode",
+  "loadsCount",
+  "origin",
+  "destination",
+  "plannedDepartureAt",
+  "plannedArrivalAt",
+  "assignment",
+  "cargo",
+  "updatedAt",
+] as const;
+const DISPATCH_TRIPS_REQUIRED_COLUMNS = ["select", "tripNumber", "status"] as const;
+const DISPATCH_TRIPS_FROZEN_COLUMNS = ["select", "tripNumber", "status"] as const;
+const DISPATCH_TRIPS_WORKSPACE_DEFAULTS = {
+  primaryIdentifier: "trip" as const,
+  columnVisibility: DISPATCH_TRIPS_ALLOWED_COLUMNS.reduce<Record<string, boolean>>((acc, column) => {
+    acc[column] = true;
+    return acc;
+  }, {}),
+  columnOrder: [...DISPATCH_TRIPS_ALLOWED_COLUMNS],
+};
 
 const DISPATCH_VIEW_ALLOWED_COLUMNS = [
   "select",
@@ -3252,6 +4498,13 @@ const DISPATCH_VIEW_ALLOWED_COLUMNS = [
   "risk",
   "nextAction",
   "tripNumber",
+  "tripStatus",
+  "tripMode",
+  "tripOrigin",
+  "tripDestination",
+  "tripDeparture",
+  "tripArrival",
+  "tripLoads",
   "updatedAt",
 ] as const;
 
@@ -3306,6 +4559,18 @@ const dispatchViewConfigSchema = z.object({
     }),
 });
 
+const dispatchTripsWorkspaceSchema = z.object({
+  primaryIdentifier: z.enum(["trip", "load"]).default(DISPATCH_TRIPS_WORKSPACE_DEFAULTS.primaryIdentifier),
+  columnVisibility: z.record(z.boolean()).default(DISPATCH_TRIPS_WORKSPACE_DEFAULTS.columnVisibility),
+  columnOrder: z.array(z.string().min(1)).max(32).default(DISPATCH_TRIPS_WORKSPACE_DEFAULTS.columnOrder),
+});
+
+const dispatchGridWorkspaceSchema = z.object({
+  density: z.enum(["compact", "comfortable"]).default(DISPATCH_WORKSPACE_GRID_DEFAULTS.density),
+  columnVisibility: z.record(z.boolean()).default(DISPATCH_WORKSPACE_GRID_DEFAULTS.columnVisibility),
+  columnOrder: z.array(z.string().min(1)).max(48).default(DISPATCH_WORKSPACE_GRID_DEFAULTS.columnOrder),
+});
+
 function normalizeDispatchViewConfig(config: unknown) {
   const parsed = dispatchViewConfigSchema.safeParse(config);
   const base = parsed.success
@@ -3357,6 +4622,114 @@ function normalizeDispatchViewConfig(config: unknown) {
       tripInspector: Boolean(base.panels?.tripInspector ?? false),
     },
   };
+}
+
+function normalizeDispatchTripsWorkspaceConfig(config: unknown) {
+  const parsed = dispatchTripsWorkspaceSchema.safeParse(config);
+  const base = parsed.success ? parsed.data : DISPATCH_TRIPS_WORKSPACE_DEFAULTS;
+  const allowed = new Set<string>(DISPATCH_TRIPS_ALLOWED_COLUMNS);
+  const required = new Set<string>(DISPATCH_TRIPS_REQUIRED_COLUMNS);
+  const frozen = new Set<string>(DISPATCH_TRIPS_FROZEN_COLUMNS);
+
+  const columnVisibility: Record<string, boolean> = {
+    ...DISPATCH_TRIPS_WORKSPACE_DEFAULTS.columnVisibility,
+  };
+  for (const [key, value] of Object.entries(base.columnVisibility ?? {})) {
+    if (!allowed.has(key)) continue;
+    if (required.has(key) || frozen.has(key)) {
+      columnVisibility[key] = true;
+      continue;
+    }
+    columnVisibility[key] = Boolean(value);
+  }
+  for (const key of required) {
+    columnVisibility[key] = true;
+  }
+  for (const key of frozen) {
+    columnVisibility[key] = true;
+  }
+
+  const seen = new Set<string>();
+  const columnOrder: string[] = [];
+  for (const key of base.columnOrder ?? []) {
+    if (!allowed.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    columnOrder.push(key);
+  }
+  for (const key of DISPATCH_TRIPS_ALLOWED_COLUMNS) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    columnOrder.push(key);
+  }
+
+  return {
+    primaryIdentifier: base.primaryIdentifier === "load" ? "load" : "trip",
+    columnVisibility,
+    columnOrder,
+  };
+}
+
+type DispatchWorkspaceLayoutScope = "loads" | "shipments" | "trips";
+
+function parseDispatchWorkspaceLayoutScope(value: string | null | undefined): DispatchWorkspaceLayoutScope | null {
+  if (value === "loads" || value === "shipments" || value === "trips") return value;
+  return null;
+}
+
+function getDispatchWorkspaceLayoutViewName(workspace: DispatchWorkspaceLayoutScope) {
+  if (workspace === "trips") return DISPATCH_TRIPS_WORKSPACE_VIEW_NAME;
+  if (workspace === "shipments") return DISPATCH_SHIPMENTS_WORKSPACE_VIEW_NAME;
+  return DISPATCH_LOADS_WORKSPACE_VIEW_NAME;
+}
+
+function normalizeDispatchGridWorkspaceConfig(config: unknown) {
+  const parsed = dispatchGridWorkspaceSchema.safeParse(config);
+  const base = parsed.success ? parsed.data : DISPATCH_WORKSPACE_GRID_DEFAULTS;
+  const allowed = new Set<string>(DISPATCH_WORKSPACE_GRID_ALLOWED_COLUMNS);
+  const required = new Set<string>(DISPATCH_WORKSPACE_GRID_REQUIRED_COLUMNS);
+  const frozen = new Set<string>(DISPATCH_WORKSPACE_GRID_FROZEN_COLUMNS);
+
+  const columnVisibility: Record<string, boolean> = {
+    ...DISPATCH_WORKSPACE_GRID_DEFAULTS.columnVisibility,
+  };
+  for (const [key, value] of Object.entries(base.columnVisibility ?? {})) {
+    if (!allowed.has(key)) continue;
+    if (required.has(key) || frozen.has(key)) {
+      columnVisibility[key] = true;
+      continue;
+    }
+    columnVisibility[key] = Boolean(value);
+  }
+  for (const key of required) {
+    columnVisibility[key] = true;
+  }
+  for (const key of frozen) {
+    columnVisibility[key] = true;
+  }
+
+  const seen = new Set<string>();
+  const columnOrder: string[] = [];
+  for (const key of base.columnOrder ?? []) {
+    if (!allowed.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    columnOrder.push(key);
+  }
+  for (const key of DISPATCH_WORKSPACE_GRID_ALLOWED_COLUMNS) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    columnOrder.push(key);
+  }
+
+  return {
+    density: base.density === "compact" ? "compact" : "comfortable",
+    columnVisibility,
+    columnOrder,
+  };
+}
+
+function normalizeDispatchWorkspaceLayoutConfig(workspace: DispatchWorkspaceLayoutScope, config: unknown) {
+  if (workspace === "trips") return normalizeDispatchTripsWorkspaceConfig(config);
+  return normalizeDispatchGridWorkspaceConfig(config);
 }
 
 function mapDispatchViewRow(view: {
@@ -4059,6 +5432,13 @@ app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPAT
         mfaEnabled: userRecord?.mfaEnabled ?? false,
         mfaEnforced: userRecord?.mfaEnforced ?? false,
       },
+      workflow: {
+        shipmentFacadeEnabled: true,
+        shipmentRolloutEnabled: isShipmentWorkflowEnabledForUser({
+          orgId: req.user!.orgId,
+          role: req.user!.role,
+        }),
+      },
       org: org
         ? {
           id: org.id,
@@ -4546,8 +5926,12 @@ async function buildRoleIssueSummary(params: {
       },
     });
     const mappedIssues = mapReadinessProjectionToIssues(readiness);
+    const assignmentClosed = DISPATCH_ASSIGNMENT_CLOSED_STATUSES.has(load.status);
     for (const issueType of ISSUE_TYPES) {
       if (issueType === "NEEDS_ASSIGNMENT") {
+        if (assignmentClosed) {
+          continue;
+        }
         // Count loads that need assignment, not individual missing-driver/missing-equipment blockers.
         issueCounts[issueType] += mappedIssues.issueCounts[issueType] > 0 ? 1 : 0;
         continue;
@@ -5449,6 +6833,1000 @@ app.get("/admin/attention-tuning", requireAuth, requireRole("ADMIN"), async (req
   res.json({ suggestions });
 });
 
+async function respondDispatchShipmentsQueue(
+  req: any,
+  res: Response,
+  options?: {
+    ltlOnlyDefault?: boolean;
+  }
+) {
+  const archived = parseBooleanParam(typeof req.query.archived === "string" ? req.query.archived : undefined);
+  const { where } = buildLoadFilters(req, { archived });
+  const ownershipFilter = normalizeLtlOwnershipQuery(typeof req.query.ownership === "string" ? req.query.ownership : null);
+  const loadScope = await getUserTeamScope(req.user!);
+  const teamFilterId = typeof req.query.teamId === "string" ? req.query.teamId.trim() : "";
+  const effectiveScope = await applyTeamFilterOverride(req.user!.orgId, loadScope, teamFilterId || null);
+  if (!effectiveScope.canSeeAllTeams) {
+    await ensureTeamAssignmentsForEntityType(req.user!.orgId, TeamEntityType.LOAD, effectiveScope.defaultTeamId!);
+    const scopedLoadIds = await getScopedEntityIds(req.user!.orgId, TeamEntityType.LOAD, effectiveScope);
+    where.id = { in: scopedLoadIds ?? [] };
+  }
+
+  if (!hasPermission(req.user, Permission.LOAD_ASSIGN)) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  const movementModeRaw =
+    typeof req.query.movementMode === "string" ? req.query.movementMode.trim().toUpperCase() : "";
+  const allowAllModes = options?.ltlOnlyDefault !== true;
+  let movementModeFilter: MovementMode | null = null;
+  if (movementModeRaw) {
+    if (movementModeRaw === "ALL" && allowAllModes) {
+      movementModeFilter = null;
+    } else if (
+      movementModeRaw === MovementMode.LTL ||
+      (allowAllModes && (movementModeRaw === MovementMode.FTL || movementModeRaw === MovementMode.POOL_DISTRIBUTION))
+    ) {
+      movementModeFilter = movementModeRaw as MovementMode;
+    } else {
+      res.status(400).json({
+        error: allowAllModes
+          ? "Invalid movementMode. Allowed values: LTL, FTL, POOL_DISTRIBUTION, ALL."
+          : "Shipment dispatch lens is currently limited to LTL. Use /loads or /trips for non-LTL workflows.",
+      });
+      return;
+    }
+  } else if (options?.ltlOnlyDefault) {
+    movementModeFilter = MovementMode.LTL;
+  }
+
+  if (movementModeFilter) {
+    where.movementMode = movementModeFilter;
+  }
+
+  if (ownershipFilter !== null) {
+    if (movementModeFilter && movementModeFilter !== MovementMode.LTL) {
+      res.status(400).json({ error: "Ownership queue filter is only supported for LTL shipments." });
+      return;
+    }
+    where.movementMode = MovementMode.LTL;
+    applyLtlOwnershipFilter(where, ownershipFilter);
+  }
+
+  const chip = typeof req.query.chip === "string" ? req.query.chip : "";
+  if (!req.query.status && chip) {
+    if (chip === "active") {
+      where.status = { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] };
+    } else if (chip === "archived") {
+      where.status = { in: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] };
+    } else if (chip === "ready-to-invoice") {
+      where.status = LoadStatus.READY_TO_INVOICE;
+    } else if (chip === "delivered-unbilled") {
+      where.status = { in: [LoadStatus.DELIVERED, LoadStatus.POD_RECEIVED] };
+      where.docs = { none: { type: DocType.POD, status: DocStatus.VERIFIED } };
+    } else if (chip === "missing-pod") {
+      where.status = LoadStatus.DELIVERED;
+      where.docs = { none: { type: DocType.POD } };
+    } else if (chip === "tracking-off") {
+      const recentPingSince = new Date(Date.now() - 10 * 60 * 1000);
+      where.status = { in: [LoadStatus.ASSIGNED, LoadStatus.IN_TRANSIT] };
+      const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+      andConditions.push(
+        { trackingSessions: { none: { status: "ON" } } },
+        { locationPings: { none: { capturedAt: { gte: recentPingSince } } } }
+      );
+      where.AND = andConditions;
+    } else if (chip === "compliance-expiring") {
+      const now = new Date();
+      const threshold = addDays(now, READINESS_POLICY_DEFAULTS.complianceExpiringSoonDays);
+      where.status = { notIn: [LoadStatus.INVOICED, LoadStatus.PAID, LoadStatus.CANCELLED] };
+      const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+      andConditions.push({
+        assignedDriverId: { not: null },
+        OR: [
+          { driver: { is: { licenseExpiresAt: { not: null, lte: threshold } } } },
+          { driver: { is: { medCardExpiresAt: { not: null, lte: threshold } } } },
+        ],
+      });
+      where.AND = andConditions;
+    } else if (chip === "qbo-failed") {
+      const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+      andConditions.push({
+        OR: [{ qboSyncStatus: "FAILED" }, { qboSyncLastError: { not: null } }],
+      });
+      where.AND = andConditions;
+    }
+  }
+
+  const needsAssignment = parseBooleanParam(typeof req.query.needsAssignment === "string" ? req.query.needsAssignment : undefined);
+  const atRisk = parseBooleanParam(typeof req.query.atRisk === "string" ? req.query.atRisk : undefined);
+  const requestedQueueView = normalizeDispatchQueueView(typeof req.query.queueView === "string" ? req.query.queueView : null);
+  const effectiveQueueView = needsAssignment ? "active" : requestedQueueView;
+  const queueFilters = buildDispatchQueueFilters(effectiveQueueView);
+  const andConditions = where.AND ? (Array.isArray(where.AND) ? where.AND : [where.AND]) : [];
+  if (needsAssignment) {
+    andConditions.push({
+      OR: [{ assignedDriverId: null }, { truckId: null }, { status: LoadStatus.PLANNED }],
+    });
+  }
+  if (atRisk) {
+    const recentPingSince = new Date(Date.now() - 10 * 60 * 1000);
+    andConditions.push({
+      OR: [
+        {
+          status: LoadStatus.IN_TRANSIT,
+          trackingSessions: { none: { status: "ON" } },
+          locationPings: { none: { capturedAt: { gte: recentPingSince } } },
+        },
+        { stops: { some: { appointmentEnd: { lt: new Date() }, arrivedAt: null } } },
+      ],
+    });
+  }
+  andConditions.push(queueFilters.where);
+  if (andConditions.length > 0) {
+    where.AND = andConditions;
+  }
+
+  const page = Math.max(1, parseInt(typeof req.query.page === "string" ? req.query.page : "1", 10) || 1);
+  const pageSizeRaw = parseInt(typeof req.query.limit === "string" ? req.query.limit : "25", 10) || 25;
+  const limit = Math.min(100, Math.max(10, pageSizeRaw));
+  const skip = (page - 1) * limit;
+  const fieldMode =
+    typeof req.query.fieldMode === "string" && req.query.fieldMode.trim().toLowerCase() === "base" ? "base" : "full";
+  const includeHeavyFields = fieldMode === "full";
+
+  const [total, rows, financePolicy] = await Promise.all([
+    prisma.load.count({ where }),
+    prisma.load.findMany({
+      where,
+      select: {
+        id: true,
+        loadNumber: true,
+        status: true,
+        movementMode: true,
+        customerId: true,
+        customerName: true,
+        deliveredAt: true,
+        rate: true,
+        miles: true,
+        paidMiles: true,
+        assignedDriverId: true,
+        truckId: true,
+        trailerId: true,
+        driver: { select: { id: true, name: true, licenseExpiresAt: true, medCardExpiresAt: true } },
+        truck: { select: { id: true, unit: true } },
+        trailer: { select: { id: true, unit: true } },
+        customer: { select: { id: true, billingEmail: true, remitToAddress: true, termsDays: true } },
+        operatingEntity: { select: { id: true, name: true } },
+        stops: {
+          orderBy: { sequence: "asc" },
+          select: {
+            id: true,
+            type: true,
+            name: true,
+            city: true,
+            state: true,
+            appointmentStart: true,
+            appointmentEnd: true,
+            arrivedAt: true,
+            departedAt: true,
+            sequence: true,
+          },
+        },
+        legs: { select: { status: true } },
+        tripLoads: {
+          take: 1,
+          select: {
+            trip: {
+              select: {
+                id: true,
+                tripNumber: true,
+                status: true,
+                movementMode: true,
+                origin: true,
+                destination: true,
+                plannedDepartureAt: true,
+                plannedArrivalAt: true,
+                sourceManifestId: true,
+                _count: { select: { loads: true } },
+                driverId: true,
+                truckId: true,
+                trailerId: true,
+                driver: { select: { id: true, name: true, licenseExpiresAt: true, medCardExpiresAt: true } },
+                truck: { select: { id: true, unit: true } },
+                trailer: { select: { id: true, unit: true } },
+              },
+            },
+          },
+        },
+        docs: {
+          where: { type: { in: [DocType.POD, DocType.BOL, DocType.RATECON, DocType.RATE_CONFIRMATION] } },
+          select: { type: true, status: true },
+        },
+        accessorials: {
+          select: {
+            status: true,
+            requiresProof: true,
+            proofDocumentId: true,
+          },
+        },
+        invoices: {
+          select: { status: true },
+        },
+        trackingSessions: {
+          where: { status: "ON" },
+          orderBy: { startedAt: "desc" },
+          take: 1,
+          select: { status: true },
+        },
+        locationPings: {
+          orderBy: { capturedAt: "desc" },
+          take: 1,
+          select: { capturedAt: true },
+        },
+        dispatchExceptions: {
+          where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+          orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+          take: 5,
+          select: {
+            id: true,
+            type: true,
+            severity: true,
+            owner: true,
+            status: true,
+            title: true,
+          },
+        },
+        createdAt: true,
+      },
+      orderBy: queueFilters.orderBy,
+      skip,
+      take: limit,
+    }),
+    prisma.orgSettings.findFirst({
+      where: { orgId: req.user!.orgId },
+      select: {
+        requireRateCon: true,
+        requireBOL: true,
+        requireSignedPOD: true,
+      },
+    }),
+  ]);
+
+  const now = Date.now();
+  const noteIndicatorMap = await buildNoteIndicatorMap({
+    orgId: req.user!.orgId,
+    role: req.user!.role as Role,
+    entityType: NoteEntityType.LOAD,
+    entityIds: rows.map((row) => row.id),
+  });
+  const assignedDriverIds = Array.from(
+    new Set(
+      rows
+        .map((load) => load.tripLoads[0]?.trip?.driverId ?? load.assignedDriverId ?? null)
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+  const assignedTruckIds = Array.from(
+    new Set(
+      rows
+        .map((load) => load.tripLoads[0]?.trip?.truckId ?? load.truckId ?? null)
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+  const [driverVaultDocs, truckVaultDocs] = await Promise.all([
+    assignedDriverIds.length
+      ? prisma.vaultDocument.findMany({
+          where: {
+            orgId: req.user!.orgId,
+            scopeType: VaultScopeType.DRIVER,
+            scopeId: { in: assignedDriverIds },
+            expiresAt: { not: null },
+          },
+          select: { scopeId: true, expiresAt: true },
+        })
+      : Promise.resolve([]),
+    assignedTruckIds.length
+      ? prisma.vaultDocument.findMany({
+          where: {
+            orgId: req.user!.orgId,
+            scopeType: VaultScopeType.TRUCK,
+            scopeId: { in: assignedTruckIds },
+            expiresAt: { not: null },
+          },
+          select: { scopeId: true, expiresAt: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const driverVaultExpirationsById = new Map<string, Date[]>();
+  for (const row of driverVaultDocs) {
+    if (!row.scopeId || !row.expiresAt) continue;
+    const bucket = driverVaultExpirationsById.get(row.scopeId) ?? [];
+    bucket.push(row.expiresAt);
+    driverVaultExpirationsById.set(row.scopeId, bucket);
+  }
+  const truckVaultExpirationsById = new Map<string, Date[]>();
+  for (const row of truckVaultDocs) {
+    if (!row.scopeId || !row.expiresAt) continue;
+    const bucket = truckVaultExpirationsById.get(row.scopeId) ?? [];
+    bucket.push(row.expiresAt);
+    truckVaultExpirationsById.set(row.scopeId, bucket);
+  }
+  const items = rows.map((load) => {
+    const primaryTrip = load.tripLoads[0]?.trip ?? null;
+    const assignedDriver = primaryTrip?.driver ?? load.driver;
+    const assignedTruck = primaryTrip?.truck ?? load.truck;
+    const assignedTrailer = primaryTrip?.trailer ?? load.trailer;
+    const shipper = load.stops.find((stop) => stop.type === StopType.PICKUP);
+    const consignee = load.stops.slice().reverse().find((stop) => stop.type === StopType.DELIVERY);
+    const nextStop = load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ?? null;
+    const lastPing = load.locationPings[0];
+    const hasActiveTracking = load.trackingSessions.some((session) => session.status === "ON");
+    let trackingState: "ON" | "OFF" = "OFF";
+    if (hasActiveTracking) {
+      trackingState = "ON";
+    } else if (lastPing?.capturedAt) {
+      const diffMs = now - new Date(lastPing.capturedAt).getTime();
+      if (diffMs < 10 * 60 * 1000) {
+        trackingState = "ON";
+      }
+    }
+    const overdueStop =
+      Boolean(nextStop?.appointmentEnd) &&
+      now > new Date(nextStop!.appointmentEnd as Date).getTime() &&
+      !nextStop?.arrivedAt;
+    const trackingOff = load.status === LoadStatus.IN_TRANSIT && trackingState === "OFF";
+    const needsAssign =
+      !DISPATCH_ASSIGNMENT_CLOSED_STATUSES.has(load.status) &&
+      (!primaryTrip ||
+        !primaryTrip.driverId ||
+        !primaryTrip.truckId ||
+        !primaryTrip.trailerId ||
+        primaryTrip.status === TripStatus.PLANNED);
+    const atRiskFlag = trackingOff || overdueStop;
+    const nextStopTime = nextStop?.appointmentStart ?? nextStop?.appointmentEnd ?? null;
+    const ownershipQueue = inferLtlOwnership({
+      movementMode: load.movementMode,
+      status: load.status,
+      nextStopType: nextStop?.type ?? null,
+    });
+    const executionGroupId = primaryTrip
+      ? primaryTrip.sourceManifestId
+        ? `manifest:${primaryTrip.sourceManifestId}`
+        : `trip:${primaryTrip.id}`
+      : `load:${load.id}`;
+    const legSummary = {
+      count: load.legs.length,
+      activeStatus: load.legs.find((leg) => leg.status === "IN_PROGRESS")?.status ?? null,
+    };
+    const unresolvedExceptions = load.dispatchExceptions.map((exception) => ({
+      id: exception.id,
+      type: exception.type,
+      severity: exception.severity,
+      owner: exception.owner,
+      status: exception.status,
+      title: exception.title,
+    }));
+    const hasBlockingException = unresolvedExceptions.some(
+      (exception) => exception.severity === DispatchExceptionSeverity.BLOCKER
+    );
+    const driverDocExpirations = [
+      assignedDriver?.licenseExpiresAt ?? null,
+      assignedDriver?.medCardExpiresAt ?? null,
+      ...(assignedDriver?.id ? (driverVaultExpirationsById.get(assignedDriver.id) ?? []) : []),
+    ];
+    const equipmentDocExpirations = [...(assignedTruck?.id ? (truckVaultExpirationsById.get(assignedTruck.id) ?? []) : [])];
+    const readiness = evaluateLoadReadinessProjection({
+      dispatch: {
+        assignedDriverId: assignedDriver?.id ?? null,
+        truckId: assignedTruck?.id ?? null,
+        trailerId: assignedTrailer?.id ?? null,
+        stops: load.stops,
+        exceptions: unresolvedExceptions,
+        now: new Date(now),
+        atRiskWindowMinutes: READINESS_POLICY_DEFAULTS.dispatchAtRiskMinutes,
+        atRiskBlocks: READINESS_POLICY_DEFAULTS.dispatchAtRiskBlocks,
+        overdueBlocks: READINESS_POLICY_DEFAULTS.dispatchOverdueBlocks,
+      },
+      billing: {
+        loadStatus: load.status,
+        deliveredAt: load.deliveredAt,
+        customerId: load.customerId ?? null,
+        customerName: load.customerName ?? null,
+        customer: load.customer
+          ? {
+              billingEmail: load.customer.billingEmail,
+              remitToAddress: load.customer.remitToAddress,
+              termsDays: load.customer.termsDays,
+            }
+          : null,
+        stops: load.stops,
+        docs: load.docs,
+        accessorials: load.accessorials,
+        invoices: load.invoices,
+        requireRateCon: financePolicy?.requireRateCon ?? FinanceRateConRequirement.BROKERED_ONLY,
+        requireBOL: financePolicy?.requireBOL ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+        requireSignedPOD: financePolicy?.requireSignedPOD ?? FinanceDeliveredDocRequirement.DELIVERED_ONLY,
+      },
+      compliance: {
+        now: new Date(now),
+        driverDocExpirations,
+        equipmentDocExpirations,
+        expiringSoonDays: READINESS_POLICY_DEFAULTS.complianceExpiringSoonDays,
+      },
+    });
+    const issuesProjection = mapReadinessProjectionToIssues(readiness);
+    return {
+      id: load.id,
+      loadNumber: load.loadNumber,
+      status: load.status,
+      movementMode: load.movementMode ?? null,
+      customerName: load.customerName ?? null,
+      rate: load.rate,
+      miles: load.miles,
+      paidMiles: load.paidMiles ?? null,
+      updatedAt: load.createdAt?.toISOString?.() ?? null,
+      assignment: {
+        driver: assignedDriver,
+        truck: assignedTruck,
+        trailer: assignedTrailer,
+      },
+      trip: primaryTrip
+        ? {
+            id: primaryTrip.id,
+            tripNumber: primaryTrip.tripNumber,
+            status: primaryTrip.status,
+            movementMode: primaryTrip.movementMode,
+            origin: primaryTrip.origin ?? null,
+            destination: primaryTrip.destination ?? null,
+            plannedDepartureAt: primaryTrip.plannedDepartureAt?.toISOString?.() ?? null,
+            plannedArrivalAt: primaryTrip.plannedArrivalAt?.toISOString?.() ?? null,
+            loadsCount: primaryTrip._count?.loads ?? null,
+          }
+        : null,
+      executionGroup: {
+        id: executionGroupId,
+        type: primaryTrip?.sourceManifestId ? "MANIFEST" : primaryTrip ? "TRIP" : "LOAD",
+        sourceManifestId: primaryTrip?.sourceManifestId ?? null,
+        tripId: primaryTrip?.id ?? null,
+        tripNumber: primaryTrip?.tripNumber ?? null,
+        loadCount: primaryTrip?._count?.loads ?? (primaryTrip ? 1 : 0),
+      },
+      ownershipQueue,
+      operatingEntity: load.operatingEntity,
+      route: {
+        shipperCity: shipper?.city ?? null,
+        shipperState: shipper?.state ?? null,
+        consigneeCity: consignee?.city ?? null,
+        consigneeState: consignee?.state ?? null,
+        shipperAppointmentStart: shipper?.appointmentStart?.toISOString?.() ?? null,
+        shipperAppointmentEnd: shipper?.appointmentEnd?.toISOString?.() ?? null,
+        consigneeAppointmentStart: consignee?.appointmentStart?.toISOString?.() ?? null,
+        consigneeAppointmentEnd: consignee?.appointmentEnd?.toISOString?.() ?? null,
+      },
+      nextStop: nextStop
+        ? {
+            id: nextStop.id,
+            type: nextStop.type,
+            name: nextStop.name,
+            city: nextStop.city,
+            state: nextStop.state,
+            appointmentStart: nextStop.appointmentStart,
+            appointmentEnd: nextStop.appointmentEnd,
+            arrivedAt: nextStop.arrivedAt,
+            departedAt: nextStop.departedAt,
+            sequence: nextStop.sequence,
+          }
+        : null,
+      tracking: {
+        state: trackingState,
+        lastPingAt: lastPing?.capturedAt ?? null,
+      },
+      docs: {
+        hasPod: includeHeavyFields
+          ? load.docs.some((doc) => doc.type === DocType.POD && doc.status !== DocStatus.REJECTED)
+          : false,
+        hasBol: includeHeavyFields
+          ? load.docs.some((doc) => doc.type === DocType.BOL && doc.status !== DocStatus.REJECTED)
+          : false,
+        hasRateCon: includeHeavyFields
+          ? load.docs.some(
+              (doc) =>
+                (doc.type === DocType.RATECON || doc.type === DocType.RATE_CONFIRMATION) &&
+                doc.status !== DocStatus.REJECTED
+            )
+          : false,
+      },
+      exceptions: includeHeavyFields ? unresolvedExceptions : [],
+      legSummary,
+      issuesTop: includeHeavyFields ? issuesProjection.issuesTop : [],
+      issuesText: includeHeavyFields ? issuesProjection.issuesText : null,
+      issues: includeHeavyFields ? issuesProjection.issues : [],
+      issueCounts: includeHeavyFields ? issuesProjection.issueCounts : null,
+      notesIndicator: includeHeavyFields ? noteIndicatorMap.get(load.id) ?? "NONE" : "NONE",
+      riskFlags: {
+        needsAssignment: needsAssign,
+        trackingOffInTransit: trackingOff,
+        overdueStopWindow: overdueStop,
+        atRisk: atRiskFlag || hasBlockingException,
+        nextStopTime,
+      },
+    };
+  });
+
+  const ordered = items.sort((a, b) => {
+    const priorityA = a.riskFlags.needsAssignment ? 0 : a.riskFlags.atRisk ? 1 : 2;
+    const priorityB = b.riskFlags.needsAssignment ? 0 : b.riskFlags.atRisk ? 1 : 2;
+    if (priorityA !== priorityB) return priorityA - priorityB;
+    const aTime = a.riskFlags.nextStopTime ? new Date(a.riskFlags.nextStopTime).getTime() : Number.MAX_SAFE_INTEGER;
+    const bTime = b.riskFlags.nextStopTime ? new Date(b.riskFlags.nextStopTime).getTime() : Number.MAX_SAFE_INTEGER;
+    return aTime - bTime;
+  });
+
+  res.json({
+    items: queueFilters.useRiskSort ? ordered : items,
+    page,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    total,
+    pageSize: limit,
+  });
+}
+
+app.get(
+  "/dispatch/shipments",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    await respondDispatchShipmentsQueue(req, res);
+  }
+);
+
+app.get(
+  "/dispatch/shipments/enrichment",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    const rawIds = typeof req.query.loadIds === "string" ? req.query.loadIds : "";
+    const loadIds = Array.from(
+      new Set(
+        rawIds
+          .split(",")
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+      )
+    ).slice(0, 200);
+    if (loadIds.length === 0) {
+      res.json({ items: [] });
+      return;
+    }
+
+    const rawFields = typeof req.query.fields === "string" ? req.query.fields : "";
+    const requestedFields = new Set(
+      rawFields
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
+    );
+    const hasField = (field: string) => requestedFields.size === 0 || requestedFields.has(field);
+
+    const rows = await prisma.load.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        id: { in: loadIds },
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        docs: {
+          where: { type: { in: [DocType.POD, DocType.BOL, DocType.RATECON, DocType.RATE_CONFIRMATION] } },
+          select: { type: true, status: true },
+        },
+        dispatchExceptions: {
+          where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+          orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+          take: 5,
+          select: {
+            id: true,
+            type: true,
+            severity: true,
+            owner: true,
+            status: true,
+            title: true,
+          },
+        },
+        trackingSessions: {
+          where: { status: "ON" },
+          orderBy: { startedAt: "desc" },
+          take: 1,
+          select: { status: true },
+        },
+        locationPings: {
+          orderBy: { capturedAt: "desc" },
+          take: 1,
+          select: { capturedAt: true },
+        },
+        stops: {
+          orderBy: { sequence: "asc" },
+          select: {
+            id: true,
+            type: true,
+            name: true,
+            city: true,
+            state: true,
+            appointmentStart: true,
+            appointmentEnd: true,
+            arrivedAt: true,
+            departedAt: true,
+            sequence: true,
+          },
+        },
+        legs: { select: { status: true } },
+        tripLoads: {
+          take: 1,
+          select: {
+            trip: {
+              select: {
+                id: true,
+                tripNumber: true,
+                status: true,
+                movementMode: true,
+                origin: true,
+                destination: true,
+                plannedDepartureAt: true,
+                plannedArrivalAt: true,
+                _count: { select: { loads: true } },
+              },
+            },
+          },
+        },
+      },
+      take: loadIds.length,
+    });
+
+    const noteIndicatorMap = await buildNoteIndicatorMap({
+      orgId: req.user!.orgId,
+      role: req.user!.role as Role,
+      entityType: NoteEntityType.LOAD,
+      entityIds: rows.map((row) => row.id),
+    });
+    const now = Date.now();
+
+    const items = rows.map((load) => {
+      const nextStop = load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ?? null;
+      const lastPing = load.locationPings[0];
+      const hasActiveTracking = load.trackingSessions.some((session) => session.status === "ON");
+      let trackingState: "ON" | "OFF" = "OFF";
+      if (hasActiveTracking) {
+        trackingState = "ON";
+      } else if (lastPing?.capturedAt) {
+        const diffMs = now - new Date(lastPing.capturedAt).getTime();
+        if (diffMs < 10 * 60 * 1000) {
+          trackingState = "ON";
+        }
+      }
+      return {
+        id: load.id,
+        docs: hasField("docs")
+          ? {
+              hasPod: load.docs.some((doc) => doc.type === DocType.POD && doc.status !== DocStatus.REJECTED),
+              hasBol: load.docs.some((doc) => doc.type === DocType.BOL && doc.status !== DocStatus.REJECTED),
+              hasRateCon: load.docs.some(
+                (doc) =>
+                  (doc.type === DocType.RATECON || doc.type === DocType.RATE_CONFIRMATION) &&
+                  doc.status !== DocStatus.REJECTED
+              ),
+            }
+          : undefined,
+        exceptions: hasField("exceptions")
+          ? load.dispatchExceptions.map((exception) => ({
+              id: exception.id,
+              type: exception.type,
+              severity: exception.severity,
+              owner: exception.owner,
+              status: exception.status,
+              title: exception.title,
+            }))
+          : undefined,
+        notesIndicator: hasField("notesIndicator") ? noteIndicatorMap.get(load.id) ?? "NONE" : undefined,
+        tracking: hasField("tracking")
+          ? {
+              state: trackingState,
+              lastPingAt: lastPing?.capturedAt ?? null,
+            }
+          : undefined,
+        nextStop: hasField("nextStop")
+          ? nextStop
+            ? {
+                id: nextStop.id,
+                type: nextStop.type,
+                name: nextStop.name,
+                city: nextStop.city,
+                state: nextStop.state,
+                appointmentStart: nextStop.appointmentStart,
+                appointmentEnd: nextStop.appointmentEnd,
+                arrivedAt: nextStop.arrivedAt,
+                departedAt: nextStop.departedAt,
+                sequence: nextStop.sequence,
+              }
+            : null
+          : undefined,
+        legSummary: hasField("legSummary")
+          ? {
+              count: load.legs.length,
+              activeStatus: load.legs.find((leg) => leg.status === "IN_PROGRESS")?.status ?? null,
+            }
+          : undefined,
+        trip: hasField("trip")
+          ? load.tripLoads[0]?.trip
+            ? {
+                id: load.tripLoads[0].trip.id,
+                tripNumber: load.tripLoads[0].trip.tripNumber,
+                status: load.tripLoads[0].trip.status,
+                movementMode: load.tripLoads[0].trip.movementMode,
+                origin: load.tripLoads[0].trip.origin ?? null,
+                destination: load.tripLoads[0].trip.destination ?? null,
+                plannedDepartureAt: load.tripLoads[0].trip.plannedDepartureAt?.toISOString?.() ?? null,
+                plannedArrivalAt: load.tripLoads[0].trip.plannedArrivalAt?.toISOString?.() ?? null,
+                loadsCount: load.tripLoads[0].trip._count?.loads ?? null,
+              }
+            : null
+          : undefined,
+      };
+    });
+    res.json({ items });
+  }
+);
+
+app.get(
+  "/dispatch/execution-groups",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    const queueView = normalizeDispatchQueueView(typeof req.query.queueView === "string" ? req.query.queueView : null);
+    const queueFilters = buildDispatchQueueFilters(queueView);
+    const ownershipFilter = normalizeLtlOwnershipQuery(typeof req.query.ownership === "string" ? req.query.ownership : null);
+    const where: Prisma.LoadWhereInput = {
+      orgId: req.user!.orgId,
+      deletedAt: null,
+      movementMode: MovementMode.LTL,
+      AND: [queueFilters.where],
+    };
+    applyLtlOwnershipFilter(where, ownershipFilter);
+    const rows = await prisma.load.findMany({
+      where,
+      select: {
+        id: true,
+        loadNumber: true,
+        status: true,
+        stops: {
+          orderBy: { sequence: "asc" },
+          select: {
+            type: true,
+            city: true,
+            state: true,
+            sequence: true,
+            appointmentStart: true,
+            appointmentEnd: true,
+            arrivedAt: true,
+            departedAt: true,
+          },
+        },
+        tripLoads: {
+          take: 1,
+          select: {
+            trip: {
+              select: {
+                id: true,
+                tripNumber: true,
+                status: true,
+                sourceManifestId: true,
+                _count: { select: { loads: true } },
+              },
+            },
+          },
+        },
+      },
+      orderBy: queueFilters.orderBy,
+      take: 400,
+    });
+
+    const groups = new Map<
+      string,
+      {
+        id: string;
+        type: "MANIFEST" | "TRIP" | "LOAD";
+        sourceManifestId: string | null;
+        tripIds: string[];
+        tripNumbers: string[];
+        loadIds: string[];
+        loadNumbers: string[];
+        statuses: LoadStatus[];
+        ownershipQueue: LtlQueueOwnership;
+      }
+    >();
+    for (const load of rows) {
+      const trip = load.tripLoads[0]?.trip ?? null;
+      const nextStop = load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ?? load.stops[0] ?? null;
+      const ownershipQueue = inferLtlOwnership({
+        movementMode: MovementMode.LTL,
+        status: load.status,
+        nextStopType: nextStop?.type ?? null,
+      });
+      const groupId = trip?.sourceManifestId
+        ? `manifest:${trip.sourceManifestId}`
+        : trip
+          ? `trip:${trip.id}`
+          : `load:${load.id}`;
+      const existing = groups.get(groupId);
+      if (existing) {
+        existing.loadIds.push(load.id);
+        existing.loadNumbers.push(load.loadNumber);
+        existing.statuses.push(load.status);
+        if (trip?.id && !existing.tripIds.includes(trip.id)) existing.tripIds.push(trip.id);
+        if (trip?.tripNumber && !existing.tripNumbers.includes(trip.tripNumber)) existing.tripNumbers.push(trip.tripNumber);
+        continue;
+      }
+      groups.set(groupId, {
+        id: groupId,
+        type: trip?.sourceManifestId ? "MANIFEST" : trip ? "TRIP" : "LOAD",
+        sourceManifestId: trip?.sourceManifestId ?? null,
+        tripIds: trip?.id ? [trip.id] : [],
+        tripNumbers: trip?.tripNumber ? [trip.tripNumber] : [],
+        loadIds: [load.id],
+        loadNumbers: [load.loadNumber],
+        statuses: [load.status],
+        ownershipQueue,
+      });
+    }
+
+    res.json({
+      groups: Array.from(groups.values()).map((group) => ({
+        id: group.id,
+        type: group.type,
+        sourceManifestId: group.sourceManifestId,
+        tripIds: group.tripIds,
+        tripNumbers: group.tripNumbers,
+        loadIds: group.loadIds,
+        loadNumbers: group.loadNumbers,
+        loadCount: group.loadIds.length,
+        ownershipQueue: group.ownershipQueue,
+        statuses: Array.from(new Set(group.statuses)),
+      })),
+    });
+  }
+);
+
+app.post(
+  "/dispatch/shipments/:id/handoff",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER"),
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const schema = z.object({
+      ownership: z.enum(["INBOUND", "OUTBOUND"]),
+      teamId: z.string().trim().optional(),
+      note: z.string().trim().max(500).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+      include: {
+        tripLoads: {
+          take: 1,
+          include: { trip: { select: { id: true, tripNumber: true, status: true } } },
+        },
+      },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Shipment not found" });
+      return;
+    }
+    if (!isLtlMovementMode(load.movementMode)) {
+      sendShipmentLtlGuard(res);
+      return;
+    }
+    if (parsed.data.teamId) {
+      if (!canAssignTeams(req.user!.role as Role)) {
+        res.status(403).json({ error: "Only admin/head dispatcher can reassign handoff team." });
+        return;
+      }
+      await assignTeamEntities({
+        prisma,
+        orgId: req.user!.orgId,
+        teamId: parsed.data.teamId ?? null,
+        entityType: TeamEntityType.LOAD,
+        entityIds: [load.id],
+      });
+    }
+    const handoffSlaHours = parsed.data.ownership === "OUTBOUND" ? 2 : 4;
+    const handoffDueAt = addDays(new Date(), handoffSlaHours / 24).toISOString();
+    const exception = await prisma.dispatchException.create({
+      data: {
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        tripId: load.tripLoads[0]?.tripId ?? null,
+        type: "OWNERSHIP_HANDOFF",
+        severity: DispatchExceptionSeverity.WARNING,
+        owner: DispatchExceptionOwner.DISPATCH,
+        status: DispatchExceptionStatus.OPEN,
+        title: `${parsed.data.ownership} handoff queued`,
+        detail: parsed.data.note ?? null,
+        source: "shipment-handoff",
+        createdById: req.user!.id,
+        meta: {
+          ownership: parsed.data.ownership,
+          teamId: parsed.data.teamId ?? null,
+          slaHours: handoffSlaHours,
+          slaDueAt: handoffDueAt,
+        },
+      },
+    });
+    await createEvent({
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      userId: req.user!.id,
+      type: EventType.LOAD_STATUS_UPDATED,
+      message: `Shipment handoff queued (${parsed.data.ownership})`,
+      meta: {
+        scope: "SHIPMENT_HANDOFF",
+        ownership: parsed.data.ownership,
+        teamId: parsed.data.teamId ?? null,
+        exceptionId: exception.id,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SHIPMENT_HANDOFF_QUEUED",
+      entity: "Load",
+      entityId: load.id,
+      summary: `Queued ${parsed.data.ownership} handoff for ${load.loadNumber}`,
+      meta: {
+        loadId: load.id,
+        loadNumber: load.loadNumber,
+        ownership: parsed.data.ownership,
+        teamId: parsed.data.teamId ?? null,
+        note: parsed.data.note ?? null,
+        exceptionId: exception.id,
+      },
+    });
+    await enqueueShipmentLifecycleWebhook({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      role: req.user!.role,
+      eventId: `shipment_handoff:${load.id}:${exception.id}`,
+      eventType: ShipmentWebhookEventType.SHIPMENT_HANDOFF_QUEUED,
+      loadId: load.id,
+      tripId: load.tripLoads[0]?.tripId ?? null,
+      loadNumber: load.loadNumber,
+      tripNumber: load.tripLoads[0]?.trip?.tripNumber ?? null,
+      movementMode: load.movementMode,
+      metadata: {
+        ownership: parsed.data.ownership,
+        teamId: parsed.data.teamId ?? null,
+        note: parsed.data.note ?? null,
+        exceptionId: exception.id,
+      },
+    });
+    res.json({
+      ok: true,
+      handoff: {
+        loadId: load.id,
+        ownership: parsed.data.ownership,
+        teamId: parsed.data.teamId ?? null,
+        slaDueAt: handoffDueAt,
+        exceptionId: exception.id,
+      },
+    });
+  }
+);
+
 app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"), async (req, res) => {
   try {
     const archived = parseBooleanParam(typeof req.query.archived === "string" ? req.query.archived : undefined);
@@ -5744,11 +8122,12 @@ app.get("/loads", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCH
           !nextStop?.arrivedAt;
         const trackingOff = load.status === LoadStatus.IN_TRANSIT && trackingState === "OFF";
         const needsAssign =
-          !primaryTrip ||
-          !primaryTrip.driverId ||
-          !primaryTrip.truckId ||
-          !primaryTrip.trailerId ||
-          primaryTrip.status === TripStatus.PLANNED;
+          !DISPATCH_ASSIGNMENT_CLOSED_STATUSES.has(load.status) &&
+          (!primaryTrip ||
+            !primaryTrip.driverId ||
+            !primaryTrip.truckId ||
+            !primaryTrip.trailerId ||
+            primaryTrip.status === TripStatus.PLANNED);
         const atRiskFlag = trackingOff || overdueStop;
         const nextStopTime = nextStop?.appointmentStart ?? nextStop?.appointmentEnd ?? null;
         const legSummary = {
@@ -6462,6 +8841,83 @@ app.get("/loads/export", requireAuth, requireRole("ADMIN", "DISPATCHER", "BILLIN
     sendServerError(res, "Failed to export loads", error);
   }
 });
+
+app.get(
+  "/shipments/:id",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+      include: {
+        customer: true,
+        operatingEntity: true,
+        stops: { orderBy: { sequence: "asc" } },
+        docs: true,
+        invoices: { orderBy: { generatedAt: "desc" } },
+        tripLoads: {
+          take: 1,
+          include: {
+            trip: {
+              include: {
+                driver: { select: { id: true, name: true, status: true } },
+                truck: { select: { id: true, unit: true, status: true } },
+                trailer: { select: { id: true, unit: true, status: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Shipment not found" });
+      return;
+    }
+    const trip = load.tripLoads[0]?.trip ?? null;
+    const lineageEntries = await prisma.auditLog.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        action: { in: ["TRIP_LOAD_SPLIT", "TRIP_MERGED"] },
+        OR: [{ entity: "Load", entityId: load.id }, { meta: { path: ["loadId"], equals: load.id } }],
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 20,
+      select: { id: true, action: true, summary: true, meta: true, createdAt: true },
+    });
+    const nextStop = load.stops.find((stop) => !stop.arrivedAt || !stop.departedAt) ?? null;
+    const ownershipQueue = inferLtlOwnership({
+      movementMode: load.movementMode,
+      status: load.status,
+      nextStopType: nextStop?.type ?? null,
+    });
+    res.json({
+      shipment: {
+        id: load.id,
+        loadId: load.id,
+        tripId: trip?.id ?? null,
+        load,
+        trip,
+        executionGroup: {
+          id: trip?.sourceManifestId ? `manifest:${trip.sourceManifestId}` : trip ? `trip:${trip.id}` : `load:${load.id}`,
+          type: trip?.sourceManifestId ? "MANIFEST" : trip ? "TRIP" : "LOAD",
+          sourceManifestId: trip?.sourceManifestId ?? null,
+          tripId: trip?.id ?? null,
+          tripNumber: trip?.tripNumber ?? null,
+        },
+        ownershipQueue,
+        lineage: lineageEntries.map((entry) => ({
+          id: entry.id,
+          action: entry.action,
+          summary: entry.summary,
+          meta: entry.meta ?? null,
+          createdAt: entry.createdAt,
+        })),
+        executionAuthority: trip ? "TRIP" : "UNASSIGNED",
+        commercialAuthority: "LOAD",
+      },
+    });
+  }
+);
 
 app.get("/loads/:id", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"), async (req, res) => {
   const now = new Date();
@@ -8327,6 +10783,159 @@ app.get(
   }
 );
 
+app.patch(
+  "/trips/:id",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      origin: z.string().trim().max(120).nullable().optional(),
+      destination: z.string().trim().max(120).nullable().optional(),
+      plannedDepartureAt: z.string().trim().nullable().optional(),
+      plannedArrivalAt: z.string().trim().nullable().optional(),
+      movementMode: z.nativeEnum(MovementMode).optional(),
+      reasonCode: z.string().trim().min(2).max(64),
+      reasonNote: z.string().trim().max(500).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: TRIP_INCLUDE,
+    });
+    if (!trip) {
+      res.status(404).json({ error: "Trip not found" });
+      return;
+    }
+
+    const requestedFields = TRIP_EDIT_FIELDS.filter((field) => Object.prototype.hasOwnProperty.call(parsed.data, field));
+    if (requestedFields.length === 0) {
+      res.status(400).json({ error: "No editable trip fields were provided" });
+      return;
+    }
+
+    const isAdmin = req.user!.role === "ADMIN";
+    const tripStatusAllowsFullEdit = TRIP_EDITABLE_STATUSES.includes(trip.status);
+    const tripStatusAllowsTransitEdit = trip.status === TripStatus.IN_TRANSIT;
+    if (!isAdmin && !tripStatusAllowsFullEdit && !tripStatusAllowsTransitEdit) {
+      res.status(400).json({ error: `Trip cannot be edited in ${trip.status} status` });
+      return;
+    }
+
+    const allowedFields = new Set<string>(
+      isAdmin || tripStatusAllowsFullEdit ? [...TRIP_EDIT_FIELDS] : [...TRIP_IN_TRANSIT_EDIT_FIELDS]
+    );
+    const blockedFields = requestedFields.filter((field) => !allowedFields.has(field));
+    if (blockedFields.length) {
+      res.status(400).json({
+        error: `The following fields cannot be edited while trip is ${trip.status}: ${blockedFields.join(", ")}`,
+      });
+      return;
+    }
+
+    const parseDateField = (value: string | null | undefined, label: string) => {
+      if (value === undefined) return undefined;
+      if (value === null || value === "") return null;
+      const parsedDate = new Date(value);
+      if (Number.isNaN(parsedDate.getTime())) {
+        throw new Error(`${label} must be a valid datetime`);
+      }
+      return parsedDate;
+    };
+
+    let plannedDepartureAt: Date | null | undefined;
+    let plannedArrivalAt: Date | null | undefined;
+    try {
+      plannedDepartureAt = parseDateField(parsed.data.plannedDepartureAt, "plannedDepartureAt");
+      plannedArrivalAt = parseDateField(parsed.data.plannedArrivalAt, "plannedArrivalAt");
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+
+    const updated = await prisma.trip.update({
+      where: { id: trip.id },
+      data: {
+        origin:
+          parsed.data.origin === undefined
+            ? undefined
+            : parsed.data.origin && parsed.data.origin.length > 0
+              ? parsed.data.origin
+              : null,
+        destination:
+          parsed.data.destination === undefined
+            ? undefined
+            : parsed.data.destination && parsed.data.destination.length > 0
+              ? parsed.data.destination
+              : null,
+        plannedDepartureAt,
+        plannedArrivalAt,
+        movementMode: parsed.data.movementMode ?? undefined,
+      },
+      include: TRIP_INCLUDE,
+    });
+
+    const diff = buildFieldDiff({
+      before: trip as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+      fields: TRIP_EDIT_FIELDS,
+    });
+    if (diff.changedFields.length === 0) {
+      res.json({ trip: updated, changedFields: [] });
+      return;
+    }
+
+    const reasonCode = parsed.data.reasonCode.trim();
+    const reasonNote = parsed.data.reasonNote?.trim() || null;
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_FIELDS_UPDATED",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: `Updated trip ${updated.tripNumber} fields: ${diff.changedFields.join(", ")}`,
+      before: diff.beforeDiff as unknown as Prisma.InputJsonValue,
+      after: diff.afterDiff as unknown as Prisma.InputJsonValue,
+      meta: {
+        reasonCode,
+        reasonNote,
+        actorRole: req.user!.role,
+        route: "/trips/:id",
+        changedFields: diff.changedFields,
+        changes: diff.changes,
+        priorStatus: trip.status,
+      },
+    });
+
+    const firstLoadId = updated.loads[0]?.loadId ?? null;
+    if (firstLoadId) {
+      await createEvent({
+        orgId: req.user!.orgId,
+        loadId: firstLoadId,
+        userId: req.user!.id,
+        type: EventType.LOAD_STATUS_UPDATED,
+        message: `Trip ${updated.tripNumber} edited: ${diff.changedFields.join(", ")}`,
+        meta: {
+          scope: "TRIP_EDIT",
+          tripId: updated.id,
+          tripNumber: updated.tripNumber,
+          reasonCode,
+          reasonNote,
+          changedFields: diff.changedFields,
+          changes: diff.changes,
+        },
+      });
+    }
+
+    res.json({ trip: updated, changedFields: diff.changedFields });
+  }
+);
+
 app.get(
   "/trips/:id/settlement-preview",
   requireAuth,
@@ -8834,7 +11443,52 @@ app.post(
         sourceTripNumber: trip.tripNumber,
         splitTripId: result.createdTrip.id,
         splitTripNumber: result.createdTrip.tripNumber,
+        loadId: target.loadId,
         loadNumber: target.load.loadNumber,
+        lineage: {
+          operation: "SPLIT",
+          fromTripId: trip.id,
+          toTripId: result.createdTrip.id,
+        },
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_LOAD_SPLIT",
+      entity: "Load",
+      entityId: target.loadId,
+      summary: `Load ${target.load.loadNumber} split from ${trip.tripNumber} to ${result.createdTrip.tripNumber}`,
+      meta: {
+        loadId: target.loadId,
+        loadNumber: target.load.loadNumber,
+        sourceTripId: trip.id,
+        sourceTripNumber: trip.tripNumber,
+        splitTripId: result.createdTrip.id,
+        splitTripNumber: result.createdTrip.tripNumber,
+        lineage: {
+          operation: "SPLIT",
+          fromTripId: trip.id,
+          toTripId: result.createdTrip.id,
+        },
+      },
+    });
+    await enqueueShipmentLifecycleWebhook({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      role: req.user!.role,
+      eventId: `shipment_split:${target.loadId}:${trip.id}:${result.createdTrip.id}`,
+      eventType: ShipmentWebhookEventType.SHIPMENT_SPLIT,
+      loadId: target.loadId,
+      tripId: result.createdTrip.id,
+      loadNumber: target.load.loadNumber,
+      tripNumber: result.createdTrip.tripNumber,
+      movementMode: trip.movementMode,
+      metadata: {
+        sourceTripId: trip.id,
+        sourceTripNumber: trip.tripNumber,
+        splitTripId: result.createdTrip.id,
+        splitTripNumber: result.createdTrip.tripNumber,
       },
     });
 
@@ -8847,11 +11501,286 @@ app.post(
 );
 
 app.post(
+  "/trips/:id/merge",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const schema = z
+      .object({
+        sourceTripId: z.string().trim().min(1).optional(),
+        sourceTripNumber: z.string().trim().min(1).optional(),
+      })
+      .refine((value) => Boolean(value.sourceTripId || value.sourceTripNumber), {
+        message: "sourceTripId or sourceTripNumber is required",
+      });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const targetTrip = await prisma.trip.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      include: { loads: { select: { loadId: true, sequence: true, load: { select: { id: true, loadNumber: true } } } } },
+    });
+    if (!targetTrip) {
+      res.status(404).json({ error: "Target trip not found" });
+      return;
+    }
+    const sourceTrip = await prisma.trip.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        OR: parsed.data.sourceTripId
+          ? [{ id: parsed.data.sourceTripId }]
+          : [{ tripNumber: parsed.data.sourceTripNumber! }],
+      },
+      include: { loads: { select: { loadId: true, sequence: true, load: { select: { id: true, loadNumber: true } } } } },
+    });
+    if (!sourceTrip) {
+      res.status(404).json({ error: "Source trip not found" });
+      return;
+    }
+    if (sourceTrip.id === targetTrip.id) {
+      res.status(400).json({ error: "Source and target trip must be different." });
+      return;
+    }
+    if (!TRIP_EDITABLE_STATUSES.includes(targetTrip.status) || !TRIP_EDITABLE_STATUSES.includes(sourceTrip.status)) {
+      res.status(400).json({ error: "Trips can only be merged before dispatch starts." });
+      return;
+    }
+    if (targetTrip.movementMode !== sourceTrip.movementMode) {
+      res.status(400).json({ error: "Trips must share the same movement mode to merge." });
+      return;
+    }
+    if (targetTrip.movementMode !== MovementMode.LTL && targetTrip.movementMode !== MovementMode.POOL_DISTRIBUTION) {
+      res.status(400).json({ error: "Trip merge is only available for LTL and Pool Distribution moves." });
+      return;
+    }
+    if (sourceTrip.loads.length === 0) {
+      res.status(400).json({ error: "Source trip has no loads to merge." });
+      return;
+    }
+    const targetLoadIds = new Set(targetTrip.loads.map((entry) => entry.loadId));
+    const movingLoads = sourceTrip.loads.filter((entry) => !targetLoadIds.has(entry.loadId));
+    if (movingLoads.length === 0) {
+      res.status(400).json({ error: "All source trip loads already exist on target trip." });
+      return;
+    }
+
+    const sourceTripPrevious = {
+      status: sourceTrip.status,
+      driverId: sourceTrip.driverId,
+      truckId: sourceTrip.truckId,
+      trailerId: sourceTrip.trailerId,
+    };
+    const targetTripPrevious = {
+      status: targetTrip.status,
+      driverId: targetTrip.driverId,
+      truckId: targetTrip.truckId,
+      trailerId: targetTrip.trailerId,
+    };
+
+    const result = await prisma.$transaction(async (tx) => {
+      const nextSequence = targetTrip.loads.length + 1;
+      await tx.tripLoad.createMany({
+        data: movingLoads.map((entry, index) => ({
+          orgId: req.user!.orgId,
+          tripId: targetTrip.id,
+          loadId: entry.loadId,
+          sequence: nextSequence + index,
+        })),
+        skipDuplicates: true,
+      });
+      await tx.tripLoad.deleteMany({
+        where: {
+          orgId: req.user!.orgId,
+          tripId: sourceTrip.id,
+          loadId: { in: movingLoads.map((entry) => entry.loadId) },
+        },
+      });
+
+      let targetManifestId = targetTrip.sourceManifestId ?? null;
+      if (!targetManifestId && sourceTrip.sourceManifestId) {
+        await tx.trip.update({
+          where: { id: sourceTrip.id },
+          data: { sourceManifestId: null },
+        });
+        await tx.trip.update({
+          where: { id: targetTrip.id },
+          data: { sourceManifestId: sourceTrip.sourceManifestId },
+        });
+        targetManifestId = sourceTrip.sourceManifestId;
+      }
+      if (targetManifestId) {
+        await tx.trailerManifestItem.createMany({
+          data: movingLoads.map((entry) => ({ manifestId: targetManifestId!, loadId: entry.loadId })),
+          skipDuplicates: true,
+        });
+      }
+      if (sourceTrip.sourceManifestId && sourceTrip.sourceManifestId !== targetManifestId) {
+        await tx.trailerManifestItem.deleteMany({
+          where: { manifestId: sourceTrip.sourceManifestId, loadId: { in: movingLoads.map((entry) => entry.loadId) } },
+        });
+      }
+
+      const sourceRemainingLoads = await tx.tripLoad.count({
+        where: { orgId: req.user!.orgId, tripId: sourceTrip.id },
+      });
+      if (sourceRemainingLoads === 0) {
+        await tx.trip.update({
+          where: { id: sourceTrip.id },
+          data: {
+            status: TripStatus.CANCELLED,
+            sourceManifestId: null,
+          },
+        });
+      }
+
+      await syncTripExecutionToLoadMirrors({
+        orgId: req.user!.orgId,
+        tripId: targetTrip.id,
+        tx,
+        actor: { userId: req.user!.id, role: req.user!.role as Role },
+        source: { route: "/trips/:id/merge", method: "POST" },
+      });
+      await syncTripExecutionToLoadMirrors({
+        orgId: req.user!.orgId,
+        tripId: sourceTrip.id,
+        tx,
+        actor: { userId: req.user!.id, role: req.user!.role as Role },
+        source: { route: "/trips/:id/merge", method: "POST" },
+      });
+
+      const [updatedTarget, updatedSource] = await Promise.all([
+        tx.trip.findFirst({ where: { id: targetTrip.id, orgId: req.user!.orgId }, include: TRIP_INCLUDE }),
+        tx.trip.findFirst({ where: { id: sourceTrip.id, orgId: req.user!.orgId }, include: TRIP_INCLUDE }),
+      ]);
+      if (!updatedTarget || !updatedSource) {
+        throw new Error("Unable to load merged trips");
+      }
+      return { updatedTarget, updatedSource };
+    });
+
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: targetTrip.id,
+      previous: targetTripPrevious,
+      next: {
+        status: result.updatedTarget.status,
+        driverId: result.updatedTarget.driverId,
+        truckId: result.updatedTarget.truckId,
+        trailerId: result.updatedTarget.trailerId,
+      },
+    });
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: sourceTrip.id,
+      previous: sourceTripPrevious,
+      next: {
+        status: result.updatedSource.status,
+        driverId: result.updatedSource.driverId,
+        truckId: result.updatedSource.truckId,
+        trailerId: result.updatedSource.trailerId,
+      },
+    });
+
+    const movedLoadIds = movingLoads.map((entry) => entry.loadId);
+    const movedLoadNumbers = movingLoads.map((entry) => entry.load.loadNumber);
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_MERGED",
+      entity: "Trip",
+      entityId: targetTrip.id,
+      summary: `Merged ${movedLoadNumbers.length} loads from ${sourceTrip.tripNumber} into ${targetTrip.tripNumber}`,
+      meta: {
+        sourceTripId: sourceTrip.id,
+        sourceTripNumber: sourceTrip.tripNumber,
+        targetTripId: targetTrip.id,
+        targetTripNumber: targetTrip.tripNumber,
+        movedLoadIds,
+        movedLoadNumbers,
+        lineage: {
+          operation: "MERGE",
+          fromTripId: sourceTrip.id,
+          toTripId: targetTrip.id,
+        },
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "TRIP_MERGED",
+      entity: "Trip",
+      entityId: sourceTrip.id,
+      summary: `Source trip ${sourceTrip.tripNumber} merged into ${targetTrip.tripNumber}`,
+      meta: {
+        sourceTripId: sourceTrip.id,
+        sourceTripNumber: sourceTrip.tripNumber,
+        targetTripId: targetTrip.id,
+        targetTripNumber: targetTrip.tripNumber,
+        movedLoadIds,
+        movedLoadNumbers,
+      },
+    });
+    for (const entry of movingLoads) {
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "TRIP_MERGED",
+        entity: "Load",
+        entityId: entry.loadId,
+        summary: `Load ${entry.load.loadNumber} merged from ${sourceTrip.tripNumber} to ${targetTrip.tripNumber}`,
+        meta: {
+          loadId: entry.loadId,
+          loadNumber: entry.load.loadNumber,
+          sourceTripId: sourceTrip.id,
+          sourceTripNumber: sourceTrip.tripNumber,
+          targetTripId: targetTrip.id,
+          targetTripNumber: targetTrip.tripNumber,
+          lineage: {
+            operation: "MERGE",
+            fromTripId: sourceTrip.id,
+            toTripId: targetTrip.id,
+          },
+        },
+      });
+      await enqueueShipmentLifecycleWebhook({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        role: req.user!.role,
+        eventId: `shipment_merged:${entry.loadId}:${sourceTrip.id}:${targetTrip.id}`,
+        eventType: ShipmentWebhookEventType.SHIPMENT_MERGED,
+        loadId: entry.loadId,
+        tripId: targetTrip.id,
+        loadNumber: entry.load.loadNumber,
+        tripNumber: targetTrip.tripNumber,
+        movementMode: targetTrip.movementMode,
+        metadata: {
+          sourceTripId: sourceTrip.id,
+          sourceTripNumber: sourceTrip.tripNumber,
+          targetTripId: targetTrip.id,
+          targetTripNumber: targetTrip.tripNumber,
+        },
+      });
+    }
+
+    res.json({
+      trip: result.updatedTarget,
+      sourceTrip: result.updatedSource,
+      movedLoadNumbers,
+    });
+  }
+);
+
+app.post(
   "/trips/:id/assign",
   requireAuth,
   requireCsrf,
   requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
   async (req, res) => {
+    setLegacyTripAdapterHeaders(res, "trips.assign->shipments.execution");
     const schema = z.object({
       driverId: z.string().optional().nullable(),
       truckId: z.string().optional().nullable(),
@@ -9023,6 +11952,20 @@ app.post(
         status: updated.status,
       },
     });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SHIPMENT_LEGACY_ADAPTER_USED",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: "Legacy /trips/:id/assign route executed as shipment execution adapter",
+      meta: {
+        route: "/trips/:id/assign",
+        mappedCommandRoute: "/shipments/:id/execution",
+        tripId: trip.id,
+        tripNumber: updated.tripNumber,
+      },
+    });
     res.json({ trip: updated });
   }
 );
@@ -9033,6 +11976,7 @@ app.post(
   requireCsrf,
   requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
   async (req, res) => {
+    setLegacyTripAdapterHeaders(res, "trips.status->shipments.execution");
     const schema = z.object({ status: z.nativeEnum(TripStatus) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -9139,7 +12083,354 @@ app.post(
       entityId: trip.id,
       summary: `Set trip ${updated.tripNumber} to ${updated.status}`,
     });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SHIPMENT_LEGACY_ADAPTER_USED",
+      entity: "Trip",
+      entityId: trip.id,
+      summary: "Legacy /trips/:id/status route executed as shipment execution adapter",
+      meta: {
+        route: "/trips/:id/status",
+        mappedCommandRoute: "/shipments/:id/execution",
+        tripId: trip.id,
+        tripNumber: updated.tripNumber,
+      },
+    });
     res.json({ trip: updated });
+  }
+);
+
+app.patch(
+  "/shipments/:id/execution",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER"),
+  async (req, res) => {
+    const commercialKeys = [
+      "customerId",
+      "customerName",
+      "customerRef",
+      "bolNumber",
+      "loadType",
+      "movementMode",
+      "operatingEntityId",
+      "shipperReferenceNumber",
+      "consigneeReferenceNumber",
+      "palletCount",
+      "weightLbs",
+      "rate",
+      "miles",
+    ];
+    const attemptedCommercialFields = commercialKeys.filter((field) => Object.prototype.hasOwnProperty.call(req.body ?? {}, field));
+    if (attemptedCommercialFields.length) {
+      res.status(400).json({
+        error: `Execution command does not accept commercial fields: ${attemptedCommercialFields.join(
+          ", "
+        )}. Use PATCH /shipments/:id/commercial.`,
+      });
+      return;
+    }
+    const schema = z
+      .object({
+        driverId: z.string().optional().nullable(),
+        truckId: z.string().optional().nullable(),
+        trailerId: z.string().optional().nullable(),
+        status: z.nativeEnum(TripStatus).optional(),
+        plannedDepartureAt: z.string().optional().nullable(),
+        plannedArrivalAt: z.string().optional().nullable(),
+        reasonCode: z.string().trim().min(2).max(64),
+        reasonNote: z.string().trim().max(500).optional(),
+      })
+      .strict();
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const load = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+      include: {
+        tripLoads: {
+          take: 1,
+          include: {
+            trip: {
+              include: { loads: { select: { loadId: true } } },
+            },
+          },
+        },
+      },
+    });
+    if (!load) {
+      res.status(404).json({ error: "Shipment not found" });
+      return;
+    }
+    if (!isLtlMovementMode(load.movementMode)) {
+      sendShipmentLtlGuard(res);
+      return;
+    }
+    const trip = load.tripLoads[0]?.trip ?? null;
+    if (!trip) {
+      res.status(400).json({
+        error: `Load ${load.loadNumber} must be added to a trip before execution updates.`,
+      });
+      return;
+    }
+
+    const hasDriver = Object.prototype.hasOwnProperty.call(parsed.data, "driverId");
+    const hasTruck = Object.prototype.hasOwnProperty.call(parsed.data, "truckId");
+    const hasTrailer = Object.prototype.hasOwnProperty.call(parsed.data, "trailerId");
+    const hasStatus = Object.prototype.hasOwnProperty.call(parsed.data, "status");
+    const hasPlannedDeparture = Object.prototype.hasOwnProperty.call(parsed.data, "plannedDepartureAt");
+    const hasPlannedArrival = Object.prototype.hasOwnProperty.call(parsed.data, "plannedArrivalAt");
+    if (!hasDriver && !hasTruck && !hasTrailer && !hasStatus && !hasPlannedDeparture && !hasPlannedArrival) {
+      res.status(400).json({ error: "No execution fields provided" });
+      return;
+    }
+    const commandName: ShipmentCommandName =
+      hasDriver || hasTruck || hasTrailer ? "shipment.assignResources" : "shipment.transitionExecution";
+    const commandHash = buildShipmentCommandHash({
+      shipmentId: req.params.id,
+      command: commandName,
+      payload: parsed.data,
+    });
+    const idempotencyKey = resolveShipmentCommandIdempotencyKey(req, {
+      command: commandName,
+      scope: load.id,
+      commandHash,
+    });
+    const priorCommand = await findShipmentCommandRecord(req.user!.orgId, idempotencyKey);
+    if (priorCommand) {
+      if (priorCommand.command !== commandName || priorCommand.commandHash !== commandHash) {
+        res.status(409).json({ error: "Idempotency key collision for a different shipment command payload." });
+        return;
+      }
+      if (priorCommand.loadId && priorCommand.loadId !== load.id) {
+        res.status(409).json({ error: "Idempotency key already used for a different shipment." });
+        return;
+      }
+      const replay = await fetchShipmentEnvelope(req.user!.orgId, load.id);
+      if (replay) {
+        res.setHeader("X-Idempotent-Replay", "true");
+        res.json({ ...replay, idempotencyKey, idempotentReplay: true });
+        return;
+      }
+    }
+
+    const [driver, truck, trailer] = await Promise.all([
+      hasDriver && parsed.data.driverId
+        ? prisma.driver.findFirst({ where: { id: parsed.data.driverId, orgId: req.user!.orgId }, select: { id: true } })
+        : Promise.resolve(null),
+      hasTruck && parsed.data.truckId
+        ? prisma.truck.findFirst({ where: { id: parsed.data.truckId, orgId: req.user!.orgId }, select: { id: true } })
+        : Promise.resolve(null),
+      hasTrailer && parsed.data.trailerId
+        ? prisma.trailer.findFirst({
+            where: { id: parsed.data.trailerId, orgId: req.user!.orgId },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+    if (hasDriver && parsed.data.driverId && !driver) {
+      res.status(400).json({ error: "Driver not found" });
+      return;
+    }
+    if (hasTruck && parsed.data.truckId && !truck) {
+      res.status(400).json({ error: "Truck not found" });
+      return;
+    }
+    if (hasTrailer && parsed.data.trailerId && !trailer) {
+      res.status(400).json({ error: "Trailer not found" });
+      return;
+    }
+
+    const status = parsed.data.status ?? trip.status;
+    const nextDriverId = hasDriver ? parsed.data.driverId ?? null : trip.driverId;
+    const nextTruckId = hasTruck ? parsed.data.truckId ?? null : trip.truckId;
+    const nextTrailerId = hasTrailer ? parsed.data.trailerId ?? null : trip.trailerId;
+    if (TRIP_DISPATCHED_STATUSES.includes(status) && !nextDriverId) {
+      res.status(400).json({ error: "Trip requires a primary driver before dispatch status can advance" });
+      return;
+    }
+
+    const tripLoadIds = trip.loads.map((entry) => entry.loadId);
+    const tripLoadBefore = tripLoadIds.length
+      ? await prisma.load.findMany({
+          where: { orgId: req.user!.orgId, id: { in: tripLoadIds } },
+          select: { id: true, status: true, billingStatus: true, podVerifiedAt: true },
+        })
+      : [];
+    const tripLoadBeforeMap = new Map(tripLoadBefore.map((entry) => [entry.id, entry]));
+
+    const now = new Date();
+    let updated: Prisma.TripGetPayload<{ include: typeof TRIP_INCLUDE }>;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const nextTrip = await tx.trip.update({
+          where: { id: trip.id },
+          data: {
+            driverId: hasDriver ? nextDriverId : undefined,
+            truckId: hasTruck ? nextTruckId : undefined,
+            trailerId: hasTrailer ? nextTrailerId : undefined,
+            status,
+            plannedDepartureAt:
+              parsed.data.plannedDepartureAt === undefined
+                ? undefined
+                : parsed.data.plannedDepartureAt
+                  ? new Date(parsed.data.plannedDepartureAt)
+                  : null,
+            plannedArrivalAt:
+              parsed.data.plannedArrivalAt === undefined
+                ? undefined
+                : parsed.data.plannedArrivalAt
+                  ? new Date(parsed.data.plannedArrivalAt)
+                  : null,
+            departedAt:
+              status === TripStatus.IN_TRANSIT
+                ? trip.departedAt ?? now
+                : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED
+                  ? null
+                  : undefined,
+            arrivedAt:
+              status === TripStatus.ARRIVED || status === TripStatus.COMPLETE
+                ? trip.arrivedAt ?? now
+                : status === TripStatus.PLANNED || status === TripStatus.ASSIGNED || status === TripStatus.IN_TRANSIT
+                  ? null
+                  : undefined,
+          },
+          include: TRIP_INCLUDE,
+        });
+
+        await syncTripExecutionToLoadMirrors({
+          orgId: req.user!.orgId,
+          tripId: trip.id,
+          tx,
+          actor: { userId: req.user!.id, role: req.user!.role as Role },
+          source: { route: "/shipments/:id/execution", method: "PATCH" },
+        });
+        return nextTrip;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Shipment execution update failed";
+      const code = (error as { code?: string } | null)?.code;
+      if (code === "STATE_KERNEL_ENFORCE_BLOCKED") {
+        res.status(409).json({ code: "STATE_KERNEL_ENFORCE_BLOCKED", error: message });
+        return;
+      }
+      console.error("[shipment-execution] mirror sync failed", error);
+      res.status(500).json({ error: "Shipment execution update failed" });
+      return;
+    }
+
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: trip.id,
+      previous: { status: trip.status, driverId: trip.driverId, truckId: trip.truckId, trailerId: trip.trailerId },
+      next: {
+        status: updated.status,
+        driverId: updated.driverId,
+        truckId: updated.truckId,
+        trailerId: updated.trailerId,
+      },
+    });
+
+    for (const loadId of tripLoadIds) {
+      const before = tripLoadBeforeMap.get(loadId);
+      if (!before) continue;
+      await maybeLogLoadKernelShadow({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        userRole: req.user!.role,
+        loadId,
+        route: "/shipments/:id/execution",
+        method: "PATCH",
+        before: {
+          status: before.status,
+          billingStatus: before.billingStatus,
+          podVerifiedAt: before.podVerifiedAt,
+        },
+      });
+    }
+
+    const reasonCode = parsed.data.reasonCode.trim();
+    const reasonNote = parsed.data.reasonNote?.trim() || null;
+    const executionDiff = buildFieldDiff({
+      before: trip as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+      fields: SHIPMENT_EXECUTION_AUDIT_FIELDS,
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SHIPMENT_EXECUTION_UPDATED",
+      entity: "Load",
+      entityId: load.id,
+      summary: `Updated shipment execution for ${load.loadNumber} via trip ${updated.tripNumber}`,
+      before: executionDiff.beforeDiff as unknown as Prisma.InputJsonValue,
+      after: executionDiff.afterDiff as unknown as Prisma.InputJsonValue,
+      meta: {
+        reasonCode,
+        reasonNote,
+        route: "/shipments/:id/execution",
+        executionAuthority: "TRIP",
+        commercialAuthority: "LOAD",
+        tripId: updated.id,
+        tripNumber: updated.tripNumber,
+        loadMovementMode: load.movementMode ?? null,
+        status: updated.status,
+        driverId: updated.driverId,
+        truckId: updated.truckId,
+        trailerId: updated.trailerId,
+        changedFields: executionDiff.changedFields,
+        changes: executionDiff.changes,
+      },
+    });
+    await enqueueShipmentLifecycleWebhook({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      role: req.user!.role,
+      eventId: `shipment_execution:${load.id}:${idempotencyKey}`,
+      eventType: ShipmentWebhookEventType.SHIPMENT_EXECUTION_UPDATED,
+      loadId: load.id,
+      tripId: updated.id,
+      loadNumber: load.loadNumber,
+      tripNumber: updated.tripNumber,
+      movementMode: load.movementMode,
+      changes: executionDiff.changes as unknown as Prisma.JsonValue,
+      metadata: {
+        reasonCode,
+        reasonNote,
+        command: commandName,
+      },
+    });
+    await recordShipmentCommand({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      idempotencyKey,
+      command: commandName,
+      commandHash,
+      route: "/shipments/:id/execution",
+      loadId: load.id,
+      tripId: updated.id,
+    });
+    await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      source: "/shipments/:id/execution",
+      trigger: updated.status,
+      dedupeSuffix: idempotencyKey,
+    });
+
+    res.json({
+      shipment: {
+        id: load.id,
+        loadId: load.id,
+        tripId: updated.id,
+        trip: updated,
+      },
+      idempotencyKey,
+    });
   }
 );
 
@@ -9430,6 +12721,631 @@ app.delete("/manifests/:id/items/:loadId", requireAuth, requireCsrf, requireRole
   });
   res.json({ manifest });
 });
+
+app.post(
+  "/shipments",
+  requireAuth,
+  requireOperationalOrg,
+  requireCsrf,
+  requirePermission(Permission.LOAD_CREATE),
+  async (req, res) => {
+    const schema = z
+      .object({
+        loadNumber: z.string().trim().min(2).optional(),
+        tripNumber: z.string().trim().min(2).optional(),
+        loadType: z.enum(["COMPANY", "BROKERED", "VAN", "REEFER", "FLATBED", "OTHER"]).optional(),
+        movementMode: z.enum(["FTL", "LTL", "POOL_DISTRIBUTION"]).optional(),
+        businessType: z.enum(["COMPANY", "BROKER"]).optional(),
+        operatingEntityId: z.string().optional(),
+        customerId: z.string().optional(),
+        customerName: z.string().optional(),
+        customerRef: z.string().optional(),
+        bolNumber: z.string().optional(),
+        shipperReferenceNumber: z.string().max(64).optional(),
+        consigneeReferenceNumber: z.string().max(64).optional(),
+        palletCount: z.union([z.number(), z.string()]).optional(),
+        weightLbs: z.union([z.number(), z.string()]).optional(),
+        rate: z.union([z.number(), z.string()]).optional(),
+        miles: z.union([z.number(), z.string()]).optional(),
+        stops: z
+          .array(
+            z.object({
+              type: z.enum(["PICKUP", "YARD", "DELIVERY"]),
+              name: z.string(),
+              address: z.string(),
+              city: z.string(),
+              state: z.string(),
+              zip: z.string(),
+              notes: z.string().optional(),
+              appointmentStart: z.string().optional(),
+              appointmentEnd: z.string().optional(),
+              sequence: z.number(),
+            })
+          )
+          .min(2),
+      })
+      .strict();
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const commandName: ShipmentCommandName = "shipment.create";
+    const commandHash = buildShipmentCommandHash(parsed.data);
+    const idempotencyKey = resolveShipmentCommandIdempotencyKey(req, {
+      command: commandName,
+      scope: req.user!.orgId,
+      commandHash,
+    });
+    const priorCommand = await findShipmentCommandRecord(req.user!.orgId, idempotencyKey);
+    if (priorCommand) {
+      if (priorCommand.command !== commandName || priorCommand.commandHash !== commandHash) {
+        res.status(409).json({ error: "Idempotency key collision for a different shipment command payload." });
+        return;
+      }
+      if (priorCommand.loadId) {
+        const replay = await fetchShipmentEnvelope(req.user!.orgId, priorCommand.loadId);
+        if (replay) {
+          res.setHeader("X-Idempotent-Replay", "true");
+          res.json({ ...replay, idempotencyKey, idempotentReplay: true });
+          return;
+        }
+      }
+    }
+    if (!parsed.data.customerId && !parsed.data.customerName?.trim()) {
+      res.status(400).json({ error: "Customer name required" });
+      return;
+    }
+    const rateDecimal = toDecimal(parsed.data.rate);
+    if (!rateDecimal || !Number.isFinite(Number(rateDecimal)) || Number(rateDecimal) <= 0) {
+      res.status(400).json({ error: "Rate is required and must be greater than 0" });
+      return;
+    }
+    const milesValue =
+      typeof parsed.data.miles === "string" ? Number(parsed.data.miles) : (parsed.data.miles ?? Number.NaN);
+    if (!Number.isFinite(milesValue) || milesValue <= 0) {
+      res.status(400).json({ error: "Miles is required and must be greater than 0" });
+      return;
+    }
+
+    const loadType = mapLoadTypeForInput(parsed.data.loadType ?? null);
+    const movementMode =
+      parsed.data.movementMode !== undefined ? mapMovementModeForInput(parsed.data.movementMode ?? null) : MovementMode.LTL;
+    if (!isLtlMovementMode(movementMode)) {
+      sendShipmentLtlGuard(res);
+      return;
+    }
+    const settingsForMode = await prisma.orgSettings.findFirst({
+      where: { orgId: req.user!.orgId },
+      select: { operatingMode: true },
+    });
+    const businessType = parsed.data.businessType ?? (settingsForMode?.operatingMode === "BROKER" ? "BROKER" : "COMPANY");
+
+    const operatingEntity = parsed.data.operatingEntityId
+      ? await prisma.operatingEntity.findFirst({
+          where: { id: parsed.data.operatingEntityId, orgId: req.user!.orgId },
+        })
+      : await ensureDefaultOperatingEntity(req.user!.orgId);
+    if (!operatingEntity) {
+      res.status(400).json({ error: "Operating entity not found" });
+      return;
+    }
+
+    let customerId = parsed.data.customerId ?? null;
+    let customerName = parsed.data.customerName?.trim() ?? null;
+    if (customerId) {
+      const customer = await prisma.customer.findFirst({
+        where: { id: customerId, orgId: req.user!.orgId },
+      });
+      if (!customer) {
+        res.status(400).json({ error: "Customer not found" });
+        return;
+      }
+      if (!customerName) customerName = customer.name;
+    }
+    if (!customerId && customerName) {
+      const existing = await prisma.customer.findFirst({
+        where: { orgId: req.user!.orgId, name: customerName },
+      });
+      const created =
+        existing ??
+        (await prisma.customer.create({
+          data: { orgId: req.user!.orgId, name: customerName },
+        }));
+      customerId = created.id;
+    }
+
+    const manualLoadNumber = parsed.data.loadNumber?.trim() || null;
+    const manualTripNumber = parsed.data.tripNumber?.trim() || null;
+    if (manualLoadNumber) {
+      const existing = await prisma.load.findFirst({
+        where: { orgId: req.user!.orgId, loadNumber: manualLoadNumber },
+        select: { id: true },
+      });
+      if (existing) {
+        const sequence = await getOrgSequence(req.user!.orgId);
+        const suggestedLoadNumber = `${sequence.loadPrefix}${sequence.nextLoadNumber}`;
+        res.status(409).json({
+          error: `Load number already exists. Next available is ${suggestedLoadNumber}.`,
+          suggestedLoadNumber,
+        });
+        return;
+      }
+    }
+    if (manualTripNumber) {
+      const existingTrip = await prisma.trip.findFirst({
+        where: { orgId: req.user!.orgId, tripNumber: manualTripNumber },
+        select: { id: true },
+      });
+      if (existingTrip) {
+        const sequence = await getOrgSequence(req.user!.orgId);
+        const suggestedTripNumber = `${sequence.tripPrefix}${sequence.nextTripNumber}`;
+        res.status(409).json({
+          error: `Trip number already exists. Next available is ${suggestedTripNumber}.`,
+          suggestedTripNumber,
+        });
+        return;
+      }
+    }
+
+    let assignedLoadNumber = manualLoadNumber;
+    let assignedTripNumber = manualTripNumber;
+    if (!assignedLoadNumber || !assignedTripNumber) {
+      const allocated = await allocateLoadAndTripNumbers(req.user!.orgId);
+      assignedLoadNumber = assignedLoadNumber ?? allocated.loadNumber;
+      assignedTripNumber = assignedTripNumber ?? allocated.tripNumber;
+    }
+
+    let shipperReferenceNumber: string | null = null;
+    let consigneeReferenceNumber: string | null = null;
+    let palletCount: number | null = null;
+    let weightLbs: number | null = null;
+    try {
+      shipperReferenceNumber = normalizeReference(parsed.data.shipperReferenceNumber ?? null);
+      consigneeReferenceNumber = normalizeReference(parsed.data.consigneeReferenceNumber ?? null);
+      palletCount = parseOptionalNonNegativeInt(parsed.data.palletCount, "Pallet count");
+      weightLbs = parseOptionalNonNegativeInt(parsed.data.weightLbs, "Weight (lbs)");
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+
+    const pickupStop = parsed.data.stops.find((stop) => stop.type === "PICKUP");
+    const deliveryStop = parsed.data.stops
+      .slice()
+      .reverse()
+      .find((stop) => stop.type === "DELIVERY");
+    if (!pickupStop || !deliveryStop) {
+      res.status(400).json({ error: "Pickup and delivery stops are required" });
+      return;
+    }
+    const shipment = await prisma.$transaction(async (tx) => {
+      const load = await tx.load.create({
+        data: {
+          orgId: req.user!.orgId,
+          loadNumber: assignedLoadNumber!,
+          tripNumber: assignedTripNumber,
+          status: LoadStatus.PLANNED,
+          loadType,
+          movementMode,
+          businessType,
+          operatingEntityId: operatingEntity.id,
+          customerId,
+          customerName,
+          customerRef: parsed.data.customerRef ?? null,
+          bolNumber: parsed.data.bolNumber ?? null,
+          shipperReferenceNumber,
+          consigneeReferenceNumber,
+          palletCount,
+          weightLbs,
+          rate: rateDecimal,
+          miles: milesValue,
+          createdById: req.user!.id,
+          stops: {
+            create: parsed.data.stops.map((stop) => ({
+              orgId: req.user!.orgId,
+              type: stop.type,
+              name: stop.name,
+              address: stop.address,
+              city: stop.city,
+              state: stop.state,
+              zip: stop.zip,
+              notes: stop.notes ?? null,
+              appointmentStart: stop.appointmentStart ? new Date(stop.appointmentStart) : null,
+              appointmentEnd: stop.appointmentEnd ? new Date(stop.appointmentEnd) : null,
+              sequence: stop.sequence,
+            })),
+          },
+        },
+      });
+
+      const trip = await tx.trip.create({
+        data: {
+          orgId: req.user!.orgId,
+          tripNumber: assignedTripNumber!,
+          status: TripStatus.PLANNED,
+          movementMode,
+          origin: pickupStop.city ? `${pickupStop.city}, ${pickupStop.state}` : null,
+          destination: deliveryStop.city ? `${deliveryStop.city}, ${deliveryStop.state}` : null,
+          plannedDepartureAt: pickupStop.appointmentStart ? new Date(pickupStop.appointmentStart) : null,
+          plannedArrivalAt: deliveryStop.appointmentEnd ? new Date(deliveryStop.appointmentEnd) : null,
+          loads: {
+            create: [
+              {
+                orgId: req.user!.orgId,
+                loadId: load.id,
+                sequence: 1,
+              },
+            ],
+          },
+        },
+        include: TRIP_INCLUDE,
+      });
+
+      await syncTripExecutionToLoadMirrors({
+        orgId: req.user!.orgId,
+        tripId: trip.id,
+        tx,
+        actor: { userId: req.user!.id, role: req.user!.role as Role },
+        source: { route: "/shipments", method: "POST" },
+      });
+
+      await createEvent({
+        orgId: req.user!.orgId,
+        loadId: load.id,
+        userId: req.user!.id,
+        type: EventType.LOAD_CREATED,
+        message: `Shipment ${load.loadNumber} created`,
+        meta: { tripId: trip.id, tripNumber: trip.tripNumber },
+      });
+
+      return { load, trip };
+    });
+
+    await syncTripAssetStatuses({
+      orgId: req.user!.orgId,
+      tripId: shipment.trip.id,
+      previous: { status: TripStatus.CANCELLED, driverId: null, truckId: null, trailerId: null },
+      next: {
+        status: shipment.trip.status,
+        driverId: shipment.trip.driverId,
+        truckId: shipment.trip.truckId,
+        trailerId: shipment.trip.trailerId,
+      },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SHIPMENT_CREATED",
+      entity: "Load",
+      entityId: shipment.load.id,
+      summary: `Created shipment ${shipment.load.loadNumber} with trip ${shipment.trip.tripNumber}`,
+      meta: {
+        loadId: shipment.load.id,
+        loadNumber: shipment.load.loadNumber,
+        tripId: shipment.trip.id,
+        tripNumber: shipment.trip.tripNumber,
+        route: "/shipments",
+        executionAuthority: "TRIP",
+        commercialAuthority: "LOAD",
+        loadMovementMode: shipment.load.movementMode ?? null,
+      },
+    });
+    await enqueueShipmentLifecycleWebhook({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      role: req.user!.role,
+      eventId: `shipment_created:${shipment.load.id}:${idempotencyKey}`,
+      eventType: ShipmentWebhookEventType.SHIPMENT_CREATED,
+      loadId: shipment.load.id,
+      tripId: shipment.trip.id,
+      loadNumber: shipment.load.loadNumber,
+      tripNumber: shipment.trip.tripNumber,
+      movementMode: shipment.load.movementMode,
+      metadata: {
+        route: "/shipments",
+      },
+    });
+    await recordShipmentCommand({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      idempotencyKey,
+      command: commandName,
+      commandHash,
+      route: "/shipments",
+      loadId: shipment.load.id,
+      tripId: shipment.trip.id,
+    });
+    await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+      orgId: req.user!.orgId,
+      loadId: shipment.load.id,
+      source: "shipment.create",
+      trigger: "shipment.create",
+      dedupeSuffix: idempotencyKey,
+    });
+
+    res.json({
+      shipment: {
+        id: shipment.load.id,
+        loadId: shipment.load.id,
+        tripId: shipment.trip.id,
+        load: shipment.load,
+        trip: shipment.trip,
+      },
+      idempotencyKey,
+    });
+  }
+);
+
+app.patch(
+  "/shipments/:id/commercial",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_EDIT),
+  async (req, res) => {
+    const executionKeys = ["driverId", "truckId", "trailerId", "status", "plannedDepartureAt", "plannedArrivalAt"];
+    const attemptedExecutionFields = executionKeys.filter((field) => Object.prototype.hasOwnProperty.call(req.body ?? {}, field));
+    if (attemptedExecutionFields.length) {
+      res.status(400).json({
+        error: `Commercial command does not accept execution fields: ${attemptedExecutionFields.join(
+          ", "
+        )}. Use PATCH /shipments/:id/execution.`,
+      });
+      return;
+    }
+    const schema = z
+      .object({
+        customerId: z.string().optional(),
+        customerName: z.string().min(2).optional(),
+        customerRef: z.string().optional(),
+        bolNumber: z.string().optional(),
+        loadType: z.enum(["COMPANY", "BROKERED", "VAN", "REEFER", "FLATBED", "OTHER"]).optional(),
+        movementMode: z.enum(["FTL", "LTL", "POOL_DISTRIBUTION"]).optional(),
+        operatingEntityId: z.string().optional(),
+        shipperReferenceNumber: z.string().max(64).optional(),
+        consigneeReferenceNumber: z.string().max(64).optional(),
+        palletCount: z.union([z.number(), z.string()]).optional(),
+        weightLbs: z.union([z.number(), z.string()]).optional(),
+        rate: z.union([z.number(), z.string()]).optional(),
+        miles: z.number().optional(),
+        reasonCode: z.string().trim().min(2).max(64),
+        reasonNote: z.string().trim().max(500).optional(),
+      })
+      .strict();
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const commandName: ShipmentCommandName = "shipment.updateCommercial";
+    const commandHash = buildShipmentCommandHash({
+      shipmentId: req.params.id,
+      command: commandName,
+      payload: parsed.data,
+    });
+
+    const existing = await prisma.load.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+      include: { customer: true, tripLoads: { take: 1, include: { trip: true } } },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Shipment not found" });
+      return;
+    }
+    if (!isLtlMovementMode(existing.movementMode)) {
+      sendShipmentLtlGuard(res);
+      return;
+    }
+    if (parsed.data.movementMode !== undefined && !isLtlMovementMode(mapMovementModeForInput(parsed.data.movementMode ?? null))) {
+      sendShipmentLtlGuard(res);
+      return;
+    }
+    if (parsed.data.rate !== undefined && !hasPermission(req.user, Permission.RATE_EDIT)) {
+      res.status(403).json({ error: "Missing permission to edit rate" });
+      return;
+    }
+    if (existing.lockedAt && req.user!.role !== "ADMIN") {
+      res.status(403).json({ error: "Load is locked" });
+      return;
+    }
+    if (SHIPMENT_COMMERCIAL_LOCKED_STATUSES.has(existing.status)) {
+      res.status(409).json({
+        error: `Commercial updates are blocked once load is ${existing.status}. Use finance corrective workflows.`,
+      });
+      return;
+    }
+    const idempotencyKey = resolveShipmentCommandIdempotencyKey(req, {
+      command: commandName,
+      scope: existing.id,
+      commandHash,
+    });
+    const priorCommand = await findShipmentCommandRecord(req.user!.orgId, idempotencyKey);
+    if (priorCommand) {
+      if (priorCommand.command !== commandName || priorCommand.commandHash !== commandHash) {
+        res.status(409).json({ error: "Idempotency key collision for a different shipment command payload." });
+        return;
+      }
+      if (priorCommand.loadId && priorCommand.loadId !== existing.id) {
+        res.status(409).json({ error: "Idempotency key already used for a different shipment." });
+        return;
+      }
+      const replay = await fetchShipmentEnvelope(req.user!.orgId, existing.id);
+      if (replay) {
+        res.setHeader("X-Idempotent-Replay", "true");
+        res.json({ ...replay, idempotencyKey, idempotentReplay: true });
+        return;
+      }
+    }
+
+    let customerId = parsed.data.customerId ?? null;
+    let customerName = parsed.data.customerName ?? null;
+    if (parsed.data.customerId) {
+      const customer = await prisma.customer.findFirst({
+        where: { id: parsed.data.customerId, orgId: req.user!.orgId },
+      });
+      if (!customer) {
+        res.status(400).json({ error: "Customer not found" });
+        return;
+      }
+      customerName = customer.name;
+    }
+    if (!customerId && customerName) {
+      const existingCustomer = await prisma.customer.findFirst({
+        where: { orgId: req.user!.orgId, name: customerName },
+      });
+      const created =
+        existingCustomer ??
+        (await prisma.customer.create({
+          data: { orgId: req.user!.orgId, name: customerName },
+        }));
+      customerId = created.id;
+    }
+    if (!customerId && !customerName) {
+      customerId = existing.customerId ?? null;
+      customerName = existing.customerName ?? null;
+    }
+
+    let operatingEntityId: string | undefined = undefined;
+    if (parsed.data.operatingEntityId !== undefined) {
+      const entity = await prisma.operatingEntity.findFirst({
+        where: { id: parsed.data.operatingEntityId, orgId: req.user!.orgId },
+      });
+      if (!entity) {
+        res.status(400).json({ error: "Operating entity not found" });
+        return;
+      }
+      operatingEntityId = entity.id;
+    }
+
+    let shipperReferenceNumber: string | null | undefined = undefined;
+    let consigneeReferenceNumber: string | null | undefined = undefined;
+    let palletCount: number | null | undefined = undefined;
+    let weightLbs: number | null | undefined = undefined;
+    try {
+      if (parsed.data.shipperReferenceNumber !== undefined) {
+        shipperReferenceNumber = normalizeReference(parsed.data.shipperReferenceNumber ?? null);
+      }
+      if (parsed.data.consigneeReferenceNumber !== undefined) {
+        consigneeReferenceNumber = normalizeReference(parsed.data.consigneeReferenceNumber ?? null);
+      }
+      if (parsed.data.palletCount !== undefined) {
+        palletCount = parseOptionalNonNegativeInt(parsed.data.palletCount, "Pallet count");
+      }
+      if (parsed.data.weightLbs !== undefined) {
+        weightLbs = parseOptionalNonNegativeInt(parsed.data.weightLbs, "Weight (lbs)");
+      }
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+
+    const updated = await prisma.load.update({
+      where: { id: existing.id },
+      data: {
+        customerId,
+        customerName,
+        customerRef: parsed.data.customerRef ?? existing.customerRef ?? null,
+        bolNumber: parsed.data.bolNumber ?? existing.bolNumber ?? null,
+        loadType: parsed.data.loadType ?? existing.loadType,
+        movementMode: parsed.data.movementMode ?? existing.movementMode,
+        operatingEntityId: operatingEntityId ?? existing.operatingEntityId,
+        shipperReferenceNumber:
+          shipperReferenceNumber !== undefined ? shipperReferenceNumber : existing.shipperReferenceNumber ?? null,
+        consigneeReferenceNumber:
+          consigneeReferenceNumber !== undefined
+            ? consigneeReferenceNumber
+            : existing.consigneeReferenceNumber ?? null,
+        palletCount: palletCount !== undefined ? palletCount : existing.palletCount ?? null,
+        weightLbs: weightLbs !== undefined ? weightLbs : existing.weightLbs ?? null,
+        rate: parsed.data.rate !== undefined ? toDecimal(parsed.data.rate) : undefined,
+        miles: parsed.data.miles,
+      },
+    });
+
+    const reasonCode = parsed.data.reasonCode.trim();
+    const reasonNote = parsed.data.reasonNote?.trim() || null;
+    const diff = await logLoadFieldAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      before: existing,
+      after: updated,
+      reasonCode,
+      reasonNote,
+      actorRole: req.user!.role,
+      route: "/shipments/:id/commercial",
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SHIPMENT_COMMERCIAL_UPDATED",
+      entity: "Load",
+      entityId: updated.id,
+      summary: `Updated commercial fields for shipment ${updated.loadNumber}`,
+      before: diff.beforeDiff as unknown as Prisma.InputJsonValue,
+      after: diff.afterDiff as unknown as Prisma.InputJsonValue,
+      meta: {
+        reasonCode,
+        reasonNote,
+        route: "/shipments/:id/commercial",
+        executionAuthority: "TRIP",
+        commercialAuthority: "LOAD",
+        loadMovementMode: updated.movementMode ?? null,
+        changedFields: diff?.changedFields ?? [],
+        changes: diff?.changes ?? [],
+        tripId: existing.tripLoads[0]?.tripId ?? null,
+      },
+    });
+    await enqueueShipmentLifecycleWebhook({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      role: req.user!.role,
+      eventId: `shipment_commercial:${updated.id}:${idempotencyKey}`,
+      eventType: ShipmentWebhookEventType.SHIPMENT_COMMERCIAL_UPDATED,
+      loadId: updated.id,
+      tripId: existing.tripLoads[0]?.tripId ?? null,
+      loadNumber: updated.loadNumber,
+      tripNumber: existing.tripLoads[0]?.trip?.tripNumber ?? null,
+      movementMode: updated.movementMode,
+      changes: diff.changes as unknown as Prisma.JsonValue,
+      metadata: {
+        reasonCode,
+        reasonNote,
+        command: commandName,
+      },
+    });
+    await recordShipmentCommand({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      idempotencyKey,
+      command: commandName,
+      commandHash,
+      route: "/shipments/:id/commercial",
+      loadId: updated.id,
+      tripId: existing.tripLoads[0]?.tripId ?? null,
+    });
+    await enqueueDispatchLoadUpdatedEvent(prisma as any, {
+      orgId: req.user!.orgId,
+      loadId: updated.id,
+      source: "/shipments/:id/commercial",
+      trigger: "commercial-updated",
+      dedupeSuffix: idempotencyKey,
+    });
+
+    const trip = existing.tripLoads[0]?.trip ?? null;
+    res.json({
+      shipment: {
+        id: updated.id,
+        loadId: updated.id,
+        tripId: trip?.id ?? null,
+        load: updated,
+        trip,
+      },
+      idempotencyKey,
+    });
+  }
+);
 
 app.post("/loads", requireAuth, requireOperationalOrg, requireCsrf, requirePermission(Permission.LOAD_CREATE), async (req, res) => {
   const schema = z.object({
@@ -9785,6 +13701,8 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
         "CANCELLED",
       ])
       .optional(),
+    reasonCode: z.string().trim().min(2).max(64),
+    reasonNote: z.string().trim().max(500).optional(),
     overrideReason: z.string().optional(),
   });
   const parsed = schema.safeParse(req.body);
@@ -9818,6 +13736,9 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     res.status(404).json({ error: "Load not found" });
     return;
   }
+  const reasonCode = parsed.data.reasonCode.trim();
+  const reasonNote = parsed.data.reasonNote?.trim() || null;
+  const overrideReasonValue = parsed.data.overrideReason?.trim() || reasonNote || reasonCode;
   if (parsed.data.rate !== undefined && !hasPermission(req.user, Permission.RATE_EDIT)) {
     res.status(403).json({ error: "Missing permission to edit rate" });
     return;
@@ -9850,7 +13771,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
     res.status(403).json({ error: "Load is locked" });
     return;
   }
-  if (attemptingLockedEdit && req.user!.role === "ADMIN" && !parsed.data.overrideReason) {
+  if (attemptingLockedEdit && req.user!.role === "ADMIN" && !overrideReasonValue) {
     res.status(400).json({ error: "overrideReason required for locked loads" });
     return;
   }
@@ -9925,7 +13846,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       if (
         paidMilesVariancePct !== null &&
         paidMilesVariancePct > PAYABLE_MILES_VARIANCE_REVIEW_PCT &&
-        !parsed.data.overrideReason?.trim()
+        !overrideReasonValue
       ) {
         throw new Error(
           `Override reason required when paid miles variance exceeds ${PAYABLE_MILES_VARIANCE_REVIEW_PCT}%`
@@ -9945,6 +13866,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       customerRef: parsed.data.customerRef ?? existing.customerRef ?? null,
       bolNumber: parsed.data.bolNumber ?? existing.bolNumber ?? null,
       loadType: parsed.data.loadType ?? existing.loadType,
+      movementMode: parsed.data.movementMode ?? existing.movementMode,
       operatingEntityId: operatingEntityId ?? existing.operatingEntityId,
       shipperReferenceNumber:
         shipperReferenceNumber !== undefined ? shipperReferenceNumber : existing.shipperReferenceNumber ?? null,
@@ -9965,12 +13887,32 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       paidMilesApprovedAt: paidMiles !== undefined ? new Date() : undefined,
     },
   });
-  await logLoadFieldAudit({
+  const loadDiff = await logLoadFieldAudit({
     orgId: req.user!.orgId,
     userId: req.user!.id,
     before: existing,
     after: load,
+    reasonCode,
+    reasonNote,
+    actorRole: req.user!.role,
+    route: "/loads/:id",
   });
+  if (loadDiff?.changedFields.length) {
+    await createEvent({
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      userId: req.user!.id,
+      type: EventType.LOAD_STATUS_UPDATED,
+      message: `Load ${load.loadNumber} edited: ${loadDiff.changedFields.join(", ")}`,
+      meta: {
+        scope: "LOAD_EDIT",
+        reasonCode,
+        reasonNote,
+        changedFields: loadDiff.changedFields,
+        changes: loadDiff.changes,
+      },
+    });
+  }
   if (attemptingLockedEdit && req.user!.role === "ADMIN") {
     await createEvent({
       orgId: req.user!.orgId,
@@ -9978,7 +13920,7 @@ app.put("/loads/:id", requireAuth, requireCsrf, requirePermission(Permission.LOA
       userId: req.user!.id,
       type: EventType.DRIVER_NOTE,
       message: "Admin override on locked load",
-      meta: { overrideReason: parsed.data.overrideReason, fields: lockedFieldsChanged },
+      meta: { overrideReason: overrideReasonValue, fields: lockedFieldsChanged, reasonCode, reasonNote },
     });
   }
 
@@ -10444,7 +14386,12 @@ app.get("/dispatch/views", requireAuth, requirePermission(Permission.LOAD_ASSIGN
 
   const [personalViews, templateViews] = await Promise.all([
     prisma.dispatchView.findMany({
-      where: { orgId, scope: DispatchViewScope.PERSONAL, userId: req.user!.id },
+      where: {
+        orgId,
+        scope: DispatchViewScope.PERSONAL,
+        userId: req.user!.id,
+        name: { not: DISPATCH_TRIPS_WORKSPACE_VIEW_NAME },
+      },
       orderBy: [{ updatedAt: "desc" }],
     }),
     prisma.dispatchView.findMany({
@@ -10469,6 +14416,163 @@ app.get("/dispatch/views", requireAuth, requirePermission(Permission.LOAD_ASSIGN
     roleDefaultTemplateId: roleDefaultTemplate?.id ?? null,
     canManageTemplates,
   });
+});
+
+app.get(
+  "/dispatch/workspaces/:workspace/layout",
+  requireAuth,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const workspace = parseDispatchWorkspaceLayoutScope(req.params.workspace);
+    if (!workspace) {
+      res.status(404).json({ error: "Workspace not found" });
+      return;
+    }
+    const viewName = getDispatchWorkspaceLayoutViewName(workspace);
+    const existing = await prisma.dispatchView.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        scope: DispatchViewScope.PERSONAL,
+        userId: req.user!.id,
+        name: viewName,
+      },
+      orderBy: [{ updatedAt: "desc" }],
+    });
+    const preferences = normalizeDispatchWorkspaceLayoutConfig(workspace, existing?.configJson ?? null);
+    res.json({
+      workspace,
+      preferences,
+      updatedAt: existing?.updatedAt ?? null,
+    });
+  }
+);
+
+app.put(
+  "/dispatch/workspaces/:workspace/layout",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const workspace = parseDispatchWorkspaceLayoutScope(req.params.workspace);
+    if (!workspace) {
+      res.status(404).json({ error: "Workspace not found" });
+      return;
+    }
+    const parsed = z.object({ preferences: z.unknown() }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const preferences = normalizeDispatchWorkspaceLayoutConfig(workspace, parsed.data.preferences);
+    const viewName = getDispatchWorkspaceLayoutViewName(workspace);
+    const existing = await prisma.dispatchView.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        scope: DispatchViewScope.PERSONAL,
+        userId: req.user!.id,
+        name: viewName,
+      },
+      orderBy: [{ updatedAt: "desc" }],
+    });
+
+    const saved = existing
+      ? await prisma.dispatchView.update({
+          where: { id: existing.id },
+          data: { configJson: preferences },
+        })
+      : await prisma.dispatchView.create({
+          data: {
+            orgId: req.user!.orgId,
+            name: viewName,
+            scope: DispatchViewScope.PERSONAL,
+            userId: req.user!.id,
+            role: null,
+            isRoleDefault: false,
+            configJson: preferences,
+          },
+        });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "DISPATCH_WORKSPACE_LAYOUT_UPDATED",
+      entity: "DispatchView",
+      entityId: saved.id,
+      summary: `Updated ${workspace} workspace layout`,
+      meta: {
+        workspace,
+        columnOrderCount: Array.isArray((preferences as { columnOrder?: unknown[] }).columnOrder)
+          ? (preferences as { columnOrder: unknown[] }).columnOrder.length
+          : 0,
+      },
+    });
+
+    res.json({ workspace, preferences, updatedAt: saved.updatedAt });
+  }
+);
+
+app.get("/dispatch/trips-workspace", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const existing = await prisma.dispatchView.findFirst({
+    where: {
+      orgId: req.user!.orgId,
+      scope: DispatchViewScope.PERSONAL,
+      userId: req.user!.id,
+      name: DISPATCH_TRIPS_WORKSPACE_VIEW_NAME,
+    },
+    orderBy: [{ updatedAt: "desc" }],
+  });
+  const preferences = normalizeDispatchTripsWorkspaceConfig(existing?.configJson ?? null);
+  res.json({ preferences, updatedAt: existing?.updatedAt ?? null });
+});
+
+app.put("/dispatch/trips-workspace", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const parsed = z.object({ preferences: z.unknown() }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const preferences = normalizeDispatchTripsWorkspaceConfig(parsed.data.preferences);
+  const existing = await prisma.dispatchView.findFirst({
+    where: {
+      orgId: req.user!.orgId,
+      scope: DispatchViewScope.PERSONAL,
+      userId: req.user!.id,
+      name: DISPATCH_TRIPS_WORKSPACE_VIEW_NAME,
+    },
+    orderBy: [{ updatedAt: "desc" }],
+  });
+
+  const saved = existing
+    ? await prisma.dispatchView.update({
+        where: { id: existing.id },
+        data: { configJson: preferences },
+      })
+    : await prisma.dispatchView.create({
+        data: {
+          orgId: req.user!.orgId,
+          name: DISPATCH_TRIPS_WORKSPACE_VIEW_NAME,
+          scope: DispatchViewScope.PERSONAL,
+          userId: req.user!.id,
+          role: null,
+          isRoleDefault: false,
+          configJson: preferences,
+        },
+      });
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "DISPATCH_TRIPS_WORKSPACE_UPDATED",
+    entity: "DispatchView",
+    entityId: saved.id,
+    summary: "Updated trips workspace preferences",
+    meta: {
+      primaryIdentifier: preferences.primaryIdentifier,
+      columnOrderCount: preferences.columnOrder.length,
+    },
+  });
+
+  res.json({ preferences, updatedAt: saved.updatedAt });
 });
 
 app.post("/dispatch/views", requireAuth, requireCsrf, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
@@ -10725,6 +14829,7 @@ app.get("/dispatch/exceptions", requireAuth, requirePermission(Permission.LOAD_A
       resolvedAt: row.resolvedAt ?? null,
       resolutionNote: row.resolutionNote ?? null,
       meta: row.meta ?? null,
+      sla: readExceptionSla(row.meta as Prisma.JsonValue | null),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     })),
@@ -10733,6 +14838,568 @@ app.get("/dispatch/exceptions", requireAuth, requirePermission(Permission.LOAD_A
       open: openCount,
       acknowledged: acknowledgedCount,
       blockers: blockerCount,
+    },
+  });
+});
+
+app.get("/dispatch/shipments/:id/risk-score", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const load = await prisma.load.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+    select: {
+      id: true,
+      loadNumber: true,
+      status: true,
+      movementMode: true,
+      assignedDriverId: true,
+      truckId: true,
+      trailerId: true,
+      stops: {
+        select: {
+          type: true,
+          appointmentStart: true,
+          appointmentEnd: true,
+          arrivedAt: true,
+          departedAt: true,
+          sequence: true,
+        },
+        orderBy: { sequence: "asc" },
+      },
+      trackingSessions: {
+        where: { status: TrackingSessionStatus.ON },
+        select: { status: true },
+      },
+      locationPings: {
+        orderBy: { capturedAt: "desc" },
+        select: { capturedAt: true },
+        take: 1,
+      },
+      dispatchExceptions: {
+        where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+        select: { status: true, severity: true },
+      },
+    },
+  });
+  if (!load) {
+    res.status(404).json({ error: "Shipment not found" });
+    return;
+  }
+  if (!(await userCanAccessLoad({ user: req.user, loadId: load.id }))) {
+    res.status(404).json({ error: "Shipment not found" });
+    return;
+  }
+
+  const scored = buildLoadRiskScore({ load });
+  res.json({
+    shipmentId: load.id,
+    loadNumber: load.loadNumber,
+    movementMode: load.movementMode,
+    risk: scored.risk,
+    context: scored.context,
+  });
+});
+
+app.get("/dispatch/exceptions/:id/assist", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const exception = await fetchExceptionAssistContext({
+    orgId: req.user!.orgId,
+    exceptionId: req.params.id,
+  });
+  if (!exception || !exception.load) {
+    res.status(404).json({ error: "Exception not found" });
+    return;
+  }
+  if (!(await userCanAccessLoad({ user: req.user, loadId: exception.loadId }))) {
+    res.status(404).json({ error: "Exception not found" });
+    return;
+  }
+
+  const scored = buildLoadRiskScore({ load: exception.load });
+  const hasOpenFollowupTask = Boolean(
+    await prisma.task.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        loadId: exception.loadId,
+        status: { in: [TaskStatus.OPEN, TaskStatus.IN_PROGRESS] },
+        dedupeKey: { startsWith: `AI_EXCEPTION:${exception.id}:` },
+      },
+      select: { id: true },
+    })
+  );
+
+  const decision = buildExceptionAssistDecision({
+    exception: {
+      id: exception.id,
+      type: exception.type,
+      title: exception.title,
+      detail: exception.detail,
+      status: exception.status,
+      owner: exception.owner,
+      severity: exception.severity,
+    },
+    risk: scored.risk,
+    hasOpenFollowupTask,
+  });
+
+  res.json({
+    exception: {
+      id: exception.id,
+      loadId: exception.loadId,
+      loadNumber: exception.load.loadNumber,
+      tripId: exception.tripId,
+      tripNumber: exception.trip?.tripNumber ?? null,
+      type: exception.type,
+      title: exception.title,
+      status: exception.status,
+      owner: exception.owner,
+      severity: exception.severity,
+      detail: exception.detail,
+      source: exception.source,
+      createdAt: exception.createdAt,
+      sla: readExceptionSla(exception.meta as Prisma.JsonValue | null),
+      meta: exception.meta ?? null,
+    },
+    risk: scored.risk,
+    decision,
+  });
+});
+
+app.post(
+  "/dispatch/exceptions/:id/auto-action/preview",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const schema = z.object({
+      action: z.enum(["ACKNOWLEDGE_EXCEPTION", "ROUTE_OWNER", "CREATE_FOLLOWUP_TASK"]).optional(),
+      owner: z.nativeEnum(DispatchExceptionOwner).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const exception = await fetchExceptionAssistContext({
+      orgId: req.user!.orgId,
+      exceptionId: req.params.id,
+    });
+    if (!exception || !exception.load) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user, loadId: exception.loadId }))) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+
+    const scored = buildLoadRiskScore({ load: exception.load });
+    const hasOpenFollowupTask = Boolean(
+      await prisma.task.findFirst({
+        where: {
+          orgId: req.user!.orgId,
+          loadId: exception.loadId,
+          status: { in: [TaskStatus.OPEN, TaskStatus.IN_PROGRESS] },
+          dedupeKey: { startsWith: `AI_EXCEPTION:${exception.id}:` },
+        },
+        select: { id: true },
+      })
+    );
+    const decision = buildExceptionAssistDecision({
+      exception: {
+        id: exception.id,
+        type: exception.type,
+        title: exception.title,
+        detail: exception.detail,
+        status: exception.status,
+        owner: exception.owner,
+        severity: exception.severity,
+      },
+      risk: scored.risk,
+      hasOpenFollowupTask,
+    });
+    const selectedAction =
+      decision.recommendedActions.find((action) => action.code === parsed.data.action) ?? decision.recommendedActions[0] ?? null;
+    const simulationActions: string[] = [];
+    if (selectedAction?.code === "ACKNOWLEDGE_EXCEPTION") simulationActions.push("TRIAGE_EXCEPTIONS");
+    if (selectedAction?.code === "ROUTE_OWNER") simulationActions.push("TRIAGE_EXCEPTIONS");
+    if (selectedAction?.code === "CREATE_FOLLOWUP_TASK") simulationActions.push("TRIAGE_EXCEPTIONS");
+
+    const simulation = simulateEtaRiskScenario({
+      baseline: {
+        status: exception.load.status,
+        trackingOffInTransit: scored.context.trackingOffInTransit,
+        openExceptions: scored.context.openExceptions,
+        blockingExceptions: scored.context.blockingExceptions,
+        hasDriver: scored.context.hasDriver,
+        hasTruck: scored.context.hasTruck,
+        hasTrailer: scored.context.hasTrailer,
+        nextStopAppointmentEnd: scored.context.nextStop?.appointmentEnd ?? null,
+        lastPingAt: scored.context.lastPingAt ?? null,
+      },
+      actions: simulationActions,
+    });
+
+    res.json({
+      exceptionId: exception.id,
+      selectedAction: selectedAction
+        ? {
+            ...selectedAction,
+            payload: selectedAction.code === "ROUTE_OWNER" ? { owner: parsed.data.owner ?? decision.suggestedOwner } : selectedAction.payload ?? null,
+          }
+        : null,
+      decision,
+      risk: scored.risk,
+      simulation,
+    });
+  }
+);
+
+app.post(
+  "/dispatch/exceptions/:id/auto-action/apply",
+  requireAuth,
+  requireCsrf,
+  requirePermission(Permission.LOAD_ASSIGN),
+  async (req, res) => {
+    const schema = z.object({
+      action: z.enum(["ACKNOWLEDGE_EXCEPTION", "ROUTE_OWNER", "CREATE_FOLLOWUP_TASK"]).optional(),
+      owner: z.nativeEnum(DispatchExceptionOwner).optional(),
+      note: z.string().trim().max(400).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const exception = await fetchExceptionAssistContext({
+      orgId: req.user!.orgId,
+      exceptionId: req.params.id,
+    });
+    if (!exception || !exception.load) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+    if (!(await userCanAccessLoad({ user: req.user, loadId: exception.loadId }))) {
+      res.status(404).json({ error: "Exception not found" });
+      return;
+    }
+    const scored = buildLoadRiskScore({ load: exception.load });
+    const hasOpenFollowupTask = Boolean(
+      await prisma.task.findFirst({
+        where: {
+          orgId: req.user!.orgId,
+          loadId: exception.loadId,
+          status: { in: [TaskStatus.OPEN, TaskStatus.IN_PROGRESS] },
+          dedupeKey: { startsWith: `AI_EXCEPTION:${exception.id}:` },
+        },
+        select: { id: true },
+      })
+    );
+    const decision = buildExceptionAssistDecision({
+      exception: {
+        id: exception.id,
+        type: exception.type,
+        title: exception.title,
+        detail: exception.detail,
+        status: exception.status,
+        owner: exception.owner,
+        severity: exception.severity,
+      },
+      risk: scored.risk,
+      hasOpenFollowupTask,
+    });
+
+    const chosenAction =
+      parsed.data.action ??
+      decision.recommendedActions[0]?.code ??
+      ("ACKNOWLEDGE_EXCEPTION" as const);
+
+    let updatedException = exception;
+    let createdTask: { id: string; type: TaskType; title: string } | null = null;
+    if (chosenAction === "ACKNOWLEDGE_EXCEPTION") {
+      if (exception.status === DispatchExceptionStatus.OPEN) {
+        updatedException = await prisma.dispatchException.update({
+          where: { id: exception.id },
+          data: {
+            status: DispatchExceptionStatus.ACKNOWLEDGED,
+            acknowledgedById: req.user!.id,
+            acknowledgedAt: new Date(),
+          },
+          include: {
+            trip: { select: { id: true, tripNumber: true, status: true } },
+            load: {
+              select: {
+                id: true,
+                loadNumber: true,
+                status: true,
+                movementMode: true,
+                assignedDriverId: true,
+                truckId: true,
+                trailerId: true,
+                stops: {
+                  select: {
+                    type: true,
+                    appointmentStart: true,
+                    appointmentEnd: true,
+                    arrivedAt: true,
+                    departedAt: true,
+                    sequence: true,
+                  },
+                  orderBy: { sequence: "asc" },
+                },
+                trackingSessions: { where: { status: TrackingSessionStatus.ON }, select: { status: true }, take: 1 },
+                locationPings: { orderBy: { capturedAt: "desc" }, select: { capturedAt: true }, take: 1 },
+                dispatchExceptions: {
+                  where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+                  select: { id: true, severity: true, status: true },
+                },
+              },
+            },
+          },
+        });
+      }
+    } else if (chosenAction === "ROUTE_OWNER") {
+      const nextOwner = parsed.data.owner ?? decision.suggestedOwner;
+      updatedException = await prisma.dispatchException.update({
+        where: { id: exception.id },
+        data: {
+          owner: nextOwner,
+          severity: decision.suggestedSeverity,
+          status:
+            exception.status === DispatchExceptionStatus.RESOLVED
+              ? DispatchExceptionStatus.OPEN
+              : exception.status,
+        },
+        include: {
+          trip: { select: { id: true, tripNumber: true, status: true } },
+          load: {
+            select: {
+              id: true,
+              loadNumber: true,
+              status: true,
+              movementMode: true,
+              assignedDriverId: true,
+              truckId: true,
+              trailerId: true,
+              stops: {
+                select: {
+                  type: true,
+                  appointmentStart: true,
+                  appointmentEnd: true,
+                  arrivedAt: true,
+                  departedAt: true,
+                  sequence: true,
+                },
+                orderBy: { sequence: "asc" },
+              },
+              trackingSessions: { where: { status: TrackingSessionStatus.ON }, select: { status: true }, take: 1 },
+              locationPings: { orderBy: { capturedAt: "desc" }, select: { capturedAt: true }, take: 1 },
+              dispatchExceptions: {
+                where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+                select: { id: true, severity: true, status: true },
+              },
+            },
+          },
+        },
+      });
+    } else if (chosenAction === "CREATE_FOLLOWUP_TASK") {
+      if (!hasPermission(req.user, Permission.TASK_ASSIGN)) {
+        res.status(403).json({ error: "Missing permission to create follow-up task." });
+        return;
+      }
+      const haystack = `${exception.type} ${exception.title} ${exception.detail ?? ""}`.toUpperCase();
+      const taskType = haystack.includes("POD") || haystack.includes("BOL") || haystack.includes("DOC")
+        ? TaskType.MISSING_DOC
+        : TaskType.STOP_DELAY_FOLLOWUP;
+      const assignedRole =
+        decision.suggestedOwner === DispatchExceptionOwner.BILLING
+          ? Role.BILLING
+          : decision.suggestedOwner === DispatchExceptionOwner.DRIVER
+            ? Role.DISPATCHER
+            : Role.DISPATCHER;
+      const task = await ensureTask({
+        orgId: req.user!.orgId,
+        loadId: exception.loadId,
+        type: taskType,
+        title: `Exception follow-up: ${exception.title}`,
+        priority: TaskPriority.HIGH,
+        assignedRole,
+        dueAt: addDays(new Date(), 2 / 24),
+        createdById: req.user!.id,
+        dedupeKey: `AI_EXCEPTION:${exception.id}:FOLLOWUP`,
+      });
+      createdTask = { id: task.id, type: task.type, title: task.title };
+      if (exception.status === DispatchExceptionStatus.OPEN) {
+        updatedException = await prisma.dispatchException.update({
+          where: { id: exception.id },
+          data: {
+            status: DispatchExceptionStatus.ACKNOWLEDGED,
+            acknowledgedById: req.user!.id,
+            acknowledgedAt: new Date(),
+          },
+          include: {
+            trip: { select: { id: true, tripNumber: true, status: true } },
+            load: {
+              select: {
+                id: true,
+                loadNumber: true,
+                status: true,
+                movementMode: true,
+                assignedDriverId: true,
+                truckId: true,
+                trailerId: true,
+                stops: {
+                  select: {
+                    type: true,
+                    appointmentStart: true,
+                    appointmentEnd: true,
+                    arrivedAt: true,
+                    departedAt: true,
+                    sequence: true,
+                  },
+                  orderBy: { sequence: "asc" },
+                },
+                trackingSessions: { where: { status: TrackingSessionStatus.ON }, select: { status: true }, take: 1 },
+                locationPings: { orderBy: { capturedAt: "desc" }, select: { capturedAt: true }, take: 1 },
+                dispatchExceptions: {
+                  where: { status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] } },
+                  select: { id: true, severity: true, status: true },
+                },
+              },
+            },
+          },
+        });
+      }
+    }
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "DISPATCH_EXCEPTION_AUTO_ACTION_APPLIED",
+      entity: "DispatchException",
+      entityId: exception.id,
+      summary: `Applied ${chosenAction} on exception ${exception.title}`,
+      meta: {
+        action: chosenAction,
+        note: parsed.data.note ?? null,
+        suggestedOwner: decision.suggestedOwner,
+        suggestedSeverity: decision.suggestedSeverity,
+        riskBand: scored.risk.band,
+        riskScore: scored.risk.score,
+        createdTaskId: createdTask?.id ?? null,
+      },
+    });
+
+    res.json({
+      ok: true,
+      action: chosenAction,
+      exception: {
+        id: updatedException.id,
+        status: updatedException.status,
+        owner: updatedException.owner,
+        severity: updatedException.severity,
+        acknowledgedAt: updatedException.acknowledgedAt,
+        resolvedAt: updatedException.resolvedAt,
+      },
+      createdTask,
+      decision,
+    });
+  }
+);
+
+app.post(
+  "/dispatch/simulation/eta-risk",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "HEAD_DISPATCHER", "DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    const schema = z.object({
+      baseline: z.object({
+        status: z.nativeEnum(LoadStatus),
+        trackingOffInTransit: z.boolean(),
+        openExceptions: z.number().int().min(0).max(25),
+        blockingExceptions: z.number().int().min(0).max(25),
+        hasDriver: z.boolean(),
+        hasTruck: z.boolean(),
+        hasTrailer: z.boolean(),
+        nextStopAppointmentEnd: z.string().optional().nullable(),
+        lastPingAt: z.string().optional().nullable(),
+      }),
+      actions: z.array(z.string()).max(20),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const simulation = simulateEtaRiskScenario({
+      baseline: {
+        ...parsed.data.baseline,
+        nextStopAppointmentEnd: parsed.data.baseline.nextStopAppointmentEnd
+          ? new Date(parsed.data.baseline.nextStopAppointmentEnd)
+          : null,
+        lastPingAt: parsed.data.baseline.lastPingAt ? new Date(parsed.data.baseline.lastPingAt) : null,
+      },
+      actions: parsed.data.actions,
+    });
+    res.json({
+      simulation,
+      explainability: {
+        baselineFactors: simulation.baseline.factors,
+        projectedFactors: simulation.projected.factors,
+      },
+    });
+  }
+);
+
+app.get("/dispatch/exceptions/sla-queue", requireAuth, requirePermission(Permission.LOAD_ASSIGN), async (req, res) => {
+  const ownerParam = typeof req.query.owner === "string" ? req.query.owner.trim().toUpperCase() : "";
+  const ownerFilter = z.nativeEnum(DispatchExceptionOwner).safeParse(ownerParam).success
+    ? (ownerParam as DispatchExceptionOwner)
+    : null;
+  const rows = await prisma.dispatchException.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      status: { in: [DispatchExceptionStatus.OPEN, DispatchExceptionStatus.ACKNOWLEDGED] },
+      owner: ownerFilter ?? undefined,
+    },
+    include: {
+      load: { select: { id: true, loadNumber: true, status: true } },
+      trip: { select: { id: true, tripNumber: true, status: true } },
+    },
+    orderBy: [{ severity: "desc" }, { createdAt: "asc" }],
+    take: 500,
+  });
+  const enriched = rows
+    .map((row) => {
+      const sla = readExceptionSla(row.meta as Prisma.JsonValue | null);
+      return {
+        id: row.id,
+        loadId: row.loadId,
+        loadNumber: row.load?.loadNumber ?? null,
+        tripId: row.tripId,
+        tripNumber: row.trip?.tripNumber ?? null,
+        type: row.type,
+        title: row.title,
+        severity: row.severity,
+        owner: row.owner,
+        status: row.status,
+        sla,
+        meta: row.meta ?? null,
+        createdAt: row.createdAt,
+      };
+    })
+    .sort((left, right) => {
+      const leftDue = left.sla?.dueAt ? new Date(left.sla.dueAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const rightDue = right.sla?.dueAt ? new Date(right.sla.dueAt).getTime() : Number.MAX_SAFE_INTEGER;
+      return leftDue - rightDue;
+    });
+  const overdue = enriched.filter((row) => row.sla?.overdue).length;
+  res.json({
+    exceptions: enriched,
+    summary: {
+      total: enriched.length,
+      overdue,
+      owner: ownerFilter ?? "ALL",
     },
   });
 });
@@ -10790,22 +15457,44 @@ app.post("/dispatch/exceptions", requireAuth, requireCsrf, requirePermission(Per
   }
 
   const metaValue = parsed.data.meta;
+  const routedOwner = resolveExceptionOwnerBySla({
+    owner: parsed.data.owner,
+    type: parsed.data.type,
+    title: parsed.data.title,
+    source: parsed.data.source ?? null,
+  });
+  const finalSeverity = parsed.data.severity ?? DispatchExceptionSeverity.WARNING;
+  const slaHours = resolveExceptionSlaHours({
+    severity: finalSeverity,
+    owner: routedOwner.owner,
+    type: parsed.data.type,
+  });
+  const slaDueAt = addDays(new Date(), slaHours / 24).toISOString();
+  const baseMeta =
+    metaValue && typeof metaValue === "object" && !Array.isArray(metaValue)
+      ? ({ ...(metaValue as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  if (metaValue !== undefined && (metaValue === null || typeof metaValue !== "object" || Array.isArray(metaValue))) {
+    baseMeta.userMeta = metaValue ?? null;
+  }
+  baseMeta.slaHours = slaHours;
+  baseMeta.slaDueAt = slaDueAt;
+  baseMeta.routedOwner = routedOwner.owner;
+  baseMeta.routingReason = routedOwner.routingReason;
   const created = await prisma.dispatchException.create({
     data: {
       orgId: req.user!.orgId,
       loadId: load.id,
       tripId: parsed.data.tripId ?? null,
       type: parsed.data.type,
-      severity: parsed.data.severity ?? DispatchExceptionSeverity.WARNING,
-      owner: parsed.data.owner ?? DispatchExceptionOwner.DISPATCH,
+      severity: finalSeverity,
+      owner: routedOwner.owner,
       status: DispatchExceptionStatus.OPEN,
       title: parsed.data.title,
       detail: parsed.data.detail ?? null,
       source: parsed.data.source ?? "manual",
       createdById: req.user!.id,
-      ...(metaValue === undefined
-        ? {}
-        : { meta: metaValue === null ? Prisma.JsonNull : (metaValue as Prisma.InputJsonValue) }),
+      meta: baseMeta as Prisma.InputJsonValue,
     },
   });
 
@@ -10822,6 +15511,9 @@ app.post("/dispatch/exceptions", requireAuth, requireCsrf, requirePermission(Per
       type: created.type,
       severity: created.severity,
       owner: created.owner,
+      slaHours,
+      slaDueAt,
+      routingReason: routedOwner.routingReason,
     },
   });
 
@@ -11824,6 +16516,70 @@ function resolveIdempotencyKey(req: any, fallback: string) {
   return fallback;
 }
 
+function isSanctionsBlocker(message: string) {
+  return message.startsWith("Sanctions screening blocked");
+}
+
+function resolveComplianceDecision(params: {
+  user: { role: string };
+  direction: "RECEIVABLE" | "PAYABLE";
+  method: FinancePaymentMethod;
+  counterpartyName?: string | null;
+  counterpartyReference?: string | null;
+  payeeType?: FinancePayeeType;
+  compliance?: {
+    achAccountValidated?: boolean;
+    achReturnCode?: string | null;
+    taxProfileVerified?: boolean;
+    taxFormType?: string | null;
+    sanctionsOverrideReason?: string | null;
+  } | null;
+}) {
+  const policy = resolveFinanceCompliancePolicy();
+  const initial = evaluateFinanceCompliance(
+    {
+      direction: params.direction,
+      method: params.method,
+      counterpartyName: params.counterpartyName ?? null,
+      counterpartyReference: params.counterpartyReference ?? null,
+      payeeType: params.payeeType,
+      achAccountValidated: params.compliance?.achAccountValidated,
+      achReturnCode: params.compliance?.achReturnCode ?? null,
+      taxProfileVerified: params.compliance?.taxProfileVerified,
+      taxFormType: params.compliance?.taxFormType ?? null,
+    },
+    policy
+  );
+  const sanctionsOverrideRequested = Boolean(params.compliance?.sanctionsOverrideReason?.trim());
+  const canOverrideSanctions =
+    policy.sanctions.allowAdminOverride && params.user.role === "ADMIN" && sanctionsOverrideRequested;
+  if (!canOverrideSanctions || initial.blockers.length === 0) {
+    return {
+      policy,
+      decision: initial,
+      overrides: {
+        sanctionsOverridden: false,
+      },
+    };
+  }
+  const nonSanctionsBlockers = initial.blockers.filter((blocker) => !isSanctionsBlocker(blocker));
+  return {
+    policy,
+    decision: {
+      ...initial,
+      ok: nonSanctionsBlockers.length === 0,
+      blockers: nonSanctionsBlockers,
+      warnings: [
+        ...initial.warnings,
+        `Sanctions blocker overridden by admin: ${params.compliance?.sanctionsOverrideReason?.trim()}`,
+      ],
+    },
+    overrides: {
+      sanctionsOverridden: true,
+    },
+  };
+}
+
 app.get("/driver/earnings", requireAuth, requireRole("DRIVER"), async (req, res) => {
   const driver = await prisma.driver.findFirst({
     where: { userId: req.user!.id, orgId: req.user!.orgId },
@@ -12430,7 +17186,8 @@ app.get("/tracking/load/:loadId/latest", requireAuth, requireRole(...DISPATCH_TR
     const integration = await prisma.trackingIntegration.findFirst({
       where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, status: TrackingIntegrationStatus.CONNECTED },
     });
-    const token = extractSamsaraToken(integration?.configJson ?? null);
+    const credentials = integration ? await resolveSamsaraCredentialsForIntegration(integration) : null;
+    const token = credentials?.apiToken ?? null;
     if (mapping && token) {
       try {
         const loc = await fetchSamsaraVehicleLocation(token, mapping.externalId);
@@ -13112,6 +17869,16 @@ app.get("/finance/receivables", requireAuth, requireRole("ADMIN", "DISPATCHER", 
   const validQboStatuses = qboTokens.filter((token) =>
     ["NOT_CONNECTED", "NOT_SYNCED", "SYNCING", "SYNCED", "FAILED"].includes(token)
   );
+  const commercialFocusTokens =
+    typeof req.query.commercialFocus === "string"
+      ? req.query.commercialFocus
+          .split(",")
+          .map((token) => token.trim())
+          .filter(Boolean)
+      : [];
+  const validCommercialFocus = commercialFocusTokens.filter((token) =>
+    ["DETENTION", "LAYOVER", "PROOF_GAP", "ACCESSORIAL_PENDING", "MISSING_LINEHAUL"].includes(token)
+  );
 
   const qbo = await getQuickbooksStatusForOrg(req.user!.orgId);
   const quickbooksConnected = qbo.enabled;
@@ -13126,6 +17893,7 @@ app.get("/finance/receivables", requireAuth, requireRole("ADMIN", "DISPATCHER", 
     blockerCode: blockerCode || undefined,
     agingBucket: validAgingBuckets.length ? (validAgingBuckets as any) : undefined,
     qboSyncStatus: validQboStatuses.length ? (validQboStatuses as any) : undefined,
+    commercialFocus: validCommercialFocus.length ? (validCommercialFocus as any) : undefined,
     quickbooksConnected,
   });
 
@@ -13137,6 +17905,94 @@ app.get("/finance/receivables", requireAuth, requireRole("ADMIN", "DISPATCHER", 
     pageInfo: { nextCursor: result.nextCursor, hasMore: result.hasMore },
   });
 });
+
+app.get(
+  "/finance/compliance/policy",
+  requireAuth,
+  requireRole("ADMIN", "BILLING", "HEAD_DISPATCHER", "DISPATCHER"),
+  async (_req, res) => {
+    const policy = resolveFinanceCompliancePolicy();
+    res.json({
+      policy,
+      generatedAt: new Date().toISOString(),
+      rails: Object.values(FinancePaymentMethod),
+    });
+  }
+);
+
+app.post(
+  "/finance/compliance/screen",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING", "HEAD_DISPATCHER", "DISPATCHER"),
+  async (req, res) => {
+    const schema = z.object({
+      direction: z.enum(["RECEIVABLE", "PAYABLE"]),
+      method: z.nativeEnum(FinancePaymentMethod),
+      counterpartyName: z.string().trim().max(200).optional(),
+      counterpartyReference: z.string().trim().max(120).optional(),
+      payeeType: z.enum(["CUSTOMER", "DRIVER", "VENDOR"]).optional(),
+      compliance: z
+        .object({
+          achAccountValidated: z.boolean().optional(),
+          achReturnCode: z.string().trim().max(12).optional(),
+          taxProfileVerified: z.boolean().optional(),
+          taxFormType: z.string().trim().max(40).optional(),
+          sanctionsOverrideReason: z.string().trim().max(240).optional(),
+        })
+        .optional(),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const outcome = resolveComplianceDecision({
+      user: req.user!,
+      direction: parsed.data.direction,
+      method: parsed.data.method,
+      counterpartyName: parsed.data.counterpartyName ?? null,
+      counterpartyReference: parsed.data.counterpartyReference ?? null,
+      payeeType: parsed.data.payeeType as FinancePayeeType | undefined,
+      compliance: parsed.data.compliance
+        ? {
+            achAccountValidated: parsed.data.compliance.achAccountValidated,
+            achReturnCode: parsed.data.compliance.achReturnCode ?? null,
+            taxProfileVerified: parsed.data.compliance.taxProfileVerified,
+            taxFormType: parsed.data.compliance.taxFormType ?? null,
+            sanctionsOverrideReason: parsed.data.compliance.sanctionsOverrideReason ?? null,
+          }
+        : null,
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "FINANCE_COMPLIANCE_SCREENED",
+      entity: "FinanceCompliance",
+      entityId: null,
+      summary: `Ran finance compliance screen for ${parsed.data.direction.toLowerCase()} ${parsed.data.method}`,
+      meta: {
+        direction: parsed.data.direction,
+        method: parsed.data.method,
+        counterpartyName: parsed.data.counterpartyName ?? null,
+        counterpartyReference: parsed.data.counterpartyReference ?? null,
+        payeeType: parsed.data.payeeType ?? null,
+        blockers: outcome.decision.blockers,
+        warnings: outcome.decision.warnings,
+        checks: outcome.decision.checks,
+        overrides: outcome.overrides,
+      },
+    });
+    res.json({
+      ok: outcome.decision.ok,
+      blockers: outcome.decision.blockers,
+      warnings: outcome.decision.warnings,
+      checks: outcome.decision.checks,
+      overrides: outcome.overrides,
+      policy: outcome.policy,
+    });
+  }
+);
 
 app.post(
   "/finance/receivables/bulk/generate-invoices",
@@ -13157,16 +18013,38 @@ app.post(
     const loadIds = Array.from(new Set(parsed.data.loadIds.map((id) => id.trim()).filter(Boolean)));
     const results: Array<{ loadId: string; ok: boolean; message: string; invoiceId?: string | null }> = [];
     for (const loadId of loadIds) {
-      const load = await prisma.load.findFirst({
-        where: { id: loadId, orgId: req.user!.orgId, deletedAt: null },
-        select: { id: true, loadNumber: true, status: true },
-      });
-      if (!load) {
-        results.push({ loadId, ok: false, message: "Load not found" });
+      let preflightResult: Awaited<ReturnType<typeof evaluateInvoicePreflightForLoad>> | null = null;
+      try {
+        preflightResult = await evaluateInvoicePreflightForLoad({
+          orgId: req.user!.orgId,
+          loadId,
+        });
+      } catch (error) {
+        results.push({ loadId, ok: false, message: (error as Error).message });
         continue;
       }
+      const blockerText =
+        preflightResult.preflight.blockingReasons.length > 0
+          ? preflightResult.preflight.blockingReasons.join("; ")
+          : "No blockers";
       if (dryRun) {
-        results.push({ loadId, ok: true, message: "Ready to generate invoice" });
+        results.push({
+          loadId,
+          ok: preflightResult.preflight.ok,
+          message: preflightResult.preflight.ok
+            ? preflightResult.preflight.warnings.length > 0
+              ? `Preflight ready (warnings: ${preflightResult.preflight.warnings.join("; ")})`
+              : "Preflight ready: no blockers."
+            : `Preflight blocked: ${blockerText}`,
+        });
+        continue;
+      }
+      if (!preflightResult.preflight.ok) {
+        results.push({
+          loadId,
+          ok: false,
+          message: `Blocked by invoice preflight: ${blockerText}`,
+        });
         continue;
       }
       try {
@@ -13199,7 +18077,7 @@ app.post(
           results.push({
             loadId,
             ok: false,
-            message: `Missing required docs: ${(invoiceResult as any).missingDocs?.join(", ") || "unknown"}`,
+            message: "Invoice generation blocked by preflight",
           });
         }
       } catch (error) {
@@ -13476,10 +18354,21 @@ app.get("/finance/journals", requireAuth, requireCapability("viewSettlementPrevi
   const entityId = typeof req.query.entityId === "string" && req.query.entityId.trim().length > 0 ? req.query.entityId.trim() : undefined;
 
   const entityType =
-    entityTypeRaw && ["PAYABLE_RUN", "SETTLEMENT"].includes(entityTypeRaw) ? (entityTypeRaw as "PAYABLE_RUN" | "SETTLEMENT") : undefined;
+    entityTypeRaw && ["INVOICE", "FACTORING_TRANSACTION", "PAYABLE_RUN", "SETTLEMENT", "VENDOR_BILL"].includes(entityTypeRaw)
+      ? (entityTypeRaw as "INVOICE" | "FACTORING_TRANSACTION" | "PAYABLE_RUN" | "SETTLEMENT" | "VENDOR_BILL")
+      : undefined;
   const eventType =
-    eventTypeRaw && ["PAYABLE_RUN_PAID", "SETTLEMENT_PAID"].includes(eventTypeRaw)
-      ? (eventTypeRaw as "PAYABLE_RUN_PAID" | "SETTLEMENT_PAID")
+    eventTypeRaw &&
+    ["INVOICE_ISSUED", "INVOICE_PAYMENT_RECEIVED", "FACTORING_TRANSACTION_POSTED", "PAYABLE_RUN_PAID", "SETTLEMENT_PAID", "VENDOR_BILL_PAID"].includes(
+      eventTypeRaw
+    )
+      ? (eventTypeRaw as
+          | "INVOICE_ISSUED"
+          | "INVOICE_PAYMENT_RECEIVED"
+          | "FACTORING_TRANSACTION_POSTED"
+          | "PAYABLE_RUN_PAID"
+          | "SETTLEMENT_PAID"
+          | "VENDOR_BILL_PAID")
       : undefined;
 
   const entries = await (prisma as any).financeJournalEntry.findMany({
@@ -13544,6 +18433,1190 @@ app.get("/finance/journals", requireAuth, requireCapability("viewSettlementPrevi
       })),
     })),
   });
+});
+
+const moveContractScopeSchema = z
+  .object({
+    driverId: z.string().trim().min(1).optional(),
+    movementMode: z.nativeEnum(MovementMode).optional(),
+    customerId: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+const moveContractRulesSchema = z
+  .object({
+    base: z
+      .object({
+        model: z.enum(["CPM", "FLAT_TRIP", "REVENUE_SHARE", "HOURLY", "HYBRID_BEST_OF"]).optional(),
+        ratePerMileCents: z.number().int().nonnegative().optional(),
+        flatAmountCents: z.number().int().nonnegative().optional(),
+        revenueSharePct: z.number().nonnegative().max(100).optional(),
+        hourlyRateCents: z.number().int().nonnegative().optional(),
+        expectedHours: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+    addons: z
+      .array(
+        z
+          .object({
+            type: z.enum(["DETENTION", "LAYOVER", "STOP"]),
+            perHourCents: z.number().int().nonnegative().optional(),
+            perStopCents: z.number().int().nonnegative().optional(),
+            fixedAmountCents: z.number().int().nonnegative().optional(),
+            freeMinutes: z.number().int().nonnegative().optional(),
+          })
+          .strict()
+      )
+      .optional(),
+  })
+  .strict();
+
+app.get(
+  "/finance/move-contracts",
+  requireAuth,
+  requireRole("ADMIN", "BILLING", "HEAD_DISPATCHER", "DISPATCHER"),
+  async (req, res) => {
+    const includeArchived = req.query.includeArchived === "true";
+    const contracts = await prisma.moveContract.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        ...(includeArchived ? {} : { status: { not: MoveContractStatus.ARCHIVED } }),
+      },
+      include: {
+        versions: {
+          orderBy: [{ version: "desc" }, { createdAt: "desc" }],
+          take: 1,
+        },
+      },
+      orderBy: [{ status: "asc" }, { updatedAt: "desc" }, { createdAt: "desc" }],
+    });
+
+    res.json({
+      contracts: contracts.map((contract) => ({
+        id: contract.id,
+        code: contract.code,
+        name: contract.name,
+        status: contract.status,
+        template: contract.template,
+        description: contract.description,
+        currentVersion: contract.currentVersion,
+        createdAt: contract.createdAt,
+        updatedAt: contract.updatedAt,
+        latestVersion:
+          contract.versions[0] !== undefined
+            ? {
+                id: contract.versions[0].id,
+                version: contract.versions[0].version,
+                effectiveFrom: contract.versions[0].effectiveFrom,
+                effectiveTo: contract.versions[0].effectiveTo,
+                scope: contract.versions[0].scopeJson,
+                rules: contract.versions[0].rulesJson,
+              }
+            : null,
+      })),
+    });
+  }
+);
+
+app.post("/finance/move-contracts", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z
+    .object({
+      code: z.string().trim().min(2).max(64).regex(/^[A-Za-z0-9_-]+$/),
+      name: z.string().trim().min(2).max(120),
+      template: z.nativeEnum(MoveContractTemplate),
+      description: z.string().trim().max(500).optional(),
+      status: z.nativeEnum(MoveContractStatus).optional(),
+      effectiveFrom: z.string().datetime().optional(),
+      scope: moveContractScopeSchema.optional(),
+      rules: moveContractRulesSchema.optional(),
+    })
+    .strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+
+  const effectiveFrom = parsed.data.effectiveFrom ? new Date(parsed.data.effectiveFrom) : new Date();
+  if (Number.isNaN(effectiveFrom.getTime())) {
+    res.status(400).json({ error: "Invalid effectiveFrom" });
+    return;
+  }
+
+  try {
+    const created = await prisma.$transaction(async (tx) => {
+      const contract = await tx.moveContract.create({
+        data: {
+          orgId: req.user!.orgId,
+          code: parsed.data.code.trim().toUpperCase(),
+          name: parsed.data.name.trim(),
+          template: parsed.data.template,
+          status: parsed.data.status ?? MoveContractStatus.ACTIVE,
+          description: parsed.data.description?.trim() || null,
+          createdById: req.user!.id,
+          currentVersion: 1,
+        },
+      });
+      const version = await tx.moveContractVersion.create({
+        data: {
+          orgId: req.user!.orgId,
+          contractId: contract.id,
+          version: 1,
+          effectiveFrom,
+          scopeJson: (parsed.data.scope ?? {}) as Prisma.InputJsonValue,
+          rulesJson: (parsed.data.rules ?? {}) as Prisma.InputJsonValue,
+          createdById: req.user!.id,
+        },
+      });
+      return { contract, version };
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "MOVE_CONTRACT_CREATED",
+      entity: "MoveContract",
+      entityId: created.contract.id,
+      summary: `Created move contract ${created.contract.code}`,
+      after: {
+        code: created.contract.code,
+        status: created.contract.status,
+        template: created.contract.template,
+        version: created.version.version,
+      },
+    });
+
+    res.status(201).json({
+      contract: created.contract,
+      version: created.version,
+    });
+  } catch (error) {
+    const message = String((error as Error)?.message ?? "");
+    if (message.toLowerCase().includes("unique")) {
+      res.status(409).json({ error: "Move contract code already exists" });
+      return;
+    }
+    res.status(400).json({ error: (error as Error).message });
+  }
+});
+
+app.post(
+  "/finance/move-contracts/:id/versions",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING"),
+  async (req, res) => {
+    const schema = z
+      .object({
+        effectiveFrom: z.string().datetime(),
+        effectiveTo: z.string().datetime().optional(),
+        status: z.nativeEnum(MoveContractStatus).optional(),
+        scope: moveContractScopeSchema.optional(),
+        rules: moveContractRulesSchema.optional(),
+      })
+      .strict();
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const effectiveFrom = new Date(parsed.data.effectiveFrom);
+    const effectiveTo = parsed.data.effectiveTo ? new Date(parsed.data.effectiveTo) : null;
+    if (Number.isNaN(effectiveFrom.getTime()) || (effectiveTo && Number.isNaN(effectiveTo.getTime()))) {
+      res.status(400).json({ error: "Invalid version effective dates" });
+      return;
+    }
+
+    const contract = await prisma.moveContract.findFirst({
+      where: { id: req.params.id, orgId: req.user!.orgId },
+      select: { id: true, code: true, currentVersion: true, status: true },
+    });
+    if (!contract) {
+      res.status(404).json({ error: "Move contract not found" });
+      return;
+    }
+
+    const version = await prisma.$transaction(async (tx) => {
+      const nextVersion = contract.currentVersion + 1;
+      const created = await tx.moveContractVersion.create({
+        data: {
+          orgId: req.user!.orgId,
+          contractId: contract.id,
+          version: nextVersion,
+          effectiveFrom,
+          effectiveTo,
+          scopeJson: (parsed.data.scope ?? {}) as Prisma.InputJsonValue,
+          rulesJson: (parsed.data.rules ?? {}) as Prisma.InputJsonValue,
+          createdById: req.user!.id,
+        },
+      });
+      await tx.moveContract.update({
+        where: { id: contract.id },
+        data: {
+          currentVersion: nextVersion,
+          status: parsed.data.status ?? contract.status,
+        },
+      });
+      return created;
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "MOVE_CONTRACT_VERSION_CREATED",
+      entity: "MoveContract",
+      entityId: contract.id,
+      summary: `Published move contract version ${contract.code} v${version.version}`,
+      after: {
+        version: version.version,
+        effectiveFrom: version.effectiveFrom,
+        effectiveTo: version.effectiveTo,
+      },
+    });
+
+    res.status(201).json({ version });
+  }
+);
+
+app.post(
+  "/finance/move-contracts/preview",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN", "BILLING", "HEAD_DISPATCHER", "DISPATCHER"),
+  async (req, res) => {
+    const schema = z
+      .object({
+        loadId: z.string().min(1),
+        contractId: z.string().optional(),
+        versionId: z.string().optional(),
+      })
+      .strict();
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+
+    const [load, settings] = await Promise.all([
+      prisma.load.findFirst({
+        where: { id: parsed.data.loadId, orgId: req.user!.orgId, deletedAt: null },
+        select: {
+          id: true,
+          loadNumber: true,
+          movementMode: true,
+          customerId: true,
+          rate: true,
+          miles: true,
+          paidMiles: true,
+          assignedDriverId: true,
+          stops: { select: { detentionMinutes: true } },
+          driver: { select: { payRatePerMile: true } },
+        },
+      }),
+      prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId }, select: { driverRatePerMile: true } }),
+    ]);
+    if (!load) {
+      res.status(404).json({ error: "Load not found" });
+      return;
+    }
+    if (!load.assignedDriverId) {
+      res.status(400).json({ error: "Load must have an assigned driver for pay preview." });
+      return;
+    }
+
+    const whereClause: Prisma.MoveContractVersionWhereInput = {
+      orgId: req.user!.orgId,
+      contract: { status: { in: [MoveContractStatus.ACTIVE, MoveContractStatus.DRAFT] } },
+    };
+    if (parsed.data.versionId) whereClause.id = parsed.data.versionId;
+    if (parsed.data.contractId) whereClause.contractId = parsed.data.contractId;
+
+    const versions = await prisma.moveContractVersion.findMany({
+      where: whereClause,
+      include: {
+        contract: {
+          select: { id: true, code: true, name: true, template: true, status: true },
+        },
+      },
+      orderBy: [{ version: "desc" }, { createdAt: "desc" }],
+      take: parsed.data.versionId ? 1 : 200,
+    });
+    if (versions.length === 0) {
+      res.status(404).json({ error: "Move contract version not found" });
+      return;
+    }
+
+    const candidates: MoveContractCandidate[] = versions.map((version) => ({
+      id: version.contract.id,
+      code: version.contract.code,
+      name: version.contract.name,
+      template: version.contract.template,
+      versionId: version.id,
+      version: version.version,
+      scope: parseMoveContractScope(version.scopeJson as Prisma.JsonValue | null),
+      rules: parseMoveContractRules(version.rulesJson as Prisma.JsonValue | null),
+    }));
+    const selected = parsed.data.versionId
+      ? candidates[0]
+      : selectApplicableMoveContract(
+          { assignedDriverId: load.assignedDriverId, movementMode: load.movementMode, customerId: load.customerId ?? null },
+          candidates
+        );
+    if (!selected) {
+      res.status(400).json({ error: "No move contract matched this load and scope." });
+      return;
+    }
+
+    const fallbackRatePerMileCents = Math.round(
+      Number(toDecimal(load.driver?.payRatePerMile ?? settings?.driverRatePerMile ?? 0) ?? new Prisma.Decimal(0)) * 100
+    );
+    const preview = computeMoveContractCompensation({
+      load,
+      fallbackRatePerMileCents,
+      contract: selected,
+    });
+
+    res.json({
+      loadId: load.id,
+      loadNumber: load.loadNumber,
+      contract: {
+        id: selected.id,
+        code: selected.code,
+        name: selected.name,
+        versionId: selected.versionId,
+        version: selected.version,
+      },
+      preview: {
+        baseModel: preview.baseModel,
+        amountCents: preview.amountCents,
+        amount: formatUSD(new Prisma.Decimal(preview.amountCents).div(100)),
+        paidMiles: preview.paidMiles,
+        ratePerMile: preview.ratePerMile,
+        addonCents: preview.addonCents,
+      },
+    });
+  }
+);
+
+app.get("/finance/ar-cases", requireAuth, requireRole("ADMIN", "BILLING", "HEAD_DISPATCHER", "DISPATCHER"), async (req, res) => {
+  const statusParam = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
+  const typeParam = typeof req.query.type === "string" ? req.query.type.trim().toUpperCase() : "";
+  const ownerUserId = typeof req.query.ownerUserId === "string" ? req.query.ownerUserId.trim() : "";
+  const where: Prisma.ARCaseWhereInput = {
+    orgId: req.user!.orgId,
+    ...(statusParam && Object.values(ARCaseStatus).includes(statusParam as ARCaseStatus) ? { status: statusParam as ARCaseStatus } : {}),
+    ...(typeParam && Object.values(ARCaseType).includes(typeParam as ARCaseType) ? { type: typeParam as ARCaseType } : {}),
+    ...(ownerUserId ? { ownerUserId } : {}),
+  };
+  const cases = await prisma.aRCase.findMany({
+    where,
+    include: {
+      ownerUser: { select: { id: true, name: true, email: true } },
+      createdBy: { select: { id: true, name: true, email: true } },
+      invoice: { select: { id: true, invoiceNumber: true, status: true } },
+      load: { select: { id: true, loadNumber: true, status: true } },
+      comments: {
+        orderBy: [{ createdAt: "asc" }],
+        include: { createdBy: { select: { id: true, name: true, email: true } } },
+      },
+    },
+    orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+    take: 300,
+  });
+  res.json({ cases });
+});
+
+app.get("/finance/disputes", requireAuth, requireRole("ADMIN", "BILLING", "HEAD_DISPATCHER", "DISPATCHER"), async (req, res) => {
+  const cases = await prisma.aRCase.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      type: { in: [ARCaseType.DISPUTE, ARCaseType.SHORT_PAY, ARCaseType.RATE_DISPUTE] },
+      status: { in: [ARCaseStatus.OPEN, ARCaseStatus.IN_PROGRESS] },
+    },
+    include: {
+      ownerUser: { select: { id: true, name: true, email: true } },
+      invoice: { select: { id: true, invoiceNumber: true, status: true } },
+      load: { select: { id: true, loadNumber: true, status: true } },
+    },
+    orderBy: [{ createdAt: "desc" }],
+    take: 200,
+  });
+  res.json({ cases });
+});
+
+app.post("/finance/ar-cases", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z
+    .object({
+      loadId: z.string().trim().optional(),
+      invoiceId: z.string().trim().optional(),
+      type: z.nativeEnum(ARCaseType),
+      title: z.string().trim().min(3).max(180),
+      summary: z.string().trim().max(500).optional(),
+      ownerUserId: z.string().trim().optional(),
+      slaDueAt: z.string().datetime().optional(),
+    })
+    .strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const caseRow = await prisma.aRCase.create({
+    data: {
+      orgId: req.user!.orgId,
+      loadId: parsed.data.loadId || null,
+      invoiceId: parsed.data.invoiceId || null,
+      type: parsed.data.type,
+      title: parsed.data.title,
+      summary: parsed.data.summary || null,
+      ownerUserId: parsed.data.ownerUserId || null,
+      slaDueAt: parsed.data.slaDueAt ? new Date(parsed.data.slaDueAt) : null,
+      createdById: req.user!.id,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "AR_CASE_CREATED",
+    entity: "ARCase",
+    entityId: caseRow.id,
+    summary: `Created AR case ${caseRow.type} (${caseRow.title})`,
+    after: {
+      type: caseRow.type,
+      status: caseRow.status,
+      ownerUserId: caseRow.ownerUserId,
+      invoiceId: caseRow.invoiceId,
+      loadId: caseRow.loadId,
+    },
+  });
+  res.status(201).json({ case: caseRow });
+});
+
+app.post("/finance/ar-cases/:id/comment", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z.object({ body: z.string().trim().min(1).max(1200) }).strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const arCase = await prisma.aRCase.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+    select: { id: true },
+  });
+  if (!arCase) {
+    res.status(404).json({ error: "AR case not found" });
+    return;
+  }
+  const comment = await prisma.aRCaseComment.create({
+    data: {
+      orgId: req.user!.orgId,
+      caseId: arCase.id,
+      body: parsed.data.body,
+      createdById: req.user!.id,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "AR_CASE_COMMENTED",
+    entity: "ARCase",
+    entityId: arCase.id,
+    summary: "Added AR case comment",
+    after: { commentId: comment.id },
+  });
+  res.status(201).json({ comment });
+});
+
+app.post("/finance/ar-cases/:id/status", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z
+    .object({
+      status: z.nativeEnum(ARCaseStatus),
+      resolution: z.string().trim().max(1000).optional(),
+      ownerUserId: z.string().trim().optional(),
+    })
+    .strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const arCase = await prisma.aRCase.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!arCase) {
+    res.status(404).json({ error: "AR case not found" });
+    return;
+  }
+  const updated = await prisma.aRCase.update({
+    where: { id: arCase.id },
+    data: {
+      status: parsed.data.status,
+      resolution: parsed.data.resolution?.trim() || arCase.resolution,
+      ownerUserId: parsed.data.ownerUserId || arCase.ownerUserId,
+      resolvedAt: parsed.data.status === ARCaseStatus.RESOLVED || parsed.data.status === ARCaseStatus.CLOSED ? new Date() : null,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "AR_CASE_STATUS_UPDATED",
+    entity: "ARCase",
+    entityId: arCase.id,
+    summary: `AR case moved to ${updated.status}`,
+    before: { status: arCase.status, ownerUserId: arCase.ownerUserId },
+    after: { status: updated.status, ownerUserId: updated.ownerUserId, resolvedAt: updated.resolvedAt },
+  });
+  res.json({ case: updated });
+});
+
+app.get("/finance/cash-app/batches", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const batches = await prisma.cashApplicationBatch.findMany({
+    where: { orgId: req.user!.orgId },
+    include: {
+      createdBy: { select: { id: true, name: true, email: true } },
+      matches: {
+        select: {
+          id: true,
+          status: true,
+          amountCents: true,
+          confidence: true,
+          invoiceId: true,
+          loadId: true,
+          remittanceRef: true,
+          postedPaymentId: true,
+          createdAt: true,
+        },
+        orderBy: [{ createdAt: "asc" }],
+      },
+    },
+    orderBy: [{ importedAt: "desc" }],
+    take: 200,
+  });
+  res.json({ batches });
+});
+
+app.get("/finance/cash-app/batches/:id", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const batch = await prisma.cashApplicationBatch.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+    include: {
+      createdBy: { select: { id: true, name: true, email: true } },
+      matches: {
+        include: {
+          invoice: { select: { id: true, invoiceNumber: true, status: true, totalAmount: true, shortPaidAmount: true, paidAt: true } },
+          load: { select: { id: true, loadNumber: true, status: true } },
+          resolvedBy: { select: { id: true, name: true, email: true } },
+        },
+        orderBy: [{ createdAt: "asc" }],
+      },
+    },
+  });
+  if (!batch) {
+    res.status(404).json({ error: "Cash application batch not found" });
+    return;
+  }
+  res.json({ batch });
+});
+
+app.post("/finance/cash-app/import", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z
+    .object({
+      sourceFileName: z.string().trim().max(240).optional(),
+      entries: z
+        .array(
+          z.object({
+            invoiceId: z.string().trim().optional(),
+            invoiceNumber: z.string().trim().optional(),
+            amountCents: z.number().int().positive(),
+            remittanceRef: z.string().trim().max(120).optional(),
+            notes: z.string().trim().max(500).optional(),
+          })
+        )
+        .min(1),
+    })
+    .strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const batch = await prisma.cashApplicationBatch.create({
+    data: {
+      orgId: req.user!.orgId,
+      sourceFileName: parsed.data.sourceFileName?.trim() || null,
+      status: CashApplicationBatchStatus.IMPORTED,
+      createdById: req.user!.id,
+    },
+  });
+
+  const matches: Array<{
+    id: string;
+    status: CashApplicationMatchStatus;
+    confidence: Prisma.Decimal;
+    invoiceId: string | null;
+    loadId: string | null;
+  }> = [];
+  for (const entry of parsed.data.entries) {
+    const invoice = await prisma.invoice.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        ...(entry.invoiceId ? { id: entry.invoiceId } : {}),
+        ...(entry.invoiceNumber ? { invoiceNumber: entry.invoiceNumber } : {}),
+      },
+      select: { id: true, loadId: true },
+      orderBy: { generatedAt: "desc" },
+    });
+    const matched = Boolean(invoice);
+    const confidence = new Prisma.Decimal(matched ? (entry.invoiceId ? "0.99" : "0.92") : "0.00");
+    const match = await prisma.cashApplicationMatch.create({
+      data: {
+        orgId: req.user!.orgId,
+        batchId: batch.id,
+        invoiceId: invoice?.id ?? null,
+        loadId: invoice?.loadId ?? null,
+        amountCents: entry.amountCents,
+        confidence,
+        status: matched ? CashApplicationMatchStatus.MATCHED : CashApplicationMatchStatus.SUGGESTED,
+        remittanceRef: entry.remittanceRef?.trim() || null,
+        notes: entry.notes?.trim() || null,
+      },
+      select: { id: true, status: true, confidence: true, invoiceId: true, loadId: true },
+    });
+    matches.push(match);
+  }
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "CASH_APP_BATCH_IMPORTED",
+    entity: "CashApplicationBatch",
+    entityId: batch.id,
+    summary: `Imported cash application batch with ${matches.length} entries`,
+    meta: {
+      sourceFileName: batch.sourceFileName,
+      matchedCount: matches.filter((row) => row.status === CashApplicationMatchStatus.MATCHED).length,
+      unmatchedCount: matches.filter((row) => row.status !== CashApplicationMatchStatus.MATCHED).length,
+    },
+  });
+
+  res.status(201).json({
+    batch: {
+      id: batch.id,
+      status: batch.status,
+      sourceFileName: batch.sourceFileName,
+      importedAt: batch.importedAt,
+    },
+    matches,
+  });
+});
+
+app.post("/finance/cash-app/batches/:id/post", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const batch = await prisma.cashApplicationBatch.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+    include: {
+      matches: {
+        where: { status: { in: [CashApplicationMatchStatus.MATCHED, CashApplicationMatchStatus.SUGGESTED] } },
+        orderBy: [{ createdAt: "asc" }],
+      },
+    },
+  });
+  if (!batch) {
+    res.status(404).json({ error: "Cash application batch not found" });
+    return;
+  }
+  if (batch.status === CashApplicationBatchStatus.POSTED) {
+    res.json({ posted: 0, skipped: 0, idempotent: true });
+    return;
+  }
+
+  let posted = 0;
+  let skipped = 0;
+  for (const match of batch.matches) {
+    if (!match.invoiceId) {
+      skipped += 1;
+      continue;
+    }
+    const invoice = await prisma.invoice.findFirst({
+      where: { id: match.invoiceId, orgId: req.user!.orgId },
+      include: {
+        items: { select: { amount: true } },
+        payments: { select: { amountCents: true } },
+      },
+    });
+    if (!invoice) {
+      skipped += 1;
+      continue;
+    }
+    const existingPayment = await prisma.invoicePayment.findFirst({
+      where: {
+        orgId: req.user!.orgId,
+        invoiceId: invoice.id,
+        reference: match.remittanceRef ?? `cashapp:${batch.id}:${match.id}`,
+        amountCents: match.amountCents,
+      },
+      select: { id: true, amountCents: true },
+    });
+    let paymentId = existingPayment?.id ?? null;
+    let amountToPost = existingPayment?.amountCents ?? match.amountCents;
+    if (!existingPayment) {
+      const createdPayment = await prisma.invoicePayment.create({
+        data: {
+          orgId: req.user!.orgId,
+          loadId: invoice.loadId,
+          invoiceId: invoice.id,
+          amountCents: match.amountCents,
+          method: FinancePaymentMethod.OTHER,
+          reference: match.remittanceRef ?? `cashapp:${batch.id}:${match.id}`,
+          notes: match.notes ?? "Cash application posted",
+          receivedAt: new Date(),
+          createdById: req.user!.id,
+        },
+      });
+      paymentId = createdPayment.id;
+      amountToPost = createdPayment.amountCents;
+    }
+
+    const invoiceTotalCents =
+      toMoneyCents(invoice.totalAmount) > 0
+        ? toMoneyCents(invoice.totalAmount)
+        : invoice.items.reduce((sum, item) => sum + toMoneyCents(item.amount), 0);
+    const paidSoFarCents = await prisma.invoicePayment.aggregate({
+      where: { orgId: req.user!.orgId, invoiceId: invoice.id },
+      _sum: { amountCents: true },
+    });
+    const paidCents = Number(paidSoFarCents._sum.amountCents ?? 0);
+    const shortPaidCents = Math.max(0, invoiceTotalCents - paidCents);
+    const nextStatus = shortPaidCents > 0 ? InvoiceStatus.SHORT_PAID : InvoiceStatus.PAID;
+
+    await prisma.invoice.update({
+      where: { id: invoice.id },
+      data: {
+        status: nextStatus,
+        paidAt: new Date(),
+        shortPaidAmount: shortPaidCents > 0 ? new Prisma.Decimal(shortPaidCents).div(100) : null,
+      },
+    });
+    await prisma.cashApplicationMatch.update({
+      where: { id: match.id },
+      data: {
+        status: CashApplicationMatchStatus.POSTED,
+        postedPaymentId: paymentId,
+        resolvedById: req.user!.id,
+        resolvedAt: new Date(),
+      },
+    });
+    await persistInvoicePaymentReceivedJournal({
+      orgId: req.user!.orgId,
+      invoiceId: invoice.id,
+      amountCents: amountToPost,
+      userId: req.user!.id,
+      source: "finance.cash-app.post",
+      idempotencyKey: `invoice:${invoice.id}:cashapp:${match.id}`,
+    });
+    await refreshFinanceAfterMutation({
+      orgId: req.user!.orgId,
+      loadId: invoice.loadId,
+      source: "finance.cash-app",
+      trigger: "posted",
+      dedupeSuffix: match.id,
+    });
+    posted += 1;
+  }
+
+  await prisma.cashApplicationBatch.update({
+    where: { id: batch.id },
+    data: {
+      status: CashApplicationBatchStatus.POSTED,
+      postedAt: new Date(),
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "CASH_APP_BATCH_POSTED",
+    entity: "CashApplicationBatch",
+    entityId: batch.id,
+    summary: `Posted cash application batch ${batch.id}`,
+    meta: { posted, skipped },
+  });
+  res.json({ posted, skipped, idempotent: false });
+});
+
+app.get("/finance/vendors", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const vendors = await prisma.vendor.findMany({
+    where: { orgId: req.user!.orgId },
+    orderBy: [{ active: "desc" }, { name: "asc" }],
+    take: 500,
+  });
+  res.json({ vendors });
+});
+
+app.post("/finance/vendors", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z
+    .object({
+      code: z.string().trim().min(2).max(64).regex(/^[A-Za-z0-9_-]+$/),
+      name: z.string().trim().min(2).max(160),
+      paymentMethod: z.nativeEnum(FinancePaymentMethod).optional(),
+      termsDays: z.number().int().min(0).max(365).optional(),
+      email: z.string().trim().email().optional(),
+      phone: z.string().trim().max(40).optional(),
+      remitToAddress: z.string().trim().max(500).optional(),
+    })
+    .strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const vendor = await prisma.vendor.create({
+    data: {
+      orgId: req.user!.orgId,
+      code: parsed.data.code.trim().toUpperCase(),
+      name: parsed.data.name.trim(),
+      paymentMethod: parsed.data.paymentMethod ?? FinancePaymentMethod.ACH,
+      termsDays: parsed.data.termsDays ?? null,
+      email: parsed.data.email?.trim() || null,
+      phone: parsed.data.phone?.trim() || null,
+      remitToAddress: parsed.data.remitToAddress?.trim() || null,
+      createdById: req.user!.id,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "VENDOR_CREATED",
+    entity: "Vendor",
+    entityId: vendor.id,
+    summary: `Created vendor ${vendor.code}`,
+  });
+  res.status(201).json({ vendor });
+});
+
+app.get("/finance/vendor-bills", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const statusParam = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
+  const where: Prisma.VendorBillWhereInput = {
+    orgId: req.user!.orgId,
+    ...(statusParam && Object.values(VendorBillStatus).includes(statusParam as VendorBillStatus)
+      ? { status: statusParam as VendorBillStatus }
+      : {}),
+  };
+  const bills = await prisma.vendorBill.findMany({
+    where,
+    include: {
+      vendor: { select: { id: true, code: true, name: true } },
+      load: { select: { id: true, loadNumber: true, status: true } },
+      createdBy: { select: { id: true, name: true, email: true } },
+      approvedBy: { select: { id: true, name: true, email: true } },
+      lineItems: true,
+    },
+    orderBy: [{ createdAt: "desc" }],
+    take: 300,
+  });
+  res.json({ bills });
+});
+
+app.post("/finance/vendor-bills", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z
+    .object({
+      vendorId: z.string().trim().min(1),
+      loadId: z.string().trim().optional(),
+      invoiceNumber: z.string().trim().min(1).max(120),
+      amountCents: z.number().int().positive(),
+      dueDate: z.string().datetime().optional(),
+      reference: z.string().trim().max(120).optional(),
+      notes: z.string().trim().max(500).optional(),
+      lineItems: z.array(z.object({ description: z.string().trim().min(1).max(200), amountCents: z.number().int().positive(), glCode: z.string().trim().max(64).optional() })).optional(),
+    })
+    .strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const bill = await prisma.vendorBill.create({
+    data: {
+      orgId: req.user!.orgId,
+      vendorId: parsed.data.vendorId,
+      loadId: parsed.data.loadId || null,
+      invoiceNumber: parsed.data.invoiceNumber,
+      amountCents: parsed.data.amountCents,
+      dueDate: parsed.data.dueDate ? new Date(parsed.data.dueDate) : null,
+      reference: parsed.data.reference?.trim() || null,
+      notes: parsed.data.notes?.trim() || null,
+      status: VendorBillStatus.PENDING_APPROVAL,
+      createdById: req.user!.id,
+      lineItems: parsed.data.lineItems
+        ? {
+            create: parsed.data.lineItems.map((line) => ({
+              orgId: req.user!.orgId,
+              description: line.description,
+              amountCents: line.amountCents,
+              glCode: line.glCode?.trim() || null,
+            })),
+          }
+        : undefined,
+    },
+    include: { lineItems: true },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "VENDOR_BILL_CREATED",
+    entity: "VendorBill",
+    entityId: bill.id,
+    summary: `Created vendor bill ${bill.invoiceNumber}`,
+    after: { status: bill.status, amountCents: bill.amountCents },
+  });
+  res.status(201).json({ bill });
+});
+
+app.post("/finance/vendor-bills/:id/approve", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const bill = await prisma.vendorBill.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!bill) {
+    res.status(404).json({ error: "Vendor bill not found" });
+    return;
+  }
+  if (bill.status === VendorBillStatus.PAID) {
+    res.status(400).json({ error: "Paid bill cannot be approved again" });
+    return;
+  }
+  const updated = await prisma.vendorBill.update({
+    where: { id: bill.id },
+    data: {
+      status: VendorBillStatus.APPROVED,
+      approvedById: req.user!.id,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "VENDOR_BILL_APPROVED",
+    entity: "VendorBill",
+    entityId: bill.id,
+    summary: `Approved vendor bill ${bill.invoiceNumber}`,
+    before: { status: bill.status },
+    after: { status: updated.status },
+  });
+  res.json({ bill: updated });
+});
+
+app.post("/finance/vendor-bills/:id/schedule", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z.object({ scheduledAt: z.string().datetime().optional() }).strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const bill = await prisma.vendorBill.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!bill) {
+    res.status(404).json({ error: "Vendor bill not found" });
+    return;
+  }
+  const updated = await prisma.vendorBill.update({
+    where: { id: bill.id },
+    data: {
+      status: VendorBillStatus.SCHEDULED,
+      scheduledAt: parsed.data.scheduledAt ? new Date(parsed.data.scheduledAt) : new Date(),
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "VENDOR_BILL_SCHEDULED",
+    entity: "VendorBill",
+    entityId: bill.id,
+    summary: `Scheduled vendor bill ${bill.invoiceNumber}`,
+    before: { status: bill.status },
+    after: { status: updated.status, scheduledAt: updated.scheduledAt },
+  });
+  res.json({ bill: updated });
+});
+
+app.post("/finance/vendor-bills/:id/paid", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const bill = await prisma.vendorBill.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+    include: { vendor: { select: { name: true } } },
+  });
+  if (!bill) {
+    res.status(404).json({ error: "Vendor bill not found" });
+    return;
+  }
+  if (bill.status === VendorBillStatus.PAID) {
+    const journal = buildVendorBillPaidJournal({
+      orgId: req.user!.orgId,
+      vendorBillId: bill.id,
+      amountCents: bill.amountCents,
+      idempotencyKey: `vendor-bill:${bill.id}:paid`,
+    });
+    await prisma.$transaction(async (tx) => {
+      await persistFinanceJournalEntry(tx as any, {
+        journal,
+        createdById: req.user!.id,
+        metadata: { source: "finance.vendor-bills.paid.idempotent" },
+      });
+      await applyFinanceWalletWriteThrough(tx as any, { journal });
+    });
+    res.json({ bill, idempotent: true, journal });
+    return;
+  }
+  const compliance = resolveComplianceDecision({
+    user: req.user!,
+    direction: "PAYABLE",
+    method: FinancePaymentMethod.ACH,
+    counterpartyName: bill.vendor?.name ?? "Vendor",
+    counterpartyReference: bill.invoiceNumber,
+    payeeType: "VENDOR",
+    compliance: null,
+  });
+  if (!compliance.decision.ok) {
+    res.status(400).json({
+      error: `Vendor payment blocked by finance compliance policy: ${compliance.decision.blockers.join("; ")}`,
+      compliance: compliance.decision,
+    });
+    return;
+  }
+
+  const updated = await prisma.vendorBill.update({
+    where: { id: bill.id },
+    data: {
+      status: VendorBillStatus.PAID,
+      paidAt: new Date(),
+    },
+  });
+  const journal = buildVendorBillPaidJournal({
+    orgId: req.user!.orgId,
+    vendorBillId: updated.id,
+    amountCents: updated.amountCents,
+    idempotencyKey: `vendor-bill:${updated.id}:paid`,
+  });
+  await prisma.$transaction(async (tx) => {
+    await persistFinanceJournalEntry(tx as any, {
+      journal,
+      createdById: req.user!.id,
+      metadata: { source: "finance.vendor-bills.paid" },
+    });
+    await applyFinanceWalletWriteThrough(tx as any, { journal });
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "VENDOR_BILL_PAID",
+    entity: "VendorBill",
+    entityId: updated.id,
+    summary: `Marked vendor bill ${updated.invoiceNumber} as paid`,
+    before: { status: bill.status },
+    after: { status: updated.status, paidAt: updated.paidAt },
+    meta: {
+      journal: journalToJson(journal),
+      compliance: {
+        warnings: compliance.decision.warnings,
+        overrides: compliance.overrides,
+      },
+    },
+  });
+  res.json({ bill: updated, idempotent: false, journal });
+});
+
+app.get("/billing/loads/:id/factoring/transactions", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const transactions = await prisma.factoringTransaction.findMany({
+    where: { orgId: req.user!.orgId, loadId: req.params.id },
+    orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
+  });
+  res.json({ transactions });
+});
+
+app.post("/billing/loads/:id/factoring/transactions", requireAuth, requireCsrf, requireRole("ADMIN", "BILLING"), async (req, res) => {
+  const schema = z
+    .object({
+      invoiceId: z.string().trim().optional(),
+      submissionId: z.string().trim().optional(),
+      type: z.nativeEnum(FactoringTransactionType),
+      amountCents: z.number().int().positive(),
+      occurredAt: z.string().datetime().optional(),
+      reference: z.string().trim().max(120).optional(),
+      notes: z.string().trim().max(500).optional(),
+    })
+    .strict();
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const load = await prisma.load.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!load) {
+    res.status(404).json({ error: "Load not found" });
+    return;
+  }
+  if (parsed.data.submissionId) {
+    const submission = await prisma.billingSubmission.findFirst({
+      where: { id: parsed.data.submissionId, orgId: req.user!.orgId, loadId: load.id },
+      select: { id: true },
+    });
+    if (!submission) {
+      res.status(404).json({ error: "Factoring submission not found for this load" });
+      return;
+    }
+  }
+  const transaction = await prisma.factoringTransaction.create({
+    data: {
+      orgId: req.user!.orgId,
+      loadId: load.id,
+      invoiceId: parsed.data.invoiceId || null,
+      submissionId: parsed.data.submissionId || null,
+      type: parsed.data.type,
+      amountCents: parsed.data.amountCents,
+      occurredAt: parsed.data.occurredAt ? new Date(parsed.data.occurredAt) : new Date(),
+      reference: parsed.data.reference?.trim() || null,
+      notes: parsed.data.notes?.trim() || null,
+      createdById: req.user!.id,
+    },
+  });
+  const journal = buildFactoringTransactionJournal({
+    orgId: req.user!.orgId,
+    transactionId: transaction.id,
+    type: transaction.type as "ADVANCE" | "RESERVE_RELEASE" | "FEE" | "RECOURSE" | "ADJUSTMENT",
+    amountCents: transaction.amountCents,
+    idempotencyKey: `factoring-transaction:${transaction.id}:posted`,
+  });
+  await prisma.$transaction(async (tx) => {
+    await persistFinanceJournalEntry(tx as any, {
+      journal,
+      createdById: req.user!.id,
+      metadata: { source: "finance.factoring.transaction", factoringType: transaction.type },
+    });
+    await applyFinanceWalletWriteThrough(tx as any, { journal });
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "FACTORING_TRANSACTION_RECORDED",
+    entity: "FactoringTransaction",
+    entityId: transaction.id,
+    summary: `Recorded factoring ${transaction.type.toLowerCase()} transaction`,
+    after: {
+      loadId: transaction.loadId,
+      invoiceId: transaction.invoiceId,
+      submissionId: transaction.submissionId,
+      type: transaction.type,
+      amountCents: transaction.amountCents,
+    },
+    meta: { journal: journalToJson(journal) },
+  });
+  await refreshFinanceAfterMutation({
+    orgId: req.user!.orgId,
+    loadId: transaction.loadId,
+    source: "finance.factoring-transaction",
+    trigger: transaction.type.toLowerCase(),
+    dedupeSuffix: transaction.id,
+  });
+  res.status(201).json({ transaction, journal });
 });
 
 app.get("/internal/loads/:id/finance-snapshot", requireAuth, requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
@@ -14133,6 +20206,29 @@ app.get("/billing/readiness", requireAuth, requireRole("ADMIN", "DISPATCHER", "H
   res.json({ loads: mapReceivablesToLegacyReadiness(result.items, result.loadsById) });
 });
 
+app.get(
+  "/billing/invoices/:loadId/preflight",
+  requireAuth,
+  requireOperationalOrg,
+  requireRole("ADMIN", "BILLING", "HEAD_DISPATCHER", "DISPATCHER"),
+  async (req, res) => {
+    try {
+      const { preflight } = await evaluateInvoicePreflightForLoad({
+        orgId: req.user!.orgId,
+        loadId: req.params.loadId,
+      });
+      res.json(preflight);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message === "Load not found") {
+        res.status(404).json({ error: message });
+        return;
+      }
+      res.status(400).json({ error: message });
+    }
+  }
+);
+
 app.get("/integrations/quickbooks/status", requireAuth, requireRole("ADMIN", "BILLING"), async (req, res) => {
   const qbo = await getQuickbooksStatusForOrg(req.user!.orgId);
   res.json({ enabled: qbo.enabled, companyId: qbo.companyId });
@@ -14177,6 +20273,366 @@ app.put("/integrations/quickbooks/status", requireAuth, requireCsrf, requireRole
   });
   const status = await getQuickbooksStatusForOrg(req.user!.orgId);
   res.json({ enabled: status.enabled, companyId: status.companyId });
+});
+
+app.get("/integrations/contracts", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "BILLING"), async (req, res) => {
+  const [qbo, samsara, settings] = await Promise.all([
+    getQuickbooksStatusForOrg(req.user!.orgId),
+    prisma.trackingIntegration.findFirst({
+      where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+      select: { status: true, updatedAt: true },
+    }),
+    prisma.orgSettings.findFirst({
+      where: { orgId: req.user!.orgId },
+      select: {
+        shipmentWebhooksEnabled: true,
+        shipmentWebhooksVersion: true,
+        shipmentProjectionLagEnabled: true,
+        shipmentProjectionLagSeconds: true,
+      },
+    }),
+  ]);
+  res.json({
+    contracts: {
+      shipmentWebhooks: {
+        version: SHIPMENT_WEBHOOK_VERSION_V1,
+        events: SHIPMENT_WEBHOOK_SUPPORTED_EVENTS,
+        signature: "sha256=<hmac of raw request body>",
+        deliveryStatus: ["PENDING", "PROCESSING", "DELIVERED", "FAILED"],
+      },
+      accounting: {
+        quickbooks: {
+          enabled: qbo.enabled,
+          companyId: qbo.companyId,
+          endpoints: ["/integrations/quickbooks/status", "/finance/qbo/jobs"],
+        },
+      },
+      telematics: {
+        samsara: {
+          connected: samsara?.status === TrackingIntegrationStatus.CONNECTED,
+          status: samsara?.status ?? TrackingIntegrationStatus.DISCONNECTED,
+          endpoints: ["/api/integrations/samsara/status", "/api/integrations/samsara/vehicles"],
+        },
+      },
+    },
+    featureFlags: {
+      shipmentWebhooksEnabled: settings?.shipmentWebhooksEnabled ?? false,
+      shipmentWebhooksVersion: settings?.shipmentWebhooksVersion ?? SHIPMENT_WEBHOOK_VERSION_V1,
+      shipmentProjectionLagEnabled: settings?.shipmentProjectionLagEnabled ?? false,
+      shipmentProjectionLagSeconds: settings?.shipmentProjectionLagSeconds ?? 120,
+    },
+  });
+});
+
+app.get("/integrations/shipments/webhooks", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit ?? 50) || 50));
+  const [settings, subscriptions, deliveries] = await Promise.all([
+    prisma.orgSettings.findFirst({
+      where: { orgId: req.user!.orgId },
+      select: {
+        shipmentWebhooksEnabled: true,
+        shipmentWebhooksVersion: true,
+        shipmentProjectionLagEnabled: true,
+        shipmentProjectionLagSeconds: true,
+      },
+    }),
+    prisma.shipmentWebhookSubscription.findMany({
+      where: { orgId: req.user!.orgId },
+      orderBy: [{ enabled: "desc" }, { updatedAt: "desc" }],
+    }),
+    prisma.shipmentWebhookDelivery.findMany({
+      where: { orgId: req.user!.orgId },
+      orderBy: [{ createdAt: "desc" }],
+      take: limit,
+      include: { subscription: { select: { endpointUrl: true, version: true } } },
+    }),
+  ]);
+
+  const lag = computeShipmentProjectionLagMetrics({
+    deliveries: deliveries.map((row) => ({
+      status: row.status,
+      createdAt: row.createdAt,
+      deliveredAt: row.deliveredAt,
+    })),
+    thresholdSeconds: settings?.shipmentProjectionLagSeconds ?? 120,
+  });
+
+  res.json({
+    settings: {
+      enabled: settings?.shipmentWebhooksEnabled ?? false,
+      version: settings?.shipmentWebhooksVersion ?? SHIPMENT_WEBHOOK_VERSION_V1,
+      projectionLagEnabled: settings?.shipmentProjectionLagEnabled ?? false,
+      projectionLagThresholdSeconds: settings?.shipmentProjectionLagSeconds ?? 120,
+    },
+    subscriptions: subscriptions.map((subscription) => ({
+      id: subscription.id,
+      endpointUrl: subscription.endpointUrl,
+      version: subscription.version,
+      enabled: subscription.enabled,
+      timeoutMs: subscription.timeoutMs,
+      eventTypes: subscription.eventTypes,
+      lastError: subscription.lastError,
+      lastDeliveryAt: subscription.lastDeliveryAt,
+      createdAt: subscription.createdAt,
+      updatedAt: subscription.updatedAt,
+    })),
+    deliveries: deliveries.map((delivery) => ({
+      id: delivery.id,
+      eventId: delivery.eventId,
+      eventType: delivery.eventType,
+      eventVersion: delivery.eventVersion,
+      status: delivery.status,
+      attemptCount: delivery.attemptCount,
+      nextAttemptAt: delivery.nextAttemptAt,
+      lastHttpStatus: delivery.lastHttpStatus,
+      lastError: delivery.lastError,
+      deliveredAt: delivery.deliveredAt,
+      createdAt: delivery.createdAt,
+      subscription: delivery.subscription,
+    })),
+    lag,
+  });
+});
+
+app.post("/integrations/shipments/webhooks", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    endpointUrl: z.string().url(),
+    signingSecret: z.string().min(12).optional(),
+    enabled: z.boolean().optional(),
+    eventTypes: z.array(z.string()).optional(),
+    version: z.string().trim().min(2).max(16).optional(),
+    timeoutMs: z.number().int().min(1000).max(30000).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const version = parsed.data.version?.trim() || SHIPMENT_WEBHOOK_VERSION_V1;
+  if (version !== SHIPMENT_WEBHOOK_VERSION_V1) {
+    res.status(400).json({ error: `Only webhook version ${SHIPMENT_WEBHOOK_VERSION_V1} is supported.` });
+    return;
+  }
+  const eventTypes = normalizeShipmentWebhookEventTypes(parsed.data.eventTypes);
+  const endpointUrl = parsed.data.endpointUrl.trim();
+  const secret = parsed.data.signingSecret?.trim() || crypto.randomBytes(24).toString("hex");
+  const timeoutMs = clampShipmentWebhookTimeoutMs(parsed.data.timeoutMs);
+
+  const subscription = await prisma.shipmentWebhookSubscription.upsert({
+    where: {
+      orgId_endpointUrl_version: {
+        orgId: req.user!.orgId,
+        endpointUrl,
+        version,
+      },
+    },
+    create: {
+      orgId: req.user!.orgId,
+      endpointUrl,
+      signingSecret: secret,
+      version,
+      enabled: parsed.data.enabled ?? true,
+      eventTypes,
+      timeoutMs,
+    },
+    update: {
+      signingSecret: secret,
+      enabled: parsed.data.enabled ?? true,
+      eventTypes,
+      timeoutMs,
+      lastError: null,
+    },
+  });
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "SHIPMENT_WEBHOOK_UPSERTED",
+    entity: "ShipmentWebhookSubscription",
+    entityId: subscription.id,
+    summary: `Configured shipment webhook ${endpointUrl}`,
+    after: {
+      endpointUrl: subscription.endpointUrl,
+      version: subscription.version,
+      enabled: subscription.enabled,
+      eventTypes: subscription.eventTypes,
+      timeoutMs: subscription.timeoutMs,
+    },
+  });
+
+  res.json({
+    subscription: {
+      id: subscription.id,
+      endpointUrl: subscription.endpointUrl,
+      version: subscription.version,
+      enabled: subscription.enabled,
+      timeoutMs: subscription.timeoutMs,
+      eventTypes: subscription.eventTypes,
+      signingSecret: secret,
+    },
+  });
+});
+
+app.patch("/integrations/shipments/webhooks/:id", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    enabled: z.boolean().optional(),
+    eventTypes: z.array(z.string()).optional(),
+    signingSecret: z.string().min(12).optional(),
+    timeoutMs: z.number().int().min(1000).max(30000).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const existing = await prisma.shipmentWebhookSubscription.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Shipment webhook subscription not found" });
+    return;
+  }
+  const updateData: Prisma.ShipmentWebhookSubscriptionUpdateInput = {};
+  if (parsed.data.enabled !== undefined) updateData.enabled = parsed.data.enabled;
+  if (parsed.data.eventTypes !== undefined) {
+    updateData.eventTypes = normalizeShipmentWebhookEventTypes(parsed.data.eventTypes);
+  }
+  if (parsed.data.signingSecret !== undefined) updateData.signingSecret = parsed.data.signingSecret.trim();
+  if (parsed.data.timeoutMs !== undefined) updateData.timeoutMs = clampShipmentWebhookTimeoutMs(parsed.data.timeoutMs);
+  if (Object.keys(updateData).length === 0) {
+    res.status(400).json({ error: "No updates provided" });
+    return;
+  }
+  const subscription = await prisma.shipmentWebhookSubscription.update({
+    where: { id: existing.id },
+    data: updateData,
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "SHIPMENT_WEBHOOK_UPDATED",
+    entity: "ShipmentWebhookSubscription",
+    entityId: subscription.id,
+    summary: `Updated shipment webhook ${subscription.endpointUrl}`,
+    before: {
+      enabled: existing.enabled,
+      eventTypes: existing.eventTypes,
+      timeoutMs: existing.timeoutMs,
+    },
+    after: {
+      enabled: subscription.enabled,
+      eventTypes: subscription.eventTypes,
+      timeoutMs: subscription.timeoutMs,
+    },
+  });
+  res.json({
+    subscription: {
+      id: subscription.id,
+      endpointUrl: subscription.endpointUrl,
+      version: subscription.version,
+      enabled: subscription.enabled,
+      timeoutMs: subscription.timeoutMs,
+      eventTypes: subscription.eventTypes,
+      updatedAt: subscription.updatedAt,
+    },
+  });
+});
+
+app.post("/integrations/shipments/webhooks/:id/test", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const subscription = await prisma.shipmentWebhookSubscription.findFirst({
+    where: { id: req.params.id, orgId: req.user!.orgId },
+    select: { id: true, endpointUrl: true, version: true, enabled: true, orgId: true },
+  });
+  if (!subscription) {
+    res.status(404).json({ error: "Shipment webhook subscription not found" });
+    return;
+  }
+  const eventId = `shipment_test:${subscription.id}:${crypto.randomUUID()}`;
+  const payload = buildShipmentWebhookPayloadV1({
+    eventId,
+    eventType: ShipmentWebhookEventType.SHIPMENT_TEST,
+    orgId: req.user!.orgId,
+    loadId: "test-load",
+    tripId: null,
+    actor: { userId: req.user!.id, role: req.user!.role },
+    metadata: {
+      test: true,
+      endpointUrl: subscription.endpointUrl,
+      requestedAt: new Date().toISOString(),
+    },
+  });
+  await prisma.shipmentWebhookDelivery.create({
+    data: {
+      orgId: req.user!.orgId,
+      subscriptionId: subscription.id,
+      eventId,
+      eventType: ShipmentWebhookEventType.SHIPMENT_TEST,
+      eventVersion: SHIPMENT_WEBHOOK_VERSION_V1,
+      payload: payload as unknown as Prisma.InputJsonValue,
+      status: ShipmentWebhookDeliveryStatus.PENDING,
+      nextAttemptAt: new Date(),
+      attemptCount: 0,
+    },
+  });
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "SHIPMENT_WEBHOOK_TEST_QUEUED",
+    entity: "ShipmentWebhookSubscription",
+    entityId: subscription.id,
+    summary: `Queued shipment webhook test for ${subscription.endpointUrl}`,
+    meta: {
+      eventId,
+      eventType: ShipmentWebhookEventType.SHIPMENT_TEST,
+      version: subscription.version,
+    },
+  });
+  res.json({ ok: true, eventId });
+});
+
+app.get("/internal/shipments/projection-lag", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER"), async (req, res) => {
+  const lookbackMinutes = Math.max(5, Math.min(24 * 60, Number(req.query.lookbackMinutes ?? 180) || 180));
+  const since = addDays(new Date(), -lookbackMinutes / (24 * 60));
+  const [settings, deliveries] = await Promise.all([
+    prisma.orgSettings.findFirst({
+      where: { orgId: req.user!.orgId },
+      select: {
+        shipmentProjectionLagEnabled: true,
+        shipmentProjectionLagSeconds: true,
+        shipmentWebhooksEnabled: true,
+      },
+    }),
+    prisma.shipmentWebhookDelivery.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        createdAt: { gte: since },
+      },
+      select: {
+        status: true,
+        createdAt: true,
+        deliveredAt: true,
+      },
+    }),
+  ]);
+
+  const thresholdSeconds = settings?.shipmentProjectionLagSeconds ?? 120;
+  const lag = computeShipmentProjectionLagMetrics({
+    deliveries: deliveries.map((row) => ({
+      status: row.status,
+      createdAt: row.createdAt,
+      deliveredAt: row.deliveredAt,
+    })),
+    thresholdSeconds,
+  });
+
+  res.json({
+    orgId: req.user!.orgId,
+    lookbackMinutes,
+    since: since.toISOString(),
+    projectionLagEnabled: settings?.shipmentProjectionLagEnabled ?? false,
+    shipmentWebhooksEnabled: settings?.shipmentWebhooksEnabled ?? false,
+    lag,
+  });
 });
 
 app.get("/billing/queue", requireAuth, requirePermission(Permission.DOC_VERIFY, Permission.INVOICE_SEND), async (req, res) => {
@@ -14402,6 +20858,15 @@ async function sendLoadToFactoring(params: {
         createdById: params.userId,
       },
     });
+    await enqueueFactoringRequestedEvent(prisma as any, {
+      orgId: params.orgId,
+      loadId: load.id,
+      invoiceId: invoice?.id ?? null,
+      submissionId: submission.id,
+      status: "SENT",
+      reason: "factoring.send",
+      dedupeSuffix: submission.id,
+    });
     await logAudit({
       orgId: params.orgId,
       userId: params.userId,
@@ -14417,10 +20882,12 @@ async function sendLoadToFactoring(params: {
         overrideReason: params.input.overrideReason?.trim() || null,
       },
     });
-    await persistFinanceSnapshotForLoad({
+    await refreshFinanceAfterMutation({
       orgId: params.orgId,
       loadId: load.id,
-      quickbooksConnected: isQuickbooksConnectedFromEnv(),
+      source: "finance.factoring",
+      trigger: "sent",
+      dedupeSuffix: submission.id,
     });
     return { submission, idempotent: false };
   } catch (error) {
@@ -14441,6 +20908,15 @@ async function sendLoadToFactoring(params: {
         createdById: params.userId,
       },
     });
+    await enqueueFactoringRequestedEvent(prisma as any, {
+      orgId: params.orgId,
+      loadId: load.id,
+      invoiceId: invoice?.id ?? null,
+      submissionId: submission.id,
+      status: "FAILED",
+      reason: message,
+      dedupeSuffix: submission.id,
+    });
     await logAudit({
       orgId: params.orgId,
       userId: params.userId,
@@ -14449,6 +20925,13 @@ async function sendLoadToFactoring(params: {
       entityId: submission.id,
       summary: `Factoring send failed for ${load.loadNumber}`,
       meta: { error: message, retryMode: Boolean(params.retryMode) },
+    });
+    await refreshFinanceAfterMutation({
+      orgId: params.orgId,
+      loadId: load.id,
+      source: "finance.factoring",
+      trigger: "failed",
+      dedupeSuffix: submission.id,
     });
     throw new Error(message);
   }
@@ -14628,6 +21111,15 @@ app.post(
       reference: z.string().trim().max(120).optional(),
       notes: z.string().trim().max(500).optional(),
       receivedAt: z.string().datetime().optional(),
+      compliance: z
+        .object({
+          achAccountValidated: z.boolean().optional(),
+          achReturnCode: z.string().trim().max(12).optional(),
+          taxProfileVerified: z.boolean().optional(),
+          taxFormType: z.string().trim().max(40).optional(),
+          sanctionsOverrideReason: z.string().trim().max(240).optional(),
+        })
+        .optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -14637,7 +21129,13 @@ app.post(
 
     const load = await prisma.load.findFirst({
       where: { id: req.params.loadId, orgId: req.user!.orgId, deletedAt: null },
-      select: { id: true, loadNumber: true, status: true },
+      select: {
+        id: true,
+        loadNumber: true,
+        status: true,
+        customerName: true,
+        customer: { select: { name: true } },
+      },
     });
     if (!load) {
       res.status(404).json({ error: "Load not found" });
@@ -14678,6 +21176,48 @@ app.post(
     const reference = parsed.data.reference?.trim() || null;
     const notes = parsed.data.notes?.trim() || null;
     const method = parsed.data.method;
+    const complianceInput = parsed.data.compliance ?? null;
+
+    const compliance = resolveComplianceDecision({
+      user: req.user!,
+      direction: "RECEIVABLE",
+      method,
+      counterpartyName: load.customerName ?? load.customer?.name ?? "Unknown customer",
+      counterpartyReference: reference ?? invoice.invoiceNumber ?? load.loadNumber,
+      payeeType: "CUSTOMER",
+      compliance: complianceInput
+        ? {
+            achAccountValidated: complianceInput.achAccountValidated,
+            achReturnCode: complianceInput.achReturnCode ?? null,
+            taxProfileVerified: complianceInput.taxProfileVerified,
+            taxFormType: complianceInput.taxFormType ?? null,
+            sanctionsOverrideReason: complianceInput.sanctionsOverrideReason ?? null,
+          }
+        : null,
+    });
+    if (!compliance.decision.ok) {
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "FINANCE_COMPLIANCE_BLOCKED",
+        entity: "Invoice",
+        entityId: invoice.id,
+        summary: `Blocked manual payment for ${load.loadNumber} by compliance policy`,
+        meta: {
+          direction: "RECEIVABLE",
+          method,
+          counterpartyName: load.customerName ?? load.customer?.name ?? null,
+          blockers: compliance.decision.blockers,
+          warnings: compliance.decision.warnings,
+          checks: compliance.decision.checks,
+        },
+      });
+      res.status(400).json({
+        error: `Payment blocked by finance compliance policy: ${compliance.decision.blockers.join("; ")}`,
+        compliance: compliance.decision,
+      });
+      return;
+    }
 
     let amountCents = invoiceTotalCents;
     if (mode === "PARTIAL") {
@@ -14710,6 +21250,14 @@ app.post(
       orderBy: { createdAt: "desc" },
     });
     if (duplicate) {
+      await persistInvoicePaymentReceivedJournal({
+        orgId: req.user!.orgId,
+        invoiceId: invoice.id,
+        amountCents: duplicate.amountCents,
+        userId: req.user!.id,
+        source: "finance.manual-payment.duplicate",
+        idempotencyKey: `invoice:${invoice.id}:payment:${duplicate.id}`,
+      });
       res.json({
         ok: true,
         idempotent: true,
@@ -14767,6 +21315,14 @@ app.post(
         message: `Manual payment recorded for ${load.loadNumber}`,
       });
     }
+    await persistInvoicePaymentReceivedJournal({
+      orgId: req.user!.orgId,
+      invoiceId: invoice.id,
+      amountCents,
+      userId: req.user!.id,
+      source: "finance.manual-payment",
+      idempotencyKey: `invoice:${invoice.id}:payment:${payment.id}`,
+    });
 
     await createEvent({
       orgId: req.user!.orgId,
@@ -14781,6 +21337,11 @@ app.post(
         method,
         reference,
         receivedAt: receivedAt.toISOString(),
+        compliance: {
+          warnings: compliance.decision.warnings,
+          overrides: compliance.overrides,
+          checks: compliance.decision.checks,
+        },
       },
     });
 
@@ -14809,6 +21370,11 @@ app.post(
           reference: payment.reference,
           notes: payment.notes,
           receivedAt: payment.receivedAt,
+        },
+        compliance: {
+          warnings: compliance.decision.warnings,
+          overrides: compliance.overrides,
+          checks: compliance.decision.checks,
         },
       },
     });
@@ -14840,6 +21406,11 @@ app.post(
         paidAt: updatedInvoice.paidAt,
         shortPaidAmount: updatedInvoice.shortPaidAmount,
         paymentRef: updatedInvoice.paymentRef,
+      },
+      compliance: {
+        warnings: compliance.decision.warnings,
+        overrides: compliance.overrides,
+        checks: compliance.decision.checks,
       },
     });
   }
@@ -14910,7 +21481,17 @@ app.post(
 async function generateInvoiceForLoad(params: { orgId: string; loadId: string; userId: string; role: Role }) {
   const load = await prisma.load.findFirst({
     where: { id: params.loadId, orgId: params.orgId },
-    include: { stops: true, customer: true, operatingEntity: true },
+    include: {
+      stops: true,
+      customer: true,
+      operatingEntity: true,
+      docs: true,
+      charges: true,
+      accessorials: true,
+      invoices: {
+        select: { status: true },
+      },
+    },
   });
   if (!load) {
     throw new Error("Load not found");
@@ -15001,6 +21582,17 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
         message: `Invoice exists for ${load.loadNumber}`,
       });
     }
+    const issuedAmountCents =
+      toMoneyCents(hydratedInvoice.totalAmount) > 0
+        ? toMoneyCents(hydratedInvoice.totalAmount)
+        : hydratedInvoice.items.reduce((sum, item) => sum + toMoneyCents(item.amount), 0);
+    await persistInvoiceIssuedJournal({
+      orgId: params.orgId,
+      invoiceId: hydratedInvoice.id,
+      amountCents: issuedAmountCents,
+      userId: params.userId,
+      source: "finance.invoice.existing",
+    });
     if (isQuickbooksConnectedFromEnv()) {
       const job = await enqueueQboInvoiceSyncJob(prisma as any, {
         orgId: params.orgId,
@@ -15033,12 +21625,18 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
   if (!settings) {
     throw new Error("Settings not configured");
   }
-  const docs = await prisma.document.findMany({ where: { loadId: load.id, orgId: params.orgId } });
-  const missingDocs = settings.requiredDocs.filter(
-    (docType) => !docs.some((doc) => doc.type === (docType as DocType) && doc.status === DocStatus.VERIFIED)
+  const preflight = evaluateInvoicePreflightSnapshot({
+    load: {
+      ...load,
+      invoices: load.invoices.map((invoice) => ({ status: invoice.status })),
+    } as InvoicePreflightLoad,
+    settings,
+  });
+  const missingRequiredDocs = settings.requiredDocs.filter(
+    (docType) => !load.docs.some((doc) => doc.type === (docType as DocType) && doc.status === DocStatus.VERIFIED)
   );
-  if (missingDocs.length > 0) {
-    for (const docType of missingDocs) {
+  if (!preflight.ok) {
+    for (const docType of missingRequiredDocs) {
       await ensureTask({
         orgId: params.orgId,
         loadId: load.id,
@@ -15050,7 +21648,7 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
         dedupeKey: `MISSING_DOC:${docType}:load:${load.id}`,
       });
     }
-    return { missingDocs } as const;
+    throw new Error(`Resolve invoice preflight blockers before generation: ${preflight.blockingReasons.join(", ")}`);
   }
   const chargeLabels: Record<LoadChargeType, string> = {
     LINEHAUL: "Linehaul",
@@ -15060,10 +21658,7 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
     OTHER: "Other",
     ADJUSTMENT: "Adjustment",
   };
-  const charges = await prisma.loadCharge.findMany({
-    where: { orgId: params.orgId, loadId: load.id },
-    orderBy: { createdAt: "asc" },
-  });
+  const charges = [...load.charges].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const linehaul = toDecimal(load.rate);
   const hasLinehaulCharge = charges.some((charge) => charge.type === LoadChargeType.LINEHAUL);
   const chargeItems = charges.map((charge) => {
@@ -15206,6 +21801,13 @@ async function generateInvoiceForLoad(params: { orgId: string; loadId: string; u
     entityId: invoice.id,
     summary: `Generated invoice ${invoiceResult.invoiceNumber} for ${load.loadNumber}`,
     after: { invoiceNumber: invoice.invoiceNumber, status: invoice.status },
+  });
+  await persistInvoiceIssuedJournal({
+    orgId: params.orgId,
+    invoiceId: invoice.id,
+    amountCents: toMoneyCents(invoice.totalAmount),
+    userId: params.userId,
+    source: "finance.invoice.new",
   });
 
   if (isQuickbooksConnectedFromEnv()) {
@@ -15427,6 +22029,30 @@ app.post(
         });
       }
     }
+    if (
+      (parsed.data.status === "PAID" || parsed.data.status === "SHORT_PAID") &&
+      beforeStatus !== InvoiceStatus.PAID &&
+      beforeStatus !== InvoiceStatus.SHORT_PAID
+    ) {
+      let invoiceTotalCents = toMoneyCents(updated.totalAmount ?? invoice.totalAmount);
+      if (invoiceTotalCents <= 0) {
+        const invoiceItems = await prisma.invoiceLineItem.findMany({
+          where: { invoiceId: invoice.id },
+          select: { amount: true },
+        });
+        invoiceTotalCents = invoiceItems.reduce((sum, line) => sum + toMoneyCents(line.amount), 0);
+      }
+      const shortPaidCents = parsed.data.status === "SHORT_PAID" ? toMoneyCents(updated.shortPaidAmount ?? invoice.shortPaidAmount) : 0;
+      const settledCents = Math.max(0, invoiceTotalCents - Math.max(0, shortPaidCents));
+      await persistInvoicePaymentReceivedJournal({
+        orgId: req.user!.orgId,
+        invoiceId: invoice.id,
+        amountCents: settledCents,
+        userId: req.user!.id,
+        source: "finance.invoice-status",
+        idempotencyKey: `invoice:${invoice.id}:status-payment:${parsed.data.status.toLowerCase()}`,
+      });
+    }
 
     await createEvent({
       orgId: req.user!.orgId,
@@ -15543,8 +22169,203 @@ type PayablePreviewLine = {
   source: Prisma.JsonObject;
 };
 
+type MoveContractScope = {
+  driverId?: string | null;
+  movementMode?: MovementMode | null;
+  customerId?: string | null;
+};
+
+type MoveContractRules = {
+  base?: {
+    model?: "CPM" | "FLAT_TRIP" | "REVENUE_SHARE" | "HOURLY" | "HYBRID_BEST_OF";
+    ratePerMileCents?: number;
+    flatAmountCents?: number;
+    revenueSharePct?: number;
+    hourlyRateCents?: number;
+    expectedHours?: number;
+  };
+  addons?: Array<
+    | { type: "DETENTION"; perHourCents?: number; fixedAmountCents?: number; freeMinutes?: number }
+    | { type: "LAYOVER"; fixedAmountCents?: number }
+    | { type: "STOP"; perStopCents?: number }
+  >;
+};
+
+type MoveContractCandidate = {
+  id: string;
+  code: string;
+  name: string;
+  template: MoveContractTemplate;
+  versionId: string;
+  version: number;
+  scope: MoveContractScope;
+  rules: MoveContractRules;
+};
+
+type MoveContractBaseModel = "CPM" | "FLAT_TRIP" | "REVENUE_SHARE" | "HOURLY" | "HYBRID_BEST_OF";
+
+function parseMoveContractScope(raw: Prisma.JsonValue | null): MoveContractScope {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const value = raw as Record<string, unknown>;
+  const movementMode =
+    value.movementMode === MovementMode.FTL || value.movementMode === MovementMode.LTL || value.movementMode === MovementMode.POOL_DISTRIBUTION
+      ? (value.movementMode as MovementMode)
+      : null;
+  return {
+    driverId: typeof value.driverId === "string" ? value.driverId.trim() || null : null,
+    movementMode,
+    customerId: typeof value.customerId === "string" ? value.customerId.trim() || null : null,
+  };
+}
+
+function parseMoveContractRules(raw: Prisma.JsonValue | null): MoveContractRules {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const value = raw as Record<string, unknown>;
+  const baseRaw = value.base && typeof value.base === "object" && !Array.isArray(value.base) ? (value.base as Record<string, unknown>) : null;
+  const addonsRaw = Array.isArray(value.addons) ? value.addons : [];
+  const baseModel =
+    baseRaw?.model === "CPM" ||
+    baseRaw?.model === "FLAT_TRIP" ||
+    baseRaw?.model === "REVENUE_SHARE" ||
+    baseRaw?.model === "HOURLY" ||
+    baseRaw?.model === "HYBRID_BEST_OF"
+      ? (baseRaw.model as MoveContractBaseModel)
+      : undefined;
+  return {
+    base: baseRaw
+      ? {
+          model: baseModel,
+          ratePerMileCents: Number(baseRaw.ratePerMileCents ?? 0) || undefined,
+          flatAmountCents: Number(baseRaw.flatAmountCents ?? 0) || undefined,
+          revenueSharePct: Number(baseRaw.revenueSharePct ?? 0) || undefined,
+          hourlyRateCents: Number(baseRaw.hourlyRateCents ?? 0) || undefined,
+          expectedHours: Number(baseRaw.expectedHours ?? 0) || undefined,
+        }
+      : undefined,
+    addons: addonsRaw
+      .map((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+        const addon = entry as Record<string, unknown>;
+        const type = String(addon.type ?? "").toUpperCase();
+        if (type === "DETENTION") {
+          return {
+            type: "DETENTION" as const,
+            perHourCents: Number(addon.perHourCents ?? 0) || undefined,
+            fixedAmountCents: Number(addon.fixedAmountCents ?? 0) || undefined,
+            freeMinutes: Number(addon.freeMinutes ?? 0) || undefined,
+          };
+        }
+        if (type === "LAYOVER") {
+          return {
+            type: "LAYOVER" as const,
+            fixedAmountCents: Number(addon.fixedAmountCents ?? 0) || undefined,
+          };
+        }
+        if (type === "STOP") {
+          return {
+            type: "STOP" as const,
+            perStopCents: Number(addon.perStopCents ?? 0) || undefined,
+          };
+        }
+        return null;
+      })
+      .filter(Boolean) as MoveContractRules["addons"],
+  };
+}
+
+function scoreMoveContractScope(load: { assignedDriverId: string | null; movementMode: MovementMode; customerId: string | null }, scope: MoveContractScope) {
+  if (scope.driverId && scope.driverId !== load.assignedDriverId) return -1;
+  if (scope.movementMode && scope.movementMode !== load.movementMode) return -1;
+  if (scope.customerId && scope.customerId !== load.customerId) return -1;
+  let score = 0;
+  if (scope.driverId) score += 4;
+  if (scope.movementMode) score += 2;
+  if (scope.customerId) score += 1;
+  return score;
+}
+
+function selectApplicableMoveContract(
+  load: { assignedDriverId: string | null; movementMode: MovementMode; customerId: string | null },
+  candidates: MoveContractCandidate[]
+) {
+  let selected: MoveContractCandidate | null = null;
+  let selectedScore = -1;
+  for (const candidate of candidates) {
+    const score = scoreMoveContractScope(load, candidate.scope);
+    if (score < 0) continue;
+    if (score > selectedScore) {
+      selected = candidate;
+      selectedScore = score;
+    }
+  }
+  return selected;
+}
+
+function computeMoveContractCompensation(params: {
+    load: {
+      loadNumber: string | null;
+      rate: Prisma.Decimal | null;
+      stops: Array<{ detentionMinutes: number | null }>;
+      paidMiles: number | null;
+      miles: number | null;
+    };
+  fallbackRatePerMileCents: number;
+  contract: MoveContractCandidate;
+}) {
+  const paidMilesNumber = Number(params.load.paidMiles ?? params.load.miles ?? 0);
+  const paidMiles = Number.isFinite(paidMilesNumber) && paidMilesNumber > 0 ? paidMilesNumber : 0;
+  const revenueCents = toMoneyCents(params.load.rate);
+  const baseModel = params.contract.rules.base?.model ?? params.contract.template;
+  const ratePerMileCents = Number(params.contract.rules.base?.ratePerMileCents ?? params.fallbackRatePerMileCents);
+  const flatAmountCents = Number(params.contract.rules.base?.flatAmountCents ?? 0);
+  const revenueSharePct = Number(params.contract.rules.base?.revenueSharePct ?? 0);
+  const hourlyRateCents = Number(params.contract.rules.base?.hourlyRateCents ?? 0);
+  const expectedHours = Number(params.contract.rules.base?.expectedHours ?? 0);
+
+  const cpmAmount = Math.round(Math.max(0, paidMiles) * Math.max(0, ratePerMileCents));
+  const flatAmount = Math.max(0, flatAmountCents);
+  const revenueShareAmount = Math.round(Math.max(0, revenueCents) * Math.max(0, revenueSharePct) / 100);
+  const hourlyAmount = Math.round(Math.max(0, hourlyRateCents) * Math.max(0, expectedHours));
+
+  let amountCents = 0;
+  if (baseModel === "CPM") amountCents = cpmAmount;
+  else if (baseModel === "FLAT_TRIP") amountCents = flatAmount;
+  else if (baseModel === "REVENUE_SHARE") amountCents = revenueShareAmount;
+  else if (baseModel === "HOURLY") amountCents = hourlyAmount;
+  else amountCents = Math.max(cpmAmount, flatAmount, revenueShareAmount, hourlyAmount);
+
+  let addonCents = 0;
+  const detentionMinutes = params.load.stops.reduce((sum, stop) => sum + Math.max(0, Number(stop.detentionMinutes ?? 0) || 0), 0);
+  const extraStopCount = Math.max(0, params.load.stops.length - 2);
+  for (const addon of params.contract.rules.addons ?? []) {
+    if (addon.type === "DETENTION" && detentionMinutes > 0) {
+      const freeMinutes = Math.max(0, Number(addon.freeMinutes ?? 0) || 0);
+      const billableMinutes = Math.max(0, detentionMinutes - freeMinutes);
+      if (billableMinutes <= 0) continue;
+      if (addon.fixedAmountCents && addon.fixedAmountCents > 0) addonCents += addon.fixedAmountCents;
+      else if (addon.perHourCents && addon.perHourCents > 0) addonCents += Math.ceil(billableMinutes / 60) * addon.perHourCents;
+      continue;
+    }
+    if (addon.type === "LAYOVER" && addon.fixedAmountCents && addon.fixedAmountCents > 0) {
+      addonCents += addon.fixedAmountCents;
+      continue;
+    }
+    if (addon.type === "STOP" && addon.perStopCents && addon.perStopCents > 0 && extraStopCount > 0) {
+      addonCents += extraStopCount * addon.perStopCents;
+    }
+  }
+
+  return {
+    baseModel,
+    amountCents: Math.max(0, amountCents + addonCents),
+    paidMiles,
+    ratePerMile: ratePerMileCents > 0 ? Number((ratePerMileCents / 100).toFixed(4)) : null,
+    addonCents,
+  };
+}
+
 async function buildPayablePreviewLines(params: { orgId: string; periodStart: Date; periodEnd: Date }) {
-  const [loads, settlementItems, settings] = await Promise.all([
+  const [loads, settlementItems, settings, contractVersions] = await Promise.all([
     prisma.load.findMany({
       where: {
         orgId: params.orgId,
@@ -15555,6 +22376,8 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
         id: true,
         loadNumber: true,
         movementMode: true,
+        customerId: true,
+        rate: true,
         miles: true,
         paidMiles: true,
         paidMilesSource: true,
@@ -15562,6 +22385,17 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
         paidMilesApprovedAt: true,
         assignedDriverId: true,
         deliveredAt: true,
+        docs: {
+          select: {
+            type: true,
+            status: true,
+          },
+        },
+        stops: {
+          select: {
+            detentionMinutes: true,
+          },
+        },
         driver: { select: { payRatePerMile: true } },
       },
       orderBy: [{ assignedDriverId: "asc" }, { deliveredAt: "asc" }, { createdAt: "asc" }],
@@ -15593,8 +22427,41 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
       where: { orgId: params.orgId },
       select: { driverRatePerMile: true },
     }),
+    prisma.moveContractVersion.findMany({
+      where: {
+        orgId: params.orgId,
+        effectiveFrom: { lte: params.periodEnd },
+        OR: [{ effectiveTo: null }, { effectiveTo: { gte: params.periodStart } }],
+        contract: { status: { in: [MoveContractStatus.ACTIVE, MoveContractStatus.DRAFT] } },
+      },
+      include: {
+        contract: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            template: true,
+            status: true,
+          },
+        },
+      },
+      orderBy: [{ effectiveFrom: "desc" }, { version: "desc" }, { createdAt: "desc" }],
+    }),
   ]);
   const lines: PayablePreviewLine[] = [];
+
+  const activeContracts: MoveContractCandidate[] = contractVersions
+    .filter((version) => version.contract.status !== MoveContractStatus.ARCHIVED)
+    .map((version) => ({
+      id: version.contract.id,
+      code: version.contract.code,
+      name: version.contract.name,
+      template: version.contract.template,
+      versionId: version.id,
+      version: version.version,
+      scope: parseMoveContractScope(version.scopeJson as Prisma.JsonValue | null),
+      rules: parseMoveContractRules(version.rulesJson as Prisma.JsonValue | null),
+    }));
 
   const defaultRate = toDecimal(settings?.driverRatePerMile ?? 0) ?? new Prisma.Decimal(0);
   for (const load of loads) {
@@ -15603,12 +22470,29 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
     const paidMilesNumber = Number(load.paidMiles ?? load.miles ?? 0);
     if (!Number.isFinite(paidMilesNumber) || paidMilesNumber <= 0) continue;
     const paidMiles = toDecimalFixed(paidMilesNumber, 2) ?? new Prisma.Decimal(0);
-    const amount = mul(ratePerMile, paidMiles);
+    const matchingContract = selectApplicableMoveContract(
+      {
+        assignedDriverId: load.assignedDriverId,
+        movementMode: load.movementMode,
+        customerId: load.customerId ?? null,
+      },
+      activeContracts
+    );
+    const contractCompensation = matchingContract
+      ? computeMoveContractCompensation({
+          load,
+          contract: matchingContract,
+          fallbackRatePerMileCents: Math.round(Number(ratePerMile) * 100),
+        })
+      : null;
+    const amount = contractCompensation ? new Prisma.Decimal(contractCompensation.amountCents).div(100) : mul(ratePerMile, paidMiles);
     const amountCents = Math.abs(Math.round(Number(amount) * 100));
     if (amountCents === 0) continue;
     const variancePct = calculateMilesVariancePct(load.miles ?? null, paidMilesNumber);
     const requiresReview = variancePct !== null && variancePct > PAYABLE_MILES_VARIANCE_REVIEW_PCT;
     const milesSource = load.paidMilesSource ?? PayableMilesSource.PLANNED;
+    const hasVerifiedPod = load.docs.some((doc) => doc.type === DocType.POD && doc.status === DocStatus.VERIFIED);
+    const hasVerifiedBol = load.docs.some((doc) => doc.type === DocType.BOL && doc.status === DocStatus.VERIFIED);
     lines.push({
       partyType: PayablePartyType.DRIVER,
       partyId: load.assignedDriverId,
@@ -15633,6 +22517,13 @@ async function buildPayablePreviewLines(params: { orgId: string; periodStart: Da
         plannedMiles: load.miles ?? null,
         paidMiles: paidMilesNumber,
         variancePct,
+        hasVerifiedPod,
+        hasVerifiedBol,
+        moveContractId: matchingContract?.id ?? null,
+        moveContractCode: matchingContract?.code ?? null,
+        moveContractVersionId: matchingContract?.versionId ?? null,
+        moveContractModel: contractCompensation?.baseModel ?? null,
+        moveContractAddonCents: contractCompensation?.addonCents ?? null,
       },
     });
   }
@@ -15703,6 +22594,42 @@ function detectPayableAnomalies(lines: PayablePreviewLine[]): PayableAnomaly[] {
           milesSource: line.milesSource,
         },
       });
+    }
+    if (line.source.sourceType === "DELIVERED_LOAD") {
+      const hasVerifiedPod = Boolean(line.source.hasVerifiedPod);
+      const hasVerifiedBol = Boolean(line.source.hasVerifiedBol);
+      const paidMilesApprovedAt = line.source.paidMilesApprovedAt;
+      if (!hasVerifiedPod) {
+        anomalies.push({
+          code: "MISSING_POD",
+          severity: "warning",
+          message: `POD is missing for payable load ${line.loadId ?? "unknown"}`,
+          partyId: line.partyId,
+          meta: { loadId: line.loadId },
+        });
+      }
+      if (!hasVerifiedBol) {
+        anomalies.push({
+          code: "MISSING_BOL",
+          severity: "warning",
+          message: `BOL is missing for payable load ${line.loadId ?? "unknown"}`,
+          partyId: line.partyId,
+          meta: { loadId: line.loadId },
+        });
+      }
+      if (line.milesSource === PayableMilesSource.PLANNED && !paidMilesApprovedAt) {
+        anomalies.push({
+          code: "MILES_UNAPPROVED",
+          severity: "warning",
+          message: `Paid miles not approved yet for load ${line.loadId ?? "unknown"}`,
+          partyId: line.partyId,
+          meta: {
+            loadId: line.loadId,
+            milesSource: line.milesSource,
+            paidMiles: line.paidMiles,
+          },
+        });
+      }
     }
     if ((line.type === PayableLineItemType.DEDUCTION || line.type === PayableLineItemType.REIMBURSEMENT) && !line.loadId) {
       anomalies.push({
@@ -16165,12 +23092,99 @@ app.post("/payables/runs/:id/finalize", requireAuth, requireCsrf, requirePermiss
 
 const markPayableRunPaidHandler = async (req: any, res: any) => {
   try {
+    const payloadSchema = z.object({
+      method: z.nativeEnum(FinancePaymentMethod).default(FinancePaymentMethod.OTHER),
+      reference: z.string().trim().max(120).optional(),
+      compliance: z
+        .object({
+          achAccountValidated: z.boolean().optional(),
+          achReturnCode: z.string().trim().max(12).optional(),
+          taxProfileVerified: z.boolean().optional(),
+          taxFormType: z.string().trim().max(40).optional(),
+          sanctionsOverrideReason: z.string().trim().max(240).optional(),
+        })
+        .optional(),
+    });
+    const parsedPayload = payloadSchema.safeParse(req.body ?? {});
+    if (!parsedPayload.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
     const run = await prisma.payableRun.findFirst({
       where: { id: req.params.id, orgId: req.user!.orgId },
-      include: { lineItems: { select: { amountCents: true } } },
+      include: { lineItems: { select: { amountCents: true, partyType: true, partyId: true } } },
     });
     if (!run) {
       res.status(404).json({ error: "Run not found" });
+      return;
+    }
+    const method = parsedPayload.data.method;
+    const reference = parsedPayload.data.reference?.trim() || null;
+    const complianceInput = parsedPayload.data.compliance ?? null;
+    const payeeType: FinancePayeeType = run.lineItems.some((line) => line.partyType === PayablePartyType.VENDOR)
+      ? "VENDOR"
+      : "DRIVER";
+    const driverIds = Array.from(
+      new Set(
+        run.lineItems
+          .filter((line) => line.partyType === PayablePartyType.DRIVER)
+          .map((line) => line.partyId)
+          .filter(Boolean)
+      )
+    );
+    const driverNames =
+      driverIds.length > 0
+        ? await prisma.driver.findMany({
+            where: { orgId: req.user!.orgId, id: { in: driverIds } },
+            select: { name: true },
+          })
+        : [];
+    const counterpartyName =
+      driverNames.length > 0
+        ? driverNames
+            .map((driver) => driver.name)
+            .filter(Boolean)
+            .slice(0, 3)
+            .join(", ")
+        : `Payable run ${run.id}`;
+    const compliance = resolveComplianceDecision({
+      user: req.user!,
+      direction: "PAYABLE",
+      method,
+      counterpartyName,
+      counterpartyReference: reference ?? run.id,
+      payeeType,
+      compliance: complianceInput
+        ? {
+            achAccountValidated: complianceInput.achAccountValidated,
+            achReturnCode: complianceInput.achReturnCode ?? null,
+            taxProfileVerified: complianceInput.taxProfileVerified,
+            taxFormType: complianceInput.taxFormType ?? null,
+            sanctionsOverrideReason: complianceInput.sanctionsOverrideReason ?? null,
+          }
+        : null,
+    });
+    if (!compliance.decision.ok) {
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "FINANCE_COMPLIANCE_BLOCKED",
+        entity: "PayableRun",
+        entityId: run.id,
+        summary: `Blocked payable run payout for ${run.id} by compliance policy`,
+        meta: {
+          direction: "PAYABLE",
+          method,
+          payeeType,
+          blockers: compliance.decision.blockers,
+          warnings: compliance.decision.warnings,
+          checks: compliance.decision.checks,
+        },
+      });
+      res.status(400).json({
+        error: `Payout blocked by finance compliance policy: ${compliance.decision.blockers.join("; ")}`,
+        compliance: compliance.decision,
+      });
       return;
     }
     const amountCents = run.lineItems.reduce((total, item) => total + item.amountCents, 0);
@@ -16180,6 +23194,8 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
       entityId: run.id,
       amountCents,
       idempotencyKey: resolveIdempotencyKey(req, `payable-run:${run.id}:paid`),
+      method,
+      reference,
     });
     const journal = buildPayableRunPaidJournal({
       orgId: req.user!.orgId,
@@ -16286,9 +23302,27 @@ const markPayableRunPaidHandler = async (req: any, res: any) => {
       summary: `Marked payable run ${updated.id} paid`,
       before: { status: run.status },
       after: { status: updated.status },
-      meta: { payout, journal: journalToJson(journal) },
+      meta: {
+        payout,
+        journal: journalToJson(journal),
+        compliance: {
+          warnings: compliance.decision.warnings,
+          overrides: compliance.overrides,
+          checks: compliance.decision.checks,
+        },
+      },
     });
-    res.json({ run: updated, idempotent: false, payout, journal });
+    res.json({
+      run: updated,
+      idempotent: false,
+      payout,
+      journal,
+      compliance: {
+        warnings: compliance.decision.warnings,
+        overrides: compliance.overrides,
+        checks: compliance.decision.checks,
+      },
+    });
   } catch (error) {
     sendServerError(res, "Failed to mark payable run paid", error);
   }
@@ -16694,11 +23728,76 @@ app.post("/settlements/:id/finalize", requireAuth, requireCsrf, requirePermissio
 
 app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Permission.SETTLEMENT_FINALIZE), async (req, res) => {
   try {
+    const payloadSchema = z.object({
+      method: z.nativeEnum(FinancePaymentMethod).default(FinancePaymentMethod.OTHER),
+      reference: z.string().trim().max(120).optional(),
+      compliance: z
+        .object({
+          achAccountValidated: z.boolean().optional(),
+          achReturnCode: z.string().trim().max(12).optional(),
+          taxProfileVerified: z.boolean().optional(),
+          taxFormType: z.string().trim().max(40).optional(),
+          sanctionsOverrideReason: z.string().trim().max(240).optional(),
+        })
+        .optional(),
+    });
+    const parsedPayload = payloadSchema.safeParse(req.body ?? {});
+    if (!parsedPayload.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
     let settlement;
     try {
       settlement = await requireOrgEntity(prisma.settlement, req.user!.orgId, req.params.id, "Settlement");
     } catch {
       res.status(404).json({ error: "Settlement not found" });
+      return;
+    }
+    const method = parsedPayload.data.method;
+    const reference = parsedPayload.data.reference?.trim() || null;
+    const complianceInput = parsedPayload.data.compliance ?? null;
+    const driver = await prisma.driver.findFirst({
+      where: { id: settlement.driverId, orgId: req.user!.orgId },
+      select: { id: true, name: true },
+    });
+    const compliance = resolveComplianceDecision({
+      user: req.user!,
+      direction: "PAYABLE",
+      method,
+      counterpartyName: driver?.name ?? `Driver ${settlement.driverId}`,
+      counterpartyReference: reference ?? settlement.id,
+      payeeType: "DRIVER",
+      compliance: complianceInput
+        ? {
+            achAccountValidated: complianceInput.achAccountValidated,
+            achReturnCode: complianceInput.achReturnCode ?? null,
+            taxProfileVerified: complianceInput.taxProfileVerified,
+            taxFormType: complianceInput.taxFormType ?? null,
+            sanctionsOverrideReason: complianceInput.sanctionsOverrideReason ?? null,
+          }
+        : null,
+    });
+    if (!compliance.decision.ok) {
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "FINANCE_COMPLIANCE_BLOCKED",
+        entity: "Settlement",
+        entityId: settlement.id,
+        summary: `Blocked settlement payout for ${settlement.id} by compliance policy`,
+        meta: {
+          direction: "PAYABLE",
+          method,
+          payeeType: "DRIVER",
+          blockers: compliance.decision.blockers,
+          warnings: compliance.decision.warnings,
+          checks: compliance.decision.checks,
+        },
+      });
+      res.status(400).json({
+        error: `Settlement payout blocked by finance compliance policy: ${compliance.decision.blockers.join("; ")}`,
+        compliance: compliance.decision,
+      });
       return;
     }
     const payout = createPayoutReceipt({
@@ -16707,6 +23806,8 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
       entityId: settlement.id,
       amountCents: Math.round(Number(settlement.net ?? settlement.gross ?? 0) * 100),
       idempotencyKey: resolveIdempotencyKey(req, `settlement:${settlement.id}:paid`),
+      method,
+      reference,
     });
     const journal = buildSettlementPaidJournal({
       orgId: req.user!.orgId,
@@ -16817,9 +23918,27 @@ app.post("/settlements/:id/paid", requireAuth, requireCsrf, requirePermission(Pe
       summary: `Paid settlement ${updated.id}`,
       before: { status: settlement.status },
       after: { status: updated.status },
-      meta: { payout, journal: journalToJson(journal) },
+      meta: {
+        payout,
+        journal: journalToJson(journal),
+        compliance: {
+          warnings: compliance.decision.warnings,
+          overrides: compliance.overrides,
+          checks: compliance.decision.checks,
+        },
+      },
     });
-    res.json({ settlement: updated, idempotent: false, payout, journal });
+    res.json({
+      settlement: updated,
+      idempotent: false,
+      payout,
+      journal,
+      compliance: {
+        warnings: compliance.decision.warnings,
+        overrides: compliance.overrides,
+        checks: compliance.decision.checks,
+      },
+    });
   } catch (error) {
     sendServerError(res, "Failed to mark settlement paid", error);
   }
@@ -17141,6 +24260,116 @@ app.put("/admin/finance-policy", requireAuth, requireCsrf, requireRole("ADMIN"),
 app.get("/admin/settings", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const settings = await prisma.orgSettings.findFirst({ where: { orgId: req.user!.orgId } });
   res.json({ settings });
+});
+
+app.get("/admin/settings/shipment-platform", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const settings = await prisma.orgSettings.findFirst({
+    where: { orgId: req.user!.orgId },
+    select: {
+      id: true,
+      shipmentWebhooksEnabled: true,
+      shipmentWebhooksVersion: true,
+      shipmentProjectionLagEnabled: true,
+      shipmentProjectionLagSeconds: true,
+    },
+  });
+  if (!settings) {
+    res.status(404).json({ error: "Settings not configured" });
+    return;
+  }
+  res.json({
+    shipmentPlatform: {
+      webhooksEnabled: settings.shipmentWebhooksEnabled,
+      webhooksVersion: settings.shipmentWebhooksVersion,
+      projectionLagEnabled: settings.shipmentProjectionLagEnabled,
+      projectionLagThresholdSeconds: settings.shipmentProjectionLagSeconds,
+    },
+  });
+});
+
+app.put("/admin/settings/shipment-platform", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    webhooksEnabled: z.boolean().optional(),
+    webhooksVersion: z.string().trim().min(2).max(16).optional(),
+    projectionLagEnabled: z.boolean().optional(),
+    projectionLagThresholdSeconds: z.number().int().min(30).max(3600).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  if (Object.keys(parsed.data).length === 0) {
+    res.status(400).json({ error: "No updates provided" });
+    return;
+  }
+  const current = await prisma.orgSettings.findFirst({
+    where: { orgId: req.user!.orgId },
+    select: {
+      id: true,
+      shipmentWebhooksEnabled: true,
+      shipmentWebhooksVersion: true,
+      shipmentProjectionLagEnabled: true,
+      shipmentProjectionLagSeconds: true,
+    },
+  });
+  if (!current) {
+    res.status(404).json({ error: "Settings not configured" });
+    return;
+  }
+
+  const nextVersion = parsed.data.webhooksVersion?.trim() ?? current.shipmentWebhooksVersion;
+  if (nextVersion !== SHIPMENT_WEBHOOK_VERSION_V1) {
+    res.status(400).json({ error: `Only webhook version ${SHIPMENT_WEBHOOK_VERSION_V1} is supported.` });
+    return;
+  }
+
+  const updated = await prisma.orgSettings.update({
+    where: { orgId: req.user!.orgId },
+    data: {
+      shipmentWebhooksEnabled: parsed.data.webhooksEnabled ?? current.shipmentWebhooksEnabled,
+      shipmentWebhooksVersion: nextVersion,
+      shipmentProjectionLagEnabled: parsed.data.projectionLagEnabled ?? current.shipmentProjectionLagEnabled,
+      shipmentProjectionLagSeconds: parsed.data.projectionLagThresholdSeconds ?? current.shipmentProjectionLagSeconds,
+    },
+    select: {
+      id: true,
+      shipmentWebhooksEnabled: true,
+      shipmentWebhooksVersion: true,
+      shipmentProjectionLagEnabled: true,
+      shipmentProjectionLagSeconds: true,
+    },
+  });
+
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "SHIPMENT_PLATFORM_SETTINGS_UPDATED",
+    entity: "OrgSettings",
+    entityId: updated.id,
+    summary: "Updated shipment platform settings",
+    before: {
+      shipmentWebhooksEnabled: current.shipmentWebhooksEnabled,
+      shipmentWebhooksVersion: current.shipmentWebhooksVersion,
+      shipmentProjectionLagEnabled: current.shipmentProjectionLagEnabled,
+      shipmentProjectionLagSeconds: current.shipmentProjectionLagSeconds,
+    },
+    after: {
+      shipmentWebhooksEnabled: updated.shipmentWebhooksEnabled,
+      shipmentWebhooksVersion: updated.shipmentWebhooksVersion,
+      shipmentProjectionLagEnabled: updated.shipmentProjectionLagEnabled,
+      shipmentProjectionLagSeconds: updated.shipmentProjectionLagSeconds,
+    },
+  });
+
+  res.json({
+    shipmentPlatform: {
+      webhooksEnabled: updated.shipmentWebhooksEnabled,
+      webhooksVersion: updated.shipmentWebhooksVersion,
+      projectionLagEnabled: updated.shipmentProjectionLagEnabled,
+      projectionLagThresholdSeconds: updated.shipmentProjectionLagSeconds,
+    },
+  });
 });
 
 app.get("/admin/inbound-email-aliases", requireAuth, requireRole("ADMIN"), async (req, res) => {
@@ -18563,23 +25792,385 @@ app.post(
   }
 );
 
+app.get("/api/integrations/samsara/oauth/start", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const integration = await prisma.trackingIntegration.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+    select: { configJson: true },
+  });
+  const oauthClient = resolveSamsaraOAuthClient(integration?.configJson ?? null);
+  if (!oauthClient.configured) {
+    res.status(400).json({
+      error: "Samsara OAuth is not configured.",
+      code: "SAMSARA_OAUTH_NOT_CONFIGURED",
+      requiredFields: ["oauthClientId", "oauthClientSecret"],
+    });
+    return;
+  }
+  if (!resolveSamsaraOAuthStateSecret()) {
+    res.status(400).json({
+      error: "Samsara OAuth state secret is not configured.",
+      code: "SAMSARA_OAUTH_STATE_SECRET_MISSING",
+      requiredEnv: ["SAMSARA_OAUTH_STATE_SECRET"],
+    });
+    return;
+  }
+  const redirectUri = resolveSamsaraOAuthRedirectUri(req);
+  const state = buildSamsaraOAuthState({ orgId: req.user!.orgId, userId: req.user!.id });
+  const authUrl = new URL(SAMSARA_OAUTH_AUTHORIZE_URL);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", oauthClient.clientId);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("scope", SAMSARA_OAUTH_SCOPES);
+  authUrl.searchParams.set("state", state);
+  res.json({ authorizationUrl: authUrl.toString(), redirectUri });
+});
+
+app.get("/api/integrations/samsara/oauth/callback", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const webOrigin = process.env.WEB_ORIGIN?.trim() || "http://localhost:3000";
+  const destination = new URL("/admin/integrations", webOrigin);
+  const providerError = typeof req.query.error === "string" ? req.query.error : "";
+  const providerErrorDescription =
+    typeof req.query.error_description === "string" ? req.query.error_description : "";
+  if (providerError) {
+    destination.searchParams.set("samsara_oauth", "error");
+    destination.searchParams.set("reason", providerErrorDescription || providerError);
+    res.redirect(destination.toString());
+    return;
+  }
+
+  const code = typeof req.query.code === "string" ? req.query.code.trim() : "";
+  const state = typeof req.query.state === "string" ? req.query.state : null;
+  const verifiedState = verifySamsaraOAuthState(state);
+  if (!code || !verifiedState) {
+    destination.searchParams.set("samsara_oauth", "error");
+    destination.searchParams.set("reason", "Invalid OAuth callback state.");
+    res.redirect(destination.toString());
+    return;
+  }
+  if (verifiedState.orgId !== req.user!.orgId || verifiedState.userId !== req.user!.id) {
+    destination.searchParams.set("samsara_oauth", "error");
+    destination.searchParams.set("reason", "OAuth callback state does not match current session.");
+    res.redirect(destination.toString());
+    return;
+  }
+
+  const existing = await prisma.trackingIntegration.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+    select: { id: true, configJson: true },
+  });
+  const oauthClient = resolveSamsaraOAuthClient(existing?.configJson ?? null);
+  if (!oauthClient.configured) {
+    destination.searchParams.set("samsara_oauth", "error");
+    destination.searchParams.set("reason", "Samsara OAuth credentials are missing.");
+    res.redirect(destination.toString());
+    return;
+  }
+
+  try {
+    const token = await exchangeSamsaraOAuthCode({
+      clientId: oauthClient.clientId,
+      clientSecret: oauthClient.clientSecret,
+      code,
+      redirectUri: resolveSamsaraOAuthRedirectUri(req),
+    });
+    const configJson = writeSamsaraOAuthCredentials({
+      previousConfig: existing?.configJson ?? null,
+      accessToken: token.accessToken,
+      refreshToken: token.refreshToken,
+      expiresInSeconds: token.expiresIn,
+      scope: token.scope,
+      tokenType: token.tokenType,
+    });
+    const integration = await prisma.trackingIntegration.upsert({
+      where: { orgId_providerType: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA } },
+      update: {
+        status: TrackingIntegrationStatus.CONNECTED,
+        configJson,
+        errorMessage: null,
+      },
+      create: {
+        orgId: req.user!.orgId,
+        providerType: TrackingProviderType.SAMSARA,
+        status: TrackingIntegrationStatus.CONNECTED,
+        configJson,
+      },
+    });
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "INTEGRATION_CONNECT",
+      entity: "TrackingIntegration",
+      entityId: integration.id,
+      summary: "Connected Samsara integration via OAuth",
+      meta: { authMode: "oauth2", scope: token.scope ?? null },
+    });
+    destination.searchParams.set("samsara_oauth", "success");
+    res.redirect(destination.toString());
+  } catch (error) {
+    const info = formatSamsaraError(error);
+    destination.searchParams.set("samsara_oauth", "error");
+    destination.searchParams.set("reason", info.message);
+    res.redirect(destination.toString());
+  }
+});
+
+async function loadSamsaraWebhookHealth(orgId: string) {
+  const now = new Date();
+  const since24h = addDays(now, -1);
+  const health = {
+    acceptedLast24h: 0,
+    replayBlockedLast24h: 0,
+    rejectedLast24h: 0,
+    lastReceivedAt: null as Date | null,
+    lastAcceptedAt: null as Date | null,
+    schemaReady: true,
+  };
+  try {
+    const [acceptedLast24h, replayBlockedLast24h, rejectedLast24h, lastReceived, lastAccepted] = await Promise.all([
+      prisma.samsaraWebhookReceipt.count({
+        where: {
+          orgId,
+          providerType: TrackingProviderType.SAMSARA,
+          verified: true,
+          replay: false,
+          receivedAt: { gte: since24h },
+        },
+      }),
+      prisma.samsaraWebhookReceipt.count({
+        where: {
+          orgId,
+          providerType: TrackingProviderType.SAMSARA,
+          replay: true,
+          receivedAt: { gte: since24h },
+        },
+      }),
+      prisma.samsaraWebhookReceipt.count({
+        where: {
+          orgId,
+          providerType: TrackingProviderType.SAMSARA,
+          verified: false,
+          receivedAt: { gte: since24h },
+        },
+      }),
+      prisma.samsaraWebhookReceipt.findFirst({
+        where: { orgId, providerType: TrackingProviderType.SAMSARA },
+        orderBy: { receivedAt: "desc" },
+        select: { receivedAt: true },
+      }),
+      prisma.samsaraWebhookReceipt.findFirst({
+        where: { orgId, providerType: TrackingProviderType.SAMSARA, verified: true },
+        orderBy: { receivedAt: "desc" },
+        select: { receivedAt: true },
+      }),
+    ]);
+    health.acceptedLast24h = acceptedLast24h;
+    health.replayBlockedLast24h = replayBlockedLast24h;
+    health.rejectedLast24h = rejectedLast24h;
+    health.lastReceivedAt = lastReceived?.receivedAt ?? null;
+    health.lastAcceptedAt = lastAccepted?.receivedAt ?? null;
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code;
+    if (code === "P2021" || code === "P2022") {
+      health.schemaReady = false;
+    } else {
+      throw error;
+    }
+  }
+  return health;
+}
+
 app.get("/api/integrations/samsara/status", requireAuth, requireRole("ADMIN"), async (req, res) => {
   const integration = await prisma.trackingIntegration.findFirst({
     where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
   });
+  const oauthClient = resolveSamsaraOAuthClient(integration?.configJson ?? null);
+  const credentials = integration ? await resolveSamsaraCredentialsForIntegration(integration) : null;
+  const [webhookHealth, mappedTrucks, totalActiveTrucks] = await Promise.all([
+    loadSamsaraWebhookHealth(req.user!.orgId),
+    prisma.truckTelematicsMapping.count({
+      where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+    }),
+    prisma.truck.count({
+      where: { orgId: req.user!.orgId, active: true },
+    }),
+  ]);
+  const mappingCoveragePct =
+    totalActiveTrucks > 0 ? Math.round((mappedTrucks / Math.max(totalActiveTrucks, 1)) * 100) : 100;
+  const forwardedProto = readHeaderValue(req.headers["x-forwarded-proto"]);
+  const forwardedHost = readHeaderValue(req.headers["x-forwarded-host"]);
+  const proto = forwardedProto?.split(",")[0]?.trim() || req.protocol;
+  const host = forwardedHost?.split(",")[0]?.trim() || req.get("host") || "localhost:4000";
   res.json({
     integration: integration
       ? {
           status: integration.status,
           errorMessage: integration.errorMessage ?? null,
           updatedAt: integration.updatedAt,
+          webhookConfigured: Boolean(credentials?.webhookSigningSecret),
+          orgExternalId: credentials?.orgExternalId ?? null,
+          credentialsEncrypted: Boolean(credentials?.credentialsEncrypted),
+          authMode: credentials?.authMode ?? "token",
+          oauthScope: credentials?.oauthScope ?? null,
+          oauthTokenExpiresAt: credentials?.oauthTokenExpiresAt ?? null,
+          oauthClientConfigured: oauthClient.configured,
+          oauthClientSource: oauthClient.source,
+          oauthClientIdHint: oauthClient.clientId || null,
+          mappingHealth: {
+            mappedTrucks,
+            totalActiveTrucks,
+            unmappedTrucks: Math.max(0, totalActiveTrucks - mappedTrucks),
+            coveragePct: mappingCoveragePct,
+          },
+          webhookEndpointUrl: `${proto}://${host}/webhooks/samsara`,
+          webhookHealth,
         }
-      : { status: TrackingIntegrationStatus.DISCONNECTED, errorMessage: null, updatedAt: null },
+      : {
+          status: TrackingIntegrationStatus.DISCONNECTED,
+          errorMessage: null,
+          updatedAt: null,
+          webhookConfigured: false,
+          orgExternalId: null,
+          credentialsEncrypted: false,
+          authMode: "token",
+          oauthScope: null,
+          oauthTokenExpiresAt: null,
+          oauthClientConfigured: oauthClient.configured,
+          oauthClientSource: oauthClient.source,
+          oauthClientIdHint: oauthClient.clientId || null,
+          mappingHealth: {
+            mappedTrucks,
+            totalActiveTrucks,
+            unmappedTrucks: Math.max(0, totalActiveTrucks - mappedTrucks),
+            coveragePct: mappingCoveragePct,
+          },
+          webhookEndpointUrl: `${proto}://${host}/webhooks/samsara`,
+          webhookHealth,
+        },
   });
 });
 
+app.get(
+  "/dispatch/sync-health",
+  requireAuth,
+  requireRole("ADMIN", "DISPATCHER", "HEAD_DISPATCHER", "BILLING", "SAFETY", "SUPPORT"),
+  async (req, res) => {
+    const orgId = req.user!.orgId;
+    const [integration, webhookHealth, mappedTrucks, totalActiveTrucks, inTransitLoads] = await Promise.all([
+      prisma.trackingIntegration.findFirst({
+        where: { orgId, providerType: TrackingProviderType.SAMSARA },
+      }),
+      loadSamsaraWebhookHealth(orgId),
+      prisma.truckTelematicsMapping.count({
+        where: { orgId, providerType: TrackingProviderType.SAMSARA },
+      }),
+      prisma.truck.count({ where: { orgId, active: true } }),
+      prisma.load.findMany({
+        where: {
+          orgId,
+          deletedAt: null,
+          status: LoadStatus.IN_TRANSIT,
+        },
+        select: { id: true, truckId: true },
+      }),
+    ]);
+
+    const inTransitLoadIds = inTransitLoads.map((load) => load.id);
+    const inTransitTruckIds = Array.from(
+      new Set(inTransitLoads.map((load) => load.truckId).filter((truckId): truckId is string => Boolean(truckId)))
+    );
+
+    const [mappedInTransitTrucks, activeTrackingSessionsCount, latestPings] = await Promise.all([
+      inTransitTruckIds.length
+        ? prisma.truckTelematicsMapping.count({
+            where: {
+              orgId,
+              providerType: TrackingProviderType.SAMSARA,
+              truckId: { in: inTransitTruckIds },
+            },
+          })
+        : Promise.resolve(0),
+      inTransitLoadIds.length
+        ? prisma.loadTrackingSession.count({
+            where: {
+              orgId,
+              loadId: { in: inTransitLoadIds },
+              status: TrackingSessionStatus.ON,
+            },
+          })
+        : Promise.resolve(0),
+      inTransitLoadIds.length
+        ? prisma.locationPing.findMany({
+            where: {
+              orgId,
+              providerType: TrackingProviderType.SAMSARA,
+              loadId: { in: inTransitLoadIds },
+            },
+            orderBy: { capturedAt: "desc" },
+            distinct: ["loadId"],
+            select: { loadId: true, capturedAt: true },
+          })
+        : Promise.resolve([] as Array<{ loadId: string | null; capturedAt: Date }>),
+    ]);
+
+    const pingByLoadId = new Map<string, Date>();
+    for (const ping of latestPings) {
+      if (!ping.loadId) continue;
+      pingByLoadId.set(ping.loadId, ping.capturedAt);
+    }
+
+    const staleCutoff = Date.now() - 60 * 60 * 1000;
+    const staleInTransitLoads = inTransitLoads.filter((load) => {
+      if (!load.truckId) return false;
+      const lastPingAt = pingByLoadId.get(load.id);
+      if (!lastPingAt) return true;
+      return lastPingAt.getTime() < staleCutoff;
+    }).length;
+
+    const latestPingAt = latestPings.reduce<Date | null>((latest, ping) => {
+      if (!latest) return ping.capturedAt;
+      return latest.getTime() >= ping.capturedAt.getTime() ? latest : ping.capturedAt;
+    }, null);
+
+    const mappingCoveragePct =
+      totalActiveTrucks > 0 ? Math.round((mappedTrucks / Math.max(totalActiveTrucks, 1)) * 100) : 100;
+    const telematicsState =
+      integration?.status !== TrackingIntegrationStatus.CONNECTED
+        ? "disconnected"
+        : staleInTransitLoads > 0
+          ? "stale"
+          : "fresh";
+
+    res.json({
+      generatedAt: new Date(),
+      samsara: {
+        status: integration?.status ?? TrackingIntegrationStatus.DISCONNECTED,
+        errorMessage: integration?.errorMessage ?? null,
+        mapping: {
+          mappedTrucks,
+          totalActiveTrucks,
+          mappedInTransitTrucks,
+          inTransitTrucks: inTransitTruckIds.length,
+          coveragePct: mappingCoveragePct,
+        },
+        telemetry: {
+          state: telematicsState,
+          inTransitLoads: inTransitLoads.length,
+          staleInTransitLoads,
+          activeTrackingSessions: activeTrackingSessionsCount,
+          lastPingAt: latestPingAt,
+        },
+        webhook: webhookHealth,
+      },
+    });
+  }
+);
+
 app.post("/api/integrations/samsara/connect", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
-  const schema = z.object({ apiToken: z.string().min(10) });
+  const schema = z.object({
+    apiToken: z.string().min(10),
+    webhookSigningSecret: z.string().trim().min(8).optional(),
+    orgExternalId: z.string().trim().min(2).max(80).optional(),
+  });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload" });
@@ -18592,18 +26183,29 @@ app.post("/api/integrations/samsara/connect", requireAuth, requireCsrf, requireR
     return;
   }
 
+  const existing = await prisma.trackingIntegration.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+    select: { id: true, configJson: true },
+  });
+  const nextConfig = buildSamsaraConfigJson({
+    previousConfig: existing?.configJson ?? null,
+    apiToken: parsed.data.apiToken,
+    webhookSigningSecret: parsed.data.webhookSigningSecret,
+    orgExternalId: parsed.data.orgExternalId,
+  });
+
   const integration = await prisma.trackingIntegration.upsert({
     where: { orgId_providerType: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA } },
     update: {
       status: TrackingIntegrationStatus.CONNECTED,
-      configJson: { apiToken: parsed.data.apiToken },
+      configJson: nextConfig,
       errorMessage: null,
     },
     create: {
       orgId: req.user!.orgId,
       providerType: TrackingProviderType.SAMSARA,
       status: TrackingIntegrationStatus.CONNECTED,
-      configJson: { apiToken: parsed.data.apiToken },
+      configJson: nextConfig,
     },
   });
 
@@ -18617,6 +26219,105 @@ app.post("/api/integrations/samsara/connect", requireAuth, requireCsrf, requireR
   });
 
   res.json({ status: integration.status });
+});
+
+app.put("/api/integrations/samsara/webhook-config", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    webhookSigningSecret: z.union([z.string(), z.literal(""), z.null()]).optional(),
+    orgExternalId: z.union([z.string(), z.literal(""), z.null()]).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const integration = await prisma.trackingIntegration.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA },
+    select: { id: true, configJson: true },
+  });
+  if (!integration) {
+    res.status(404).json({ error: "Samsara integration not found. Connect first." });
+    return;
+  }
+  const configJson = buildSamsaraConfigJson({
+    previousConfig: integration.configJson,
+    webhookSigningSecret: parsed.data.webhookSigningSecret === null ? "" : parsed.data.webhookSigningSecret,
+    orgExternalId: parsed.data.orgExternalId === null ? "" : parsed.data.orgExternalId,
+  });
+  const updated = await prisma.trackingIntegration.update({
+    where: { id: integration.id },
+    data: { configJson },
+    select: { id: true, configJson: true },
+  });
+  const credentials = await resolveSamsaraCredentialsForIntegration(updated);
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "SAMSARA_WEBHOOK_CONFIG_UPDATED",
+    entity: "TrackingIntegration",
+    entityId: updated.id,
+    summary: "Updated Samsara webhook configuration",
+    after: {
+      webhookConfigured: Boolean(credentials.webhookSigningSecret),
+      orgExternalId: credentials.orgExternalId,
+    },
+  });
+  res.json({
+    ok: true,
+    webhookConfigured: Boolean(credentials.webhookSigningSecret),
+    orgExternalId: credentials.orgExternalId ?? null,
+  });
+});
+
+app.put("/api/integrations/samsara/oauth-client-config", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const schema = z.object({
+    oauthClientId: z.union([z.string(), z.literal(""), z.null()]).optional(),
+    oauthClientSecret: z.union([z.string(), z.literal(""), z.null()]).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid payload" });
+    return;
+  }
+  const integration = await prisma.trackingIntegration.upsert({
+    where: { orgId_providerType: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA } },
+    update: {},
+    create: {
+      orgId: req.user!.orgId,
+      providerType: TrackingProviderType.SAMSARA,
+      status: TrackingIntegrationStatus.DISCONNECTED,
+    },
+    select: { id: true, configJson: true },
+  });
+  const configJson = writeSamsaraOAuthClientConfig({
+    previousConfig: integration.configJson,
+    clientId: parsed.data.oauthClientId === null ? "" : parsed.data.oauthClientId,
+    clientSecret: parsed.data.oauthClientSecret === null ? "" : parsed.data.oauthClientSecret,
+  });
+  const updated = await prisma.trackingIntegration.update({
+    where: { id: integration.id },
+    data: { configJson },
+    select: { id: true, configJson: true },
+  });
+  const oauthClient = resolveSamsaraOAuthClient(updated.configJson);
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "SAMSARA_OAUTH_CLIENT_CONFIG_UPDATED",
+    entity: "TrackingIntegration",
+    entityId: updated.id,
+    summary: "Updated Samsara OAuth client configuration",
+    after: {
+      oauthClientConfigured: oauthClient.configured,
+      oauthClientSource: oauthClient.source,
+      oauthClientIdSet: Boolean(extractSamsaraOAuthClientId(updated.configJson)),
+    },
+  });
+  res.json({
+    ok: true,
+    oauthClientConfigured: oauthClient.configured,
+    oauthClientSource: oauthClient.source,
+  });
 });
 
 app.post("/api/integrations/samsara/disconnect", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
@@ -18644,7 +26345,8 @@ app.get("/api/integrations/samsara/vehicles", requireAuth, requireRole("ADMIN"),
   const integration = await prisma.trackingIntegration.findFirst({
     where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, status: TrackingIntegrationStatus.CONNECTED },
   });
-  const token = extractSamsaraToken(integration?.configJson ?? null);
+  const credentials = integration ? await resolveSamsaraCredentialsForIntegration(integration) : null;
+  const token = credentials?.apiToken ?? null;
   if (!token) {
     res.status(400).json({ error: "Samsara is not connected.", code: "SAMSARA_NOT_CONNECTED" });
     return;
@@ -18664,7 +26366,8 @@ app.post("/api/integrations/samsara/test", requireAuth, requireCsrf, requireRole
   const integration = await prisma.trackingIntegration.findFirst({
     where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, status: TrackingIntegrationStatus.CONNECTED },
   });
-  const token = extractSamsaraToken(integration?.configJson ?? null);
+  const credentials = integration ? await resolveSamsaraCredentialsForIntegration(integration) : null;
+  const token = credentials?.apiToken ?? null;
   if (!token) {
     res.status(400).json({ ok: false, error: "Samsara is not connected.", code: "SAMSARA_NOT_CONNECTED" });
     return;
@@ -18736,6 +26439,386 @@ app.post("/api/integrations/samsara/map-truck", requireAuth, requireCsrf, requir
     },
   });
   res.json({ mapping });
+});
+
+app.get("/api/integrations/samsara/webhook-failures", requireAuth, requireRole("ADMIN"), async (req, res) => {
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit : "50";
+  const limit = Math.min(200, Math.max(1, parseInt(limitRaw, 10) || 50));
+  const receipts = await prisma.samsaraWebhookReceipt.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      providerType: TrackingProviderType.SAMSARA,
+      OR: [{ verified: false }, { replay: true }],
+    },
+    orderBy: [{ receivedAt: "desc" }],
+    take: limit,
+    select: {
+      id: true,
+      requestId: true,
+      eventId: true,
+      eventType: true,
+      verified: true,
+      replay: true,
+      reason: true,
+      receivedAt: true,
+    },
+  });
+  const nowMs = Date.now();
+  const failureRows = receipts.map((row) => {
+    const deadLetterByAge = !row.verified && nowMs - row.receivedAt.getTime() > 24 * 60 * 60 * 1000;
+    const deadLetterByReason = String(row.reason || "").startsWith("dead_letter");
+    const deadLetter = deadLetterByAge || deadLetterByReason;
+    const ageMinutes = Math.max(0, Math.floor((nowMs - row.receivedAt.getTime()) / (60 * 1000)));
+    return { ...row, deadLetter, ageMinutes };
+  });
+  const deadLetterCount = failureRows.filter((row) => row.deadLetter).length;
+  const retryableCount = failureRows.filter((row) => !row.deadLetter && !row.verified).length;
+  const escalatedCount = failureRows.filter((row) => String(row.reason || "").startsWith("dead_letter")).length;
+  const byReason = receipts.reduce<Record<string, number>>((acc, row) => {
+    const key = row.reason || (row.replay ? "replay_detected" : row.verified ? "accepted" : "unknown");
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+  res.json({
+    failures: failureRows,
+    summary: {
+      total: failureRows.length,
+      deadLetterCount,
+      retryableCount,
+      escalatedCount,
+      byReason,
+    },
+  });
+});
+
+app.post(
+  "/api/integrations/samsara/webhook-failures/replay-failed",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const schema = z.object({
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const limit = parsed.data.limit ?? 25;
+    const receipts = await prisma.samsaraWebhookReceipt.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        providerType: TrackingProviderType.SAMSARA,
+        verified: false,
+      },
+      orderBy: [{ receivedAt: "asc" }],
+      take: limit,
+      select: {
+        id: true,
+        payload: true,
+        reason: true,
+      },
+    });
+
+    let replayed = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const receipt of receipts) {
+      if (!receipt.payload) {
+        skipped += 1;
+        await prisma.samsaraWebhookReceipt.update({
+          where: { id: receipt.id },
+          data: { reason: "dead_letter_missing_payload" },
+        });
+        continue;
+      }
+      try {
+        const ingestResult = await ingestSamsaraWebhookPayloadForOrg({
+          orgId: req.user!.orgId,
+          payload: receipt.payload,
+          maxEvents: 500,
+        });
+        await prisma.samsaraWebhookReceipt.update({
+          where: { id: receipt.id },
+          data: {
+            verified: true,
+            replay: false,
+            reason:
+              ingestResult.locationEventsIngested > 0
+                ? "manual_replay_location_events_ingested"
+                : "manual_replay_accepted",
+            receivedAt: new Date(),
+          },
+        });
+        replayed += 1;
+      } catch (error) {
+        failed += 1;
+        const message = String((error as Error)?.message || "manual replay failed").slice(0, 180);
+        await prisma.samsaraWebhookReceipt.update({
+          where: { id: receipt.id },
+          data: { reason: `manual_replay_failed:${message}` },
+        });
+      }
+    }
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SAMSARA_WEBHOOK_REPLAY_BATCH",
+      entity: "TrackingIntegration",
+      entityId: req.user!.orgId,
+      summary: `Webhook replay batch: replayed ${replayed}, failed ${failed}, skipped ${skipped}`,
+      meta: { replayed, failed, skipped, requestedLimit: limit },
+    });
+
+    res.json({
+      ok: true,
+      replayed,
+      failed,
+      skipped,
+      considered: receipts.length,
+    });
+  }
+);
+
+app.post(
+  "/api/integrations/samsara/webhook-failures/escalate-dead-letter",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const schema = z.object({
+      olderThanHours: z.coerce.number().int().min(1).max(720).optional(),
+      limit: z.coerce.number().int().min(1).max(1000).optional(),
+    });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const olderThanHours = parsed.data.olderThanHours ?? 24;
+    const limit = parsed.data.limit ?? 250;
+    const cutoff = new Date(Date.now() - olderThanHours * 60 * 60 * 1000);
+
+    const candidates = await prisma.samsaraWebhookReceipt.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        providerType: TrackingProviderType.SAMSARA,
+        verified: false,
+        receivedAt: { lte: cutoff },
+        NOT: [{ reason: { startsWith: "dead_letter" } }],
+      },
+      orderBy: [{ receivedAt: "asc" }],
+      take: limit,
+      select: { id: true },
+    });
+    const ids = candidates.map((row) => row.id);
+    if (ids.length === 0) {
+      res.json({ ok: true, escalated: 0, olderThanHours, limit });
+      return;
+    }
+    await prisma.samsaraWebhookReceipt.updateMany({
+      where: { id: { in: ids } },
+      data: { reason: "dead_letter_escalated" },
+    });
+
+    await logAudit({
+      orgId: req.user!.orgId,
+      userId: req.user!.id,
+      action: "SAMSARA_WEBHOOK_DEAD_LETTER_ESCALATE",
+      entity: "TrackingIntegration",
+      entityId: req.user!.orgId,
+      summary: `Escalated ${ids.length} webhook receipts to dead-letter`,
+      meta: { escalated: ids.length, olderThanHours, limit },
+    });
+
+    res.json({ ok: true, escalated: ids.length, olderThanHours, limit });
+  }
+);
+
+app.post(
+  "/api/integrations/samsara/webhook-failures/:id/replay",
+  requireAuth,
+  requireCsrf,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const receipt = await prisma.samsaraWebhookReceipt.findFirst({
+      where: {
+        id: req.params.id,
+        orgId: req.user!.orgId,
+        providerType: TrackingProviderType.SAMSARA,
+      },
+      select: {
+        id: true,
+        verified: true,
+        replay: true,
+        reason: true,
+        payload: true,
+      },
+    });
+    if (!receipt) {
+      res.status(404).json({ error: "Webhook receipt not found." });
+      return;
+    }
+    if (receipt.verified && !receipt.replay) {
+      res.json({ ok: true, status: "already-accepted" });
+      return;
+    }
+    if (!receipt.payload) {
+      await prisma.samsaraWebhookReceipt.update({
+        where: { id: receipt.id },
+        data: { reason: "dead_letter_missing_payload" },
+      });
+      res.status(400).json({ error: "Receipt payload missing.", code: "PAYLOAD_MISSING" });
+      return;
+    }
+
+    try {
+      const ingestResult = await ingestSamsaraWebhookPayloadForOrg({
+        orgId: req.user!.orgId,
+        payload: receipt.payload,
+        maxEvents: 500,
+      });
+      await prisma.samsaraWebhookReceipt.update({
+        where: { id: receipt.id },
+        data: {
+          verified: true,
+          replay: false,
+          reason:
+            ingestResult.locationEventsIngested > 0
+              ? "manual_replay_location_events_ingested"
+              : "manual_replay_accepted",
+          receivedAt: new Date(),
+        },
+      });
+      await logAudit({
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: "SAMSARA_WEBHOOK_REPLAY",
+        entity: "TrackingIntegration",
+        entityId: req.user!.orgId,
+        summary: `Replayed webhook receipt ${receipt.id}`,
+        meta: {
+          receiptId: receipt.id,
+          locationEventsIngested: ingestResult.locationEventsIngested,
+          locationPingsCreated: ingestResult.locationPingsCreated,
+        },
+      });
+      res.json({
+        ok: true,
+        status: "replayed",
+        receiptId: receipt.id,
+        locationEventsIngested: ingestResult.locationEventsIngested,
+        locationPingsCreated: ingestResult.locationPingsCreated,
+      });
+    } catch (error) {
+      const message = String((error as Error)?.message || "manual replay failed").slice(0, 180);
+      await prisma.samsaraWebhookReceipt.update({
+        where: { id: receipt.id },
+        data: { reason: `manual_replay_failed:${message}` },
+      });
+      res.status(500).json({ error: "Replay failed.", detail: message });
+    }
+  }
+);
+
+app.post("/api/integrations/samsara/backfill-location-pings", requireAuth, requireCsrf, requireRole("ADMIN"), async (req, res) => {
+  const integration = await prisma.trackingIntegration.findFirst({
+    where: { orgId: req.user!.orgId, providerType: TrackingProviderType.SAMSARA, status: TrackingIntegrationStatus.CONNECTED },
+  });
+  const credentials = integration ? await resolveSamsaraCredentialsForIntegration(integration) : null;
+  const token = credentials?.apiToken ?? null;
+  if (!integration || !token) {
+    res.status(400).json({ ok: false, error: "Samsara is not connected.", code: "SAMSARA_NOT_CONNECTED" });
+    return;
+  }
+
+  const activeLoads = await prisma.load.findMany({
+    where: {
+      orgId: req.user!.orgId,
+      deletedAt: null,
+      status: { in: ACTIVE_TRACKED_LOAD_STATUSES },
+      truckId: { not: null },
+    },
+    select: { id: true, truckId: true },
+  });
+  const truckIds = Array.from(new Set(activeLoads.map((load) => load.truckId).filter((id): id is string => Boolean(id))));
+  const mappings = truckIds.length
+    ? await prisma.truckTelematicsMapping.findMany({
+        where: {
+          orgId: req.user!.orgId,
+          providerType: TrackingProviderType.SAMSARA,
+          truckId: { in: truckIds },
+        },
+        select: { truckId: true, externalId: true },
+      })
+    : [];
+  const mappingByTruckId = new Map(mappings.map((mapping) => [mapping.truckId, mapping.externalId]));
+  const loadIdsByTruckId = new Map<string, string[]>();
+  for (const load of activeLoads) {
+    if (!load.truckId) continue;
+    const bucket = loadIdsByTruckId.get(load.truckId) ?? [];
+    bucket.push(load.id);
+    loadIdsByTruckId.set(load.truckId, bucket);
+  }
+
+  const targetTruckIds = truckIds.filter((truckId) => mappingByTruckId.has(truckId)).slice(0, 50);
+  const rows: Prisma.LocationPingCreateManyInput[] = [];
+  const errors: Array<{ truckId: string; message: string }> = [];
+
+  for (const truckId of targetTruckIds) {
+    const externalId = mappingByTruckId.get(truckId);
+    if (!externalId) continue;
+    try {
+      const loc = await fetchSamsaraVehicleLocation(token, externalId);
+      const loadIds = loadIdsByTruckId.get(truckId) ?? [];
+      if (loadIds.length === 0) continue;
+      const capturedAt = new Date();
+      for (const loadId of loadIds) {
+        rows.push({
+          orgId: req.user!.orgId,
+          loadId,
+          truckId,
+          driverId: null,
+          providerType: TrackingProviderType.SAMSARA,
+          lat: new Prisma.Decimal(loc.lat),
+          lng: new Prisma.Decimal(loc.lng),
+          speedMph: loc.speedMph,
+          heading: loc.heading,
+          capturedAt,
+        });
+      }
+    } catch (error) {
+      errors.push({
+        truckId,
+        message: formatSamsaraError(error).message,
+      });
+    }
+  }
+
+  const created = rows.length ? await prisma.locationPing.createMany({ data: rows }) : { count: 0 };
+  await logAudit({
+    orgId: req.user!.orgId,
+    userId: req.user!.id,
+    action: "SAMSARA_BACKFILL_LOCATION_PINGS",
+    entity: "TrackingIntegration",
+    entityId: integration.id,
+    summary: `Backfilled ${created.count} location pings from Samsara`,
+    meta: {
+      activeLoads: activeLoads.length,
+      mappedTrucksTargeted: targetTruckIds.length,
+      errors: errors.length,
+    },
+  });
+
+  res.json({
+    ok: true,
+    createdCount: created.count,
+    targetedMappedTrucks: targetTruckIds.length,
+    activeLoads: activeLoads.length,
+    errors: errors.slice(0, 10),
+  });
 });
 
 app.get("/admin/fuel/status", requireAuth, requireRole("ADMIN"), async (req, res) => {

@@ -41,8 +41,10 @@ type BulkMutationResult = {
   results: Array<{ loadId: string; ok: boolean; message: string }>;
 };
 
+export type FinanceCommandLaneId = "GENERATE_INVOICE" | "RETRY_QBO_SYNC" | "FOLLOW_UP_COLLECTION" | "GENERATE_SETTLEMENT";
+
 type CommandLane = {
-  id: "GENERATE_INVOICE" | "RETRY_QBO_SYNC" | "FOLLOW_UP_COLLECTION" | "GENERATE_SETTLEMENT";
+  id: FinanceCommandLaneId;
   label: string;
   subtitle: string;
   endpoint: string | null;
@@ -92,13 +94,17 @@ function stageTone(stage: FinanceRow["billingStage"]) {
   return "neutral" as const;
 }
 
-export function FinanceCommandPanel() {
+type FinanceCommandPanelProps = {
+  initialLane?: FinanceCommandLaneId | null;
+};
+
+export function FinanceCommandPanel({ initialLane = null }: FinanceCommandPanelProps) {
   const router = useRouter();
   const { capabilities } = useUser();
   const canAccess = capabilities.canAccessFinance;
   const canMutate = capabilities.canBillActions;
   const [rows, setRows] = useState<FinanceRow[]>([]);
-  const [activeLane, setActiveLane] = useState<CommandLane["id"]>("GENERATE_INVOICE");
+  const [activeLane, setActiveLane] = useState<FinanceCommandLaneId>(initialLane ?? "GENERATE_INVOICE");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState<string | null>(null);
@@ -124,6 +130,11 @@ export function FinanceCommandPanel() {
     loadRows();
   }, [loadRows]);
 
+  useEffect(() => {
+    if (!initialLane || initialLane === activeLane) return;
+    setActiveLane(initialLane);
+  }, [activeLane, initialLane]);
+
   const laneRows = useMemo(() => {
     return rows.filter((row) => row.actions?.allowedActions?.includes(activeLane));
   }, [activeLane, rows]);
@@ -134,7 +145,7 @@ export function FinanceCommandPanel() {
   }, [activeLane]);
 
   const laneCounts = useMemo(() => {
-    const map = new Map<CommandLane["id"], number>();
+    const map = new Map<FinanceCommandLaneId, number>();
     for (const lane of COMMAND_LANES) {
       map.set(lane.id, rows.filter((row) => row.actions?.allowedActions?.includes(lane.id)).length);
     }

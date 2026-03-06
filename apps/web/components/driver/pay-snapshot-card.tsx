@@ -1,5 +1,6 @@
 import { Card } from "@/components/ui/card";
 import { MoneyAmount } from "@/components/driver/money-amount";
+import { formatDate as formatDate24 } from "@/lib/date-time";
 
 type PaySnapshotProps = {
   estimatedPay?: string | number | null;
@@ -28,7 +29,7 @@ export function PaySnapshotCard({ estimatedPay, milesThisWeek, pendingCount, las
         <span>{pendingCount} pending settlement(s)</span>
         {lastPaid?.date ? (
           <span>
-            Last paid {new Date(lastPaid.date).toLocaleDateString()} •{" "}
+            Last paid {formatDate24(lastPaid.date)} •{" "}
             <MoneyAmount value={lastPaid.amount ?? null} muted />
           </span>
         ) : (

@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { FinancePaymentMethod } from "@truckerio/db";
 
 export type FinanceBankingAdapter = "mock";
 
@@ -10,12 +11,15 @@ export type PayoutRequest = {
   entityId: string;
   amountCents?: number | null;
   idempotencyKey: string;
+  method?: FinancePaymentMethod;
+  reference?: string | null;
 };
 
 export type PayoutResult = {
   adapter: FinanceBankingAdapter;
   payoutId: string;
   reference: string;
+  method: FinancePaymentMethod;
   processedAt: string;
   idempotencyKey: string;
 };
@@ -37,21 +41,25 @@ function normalizeAmountCents(value: number | null | undefined) {
 
 export function createPayoutReceipt(input: PayoutRequest): PayoutResult {
   const adapter = resolveAdapter();
+  const method = input.method ?? FinancePaymentMethod.OTHER;
   const canonical = [
     input.orgId,
     input.entityType,
     input.entityId,
     String(normalizeAmountCents(input.amountCents)),
     input.idempotencyKey,
+    method,
+    (input.reference ?? "").trim(),
   ].join(":");
   const digest = shortHash(canonical);
   const payoutId = `payout_${digest}`;
+  const normalizedReference = (input.reference ?? "").trim();
   return {
     adapter,
     payoutId,
-    reference: `MOCK-${input.entityType}-${digest.toUpperCase()}`,
+    reference: normalizedReference || `MOCK-${input.entityType}-${digest.toUpperCase()}`,
+    method,
     processedAt: new Date().toISOString(),
     idempotencyKey: input.idempotencyKey,
   };
 }
-
