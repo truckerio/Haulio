@@ -5,27 +5,28 @@
 :root {
   --font-display: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-body: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --color-text: #111111;
-  --color-text-muted: #5f6572;
-  --color-text-subtle: #8a909c;
-  --color-bg: #ffffff;
-  --color-bg-muted: #f4f4f2;
+  --color-text: #111827;
+  --color-ink: #111827;
+  --color-text-muted: #5b6675;
+  --color-text-subtle: #8b96a6;
+  --color-bg: #f7f9f8;
+  --color-bg-muted: #f1f4f3;
   --color-surface: #ffffff;
-  --color-surface-soft: rgba(255, 255, 255, 0.78);
-  --color-surface-elevated: #ffffff;
-  --color-surface-hover: #f4f6f8;
-  --color-divider: rgba(0, 0, 0, 0.06);
-  --color-divider-strong: rgba(0, 0, 0, 0.12);
-  --color-accent: #0f3d2e;
-  --color-accent-soft: rgba(15, 61, 46, 0.18);
+  --color-surface-soft: rgba(255, 255, 255, 0.82);
+  --color-surface-elevated: #fcfdfc;
+  --color-surface-hover: #eef3f1;
+  --color-divider: #d7dfdc;
+  --color-divider-strong: #b8c4bf;
+  --color-accent: #0d5c4b;
+  --color-accent-soft: #ddefea;
   --color-success: #0f766e;
-  --color-success-soft: rgba(15, 118, 110, 0.12);
+  --color-success-soft: #d9f3ef;
   --color-warning: #b45309;
-  --color-warning-soft: rgba(180, 83, 9, 0.14);
-  --color-danger: #b91c1c;
-  --color-danger-soft: rgba(185, 28, 28, 0.12);
+  --color-warning-soft: #fce7d2;
+  --color-danger: #b42318;
+  --color-danger-soft: #fee4e2;
   --color-info: #0369a1;
-  --color-info-soft: rgba(3, 105, 161, 0.12);
+  --color-info-soft: #dcefff;
   --radius-card: 14px;
   --radius-control: 12px;
   --shadow-card: 0 12px 30px rgba(15, 23, 42, 0.08);
@@ -57,23 +58,24 @@ html[data-text-scale="xl"] {
 }
 
 html[data-theme-resolved="dark"] {
-  --color-text: #e5e7eb;
-  --color-text-muted: #9ca8ba;
-  --color-text-subtle: #7f8a9d;
-  --color-bg: #080b10;
-  --color-bg-muted: #05080c;
-  --color-surface: #10161f;
-  --color-surface-soft: rgba(16, 22, 31, 0.82);
-  --color-surface-elevated: #141c28;
-  --color-surface-hover: #1a2432;
+  --color-text: #e6ecf2;
+  --color-ink: #e6ecf2;
+  --color-text-muted: #a6b0bd;
+  --color-text-subtle: #7e8a99;
+  --color-bg: #0a1114;
+  --color-bg-muted: #080e12;
+  --color-surface: #111a20;
+  --color-surface-soft: rgba(17, 26, 32, 0.82);
+  --color-surface-elevated: #16222a;
+  --color-surface-hover: #1b2a33;
   --color-divider: rgba(255, 255, 255, 0.14);
-  --color-divider-strong: rgba(255, 255, 255, 0.24);
-  --color-accent: #4f9f85;
-  --color-accent-soft: rgba(79, 159, 133, 0.24);
-  --color-success: #2dd4bf;
-  --color-success-soft: rgba(45, 212, 191, 0.16);
-  --color-warning: #fb923c;
-  --color-warning-soft: rgba(251, 146, 60, 0.18);
+  --color-divider-strong: rgba(255, 255, 255, 0.26);
+  --color-accent: #63b89e;
+  --color-accent-soft: rgba(99, 184, 158, 0.24);
+  --color-success: #34d399;
+  --color-success-soft: rgba(52, 211, 153, 0.16);
+  --color-warning: #f59e0b;
+  --color-warning-soft: rgba(245, 158, 11, 0.18);
   --color-danger: #f87171;
   --color-danger-soft: rgba(248, 113, 113, 0.16);
   --color-info: #38bdf8;
@@ -104,23 +106,23 @@ html[data-theme-resolved="dark"] .bg-white {
 }
 
 html[data-theme-resolved="dark"] .bg-white\/95 {
-  background-color: rgba(20, 28, 40, 0.95) !important;
+  background-color: rgba(22, 34, 42, 0.95) !important;
 }
 
 html[data-theme-resolved="dark"] .bg-white\/90 {
-  background-color: rgba(20, 28, 40, 0.9) !important;
+  background-color: rgba(22, 34, 42, 0.9) !important;
 }
 
 html[data-theme-resolved="dark"] .bg-white\/80 {
-  background-color: rgba(16, 22, 31, 0.8) !important;
+  background-color: rgba(17, 26, 32, 0.8) !important;
 }
 
 html[data-theme-resolved="dark"] .bg-white\/70 {
-  background-color: rgba(16, 22, 31, 0.72) !important;
+  background-color: rgba(17, 26, 32, 0.72) !important;
 }
 
 html[data-theme-resolved="dark"] .bg-white\/60 {
-  background-color: rgba(16, 22, 31, 0.64) !important;
+  background-color: rgba(17, 26, 32, 0.64) !important;
 }
 
 html[data-theme-resolved="dark"] .hover\:bg-neutral-50:hover {
@@ -176,7 +178,7 @@ body {
 
 html[data-theme-resolved="dark"] body {
   background-color: var(--color-bg-muted);
-  background-image: radial-gradient(1200px 560px at 80% -10%, rgba(79, 159, 133, 0.08), transparent 60%);
+  background-image: radial-gradient(1200px 560px at 80% -10%, rgba(99, 184, 158, 0.08), transparent 60%);
 }
 
 h1,

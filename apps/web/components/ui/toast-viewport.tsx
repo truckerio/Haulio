@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { dismiss, useToasts } from "@/lib/toast";
+import { dismiss, triggerToastAction, useToasts } from "@/lib/toast";
 
 export function ToastViewport() {
   const toasts = useToasts();
@@ -25,7 +25,7 @@ export function ToastViewport() {
           )}
         >
           <div className="flex items-start justify-between gap-2">
-            <div className="text-xs font-medium leading-5">{item.message}</div>
+            <div className="flex-1 text-xs font-medium leading-5">{item.message}</div>
             <button
               type="button"
               className="rounded p-0.5 text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
@@ -35,6 +35,17 @@ export function ToastViewport() {
               x
             </button>
           </div>
+          {item.actionLabel ? (
+            <div className="mt-1.5">
+              <button
+                type="button"
+                className="rounded border border-[color:var(--color-divider)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[color:var(--color-accent)] hover:bg-[color:var(--color-bg-muted)]"
+                onClick={() => triggerToastAction(item.id)}
+              >
+                {item.actionLabel}
+              </button>
+            </div>
+          ) : null}
         </div>
       ))}
     </div>

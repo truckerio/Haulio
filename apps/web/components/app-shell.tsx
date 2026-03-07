@@ -422,12 +422,16 @@ function AppShellInner({
   subtitle,
   hideHeader,
   hideTopActivityTrigger,
+  mainClassName,
+  contentClassName,
   children,
 }: {
   title: string;
   subtitle?: string;
   hideHeader?: boolean;
   hideTopActivityTrigger?: boolean;
+  mainClassName?: string;
+  contentClassName?: string;
   children: ReactNode;
 }) {
   const pathname = usePathname();
@@ -912,9 +916,14 @@ function AppShellInner({
 
         <main
           id="main-content"
-          className="flex-1 min-h-0 min-w-0 overflow-y-auto lg:h-screen"
+          className={cn("flex-1 min-h-0 min-w-0 overflow-y-auto lg:h-screen", mainClassName)}
         >
-          <div className="space-y-6 px-3 pb-8 pt-5 sm:px-4 sm:pb-10 sm:pt-6 lg:px-10 lg:pb-16 lg:pt-8">
+          <div
+            className={cn(
+              "space-y-6 px-3 pb-8 pt-5 sm:px-4 sm:pb-10 sm:pt-6 lg:px-10 lg:pb-16 lg:pt-8",
+              contentClassName
+            )}
+          >
           {shouldShowTopActivityTrigger ? (
               <div className="hidden lg:flex lg:justify-end">
                 <button
@@ -1104,16 +1113,27 @@ export function AppShell({
   subtitle,
   hideHeader,
   hideTopActivityTrigger,
+  mainClassName,
+  contentClassName,
   children,
 }: {
   title: string;
   subtitle?: string;
   hideHeader?: boolean;
   hideTopActivityTrigger?: boolean;
+  mainClassName?: string;
+  contentClassName?: string;
   children: ReactNode;
 }) {
   return (
-    <AppShellInner title={title} subtitle={subtitle} hideHeader={hideHeader} hideTopActivityTrigger={hideTopActivityTrigger}>
+    <AppShellInner
+      title={title}
+      subtitle={subtitle}
+      hideHeader={hideHeader}
+      hideTopActivityTrigger={hideTopActivityTrigger}
+      mainClassName={mainClassName}
+      contentClassName={contentClassName}
+    >
       {children}
     </AppShellInner>
   );

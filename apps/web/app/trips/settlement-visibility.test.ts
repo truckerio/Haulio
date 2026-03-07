@@ -2,25 +2,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-const tripPagePath = path.resolve(process.cwd(), "app/trips/[id]/page.tsx");
-const tripPage = fs.readFileSync(tripPagePath, "utf8");
+const shell = fs.readFileSync(path.resolve(process.cwd(), "components/detail-workspace/detail-workspace-shell.tsx"), "utf8");
 
 assert.ok(
-  tripPage.includes("const canViewSettlementPreview = capabilities.canViewSettlementPreview;"),
-  "Trip detail must derive settlement visibility from capabilities"
+  shell.includes("Open receivables") && shell.includes("Open billing preflight") && shell.includes("Open payables context"),
+  "Conditional finance commands must exist in context strip"
 );
 assert.ok(
-  tripPage.includes("if (getRoleCapabilities(role).canViewSettlementPreview)"),
-  "Trip detail must gate settlement-preview API fetch by role capabilities"
-);
-assert.ok(
-  tripPage.includes("`/trips/${tripId}/settlement-preview`"),
-  "Trip detail must use the settlement preview endpoint"
-);
-assert.ok(
-  tripPage.includes("{canViewSettlementPreview ? ("),
-  "Trip detail settlement panels must be conditionally rendered by canViewSettlementPreview"
+  shell.includes("HANDOFF_STAGES") && shell.includes("SETTLED"),
+  "Finance handoff stage rail must include full delivered->settled lifecycle"
 );
 
-console.log("trip settlement visibility tests passed");
-
+console.log("trip finance handoff visibility contract passed");

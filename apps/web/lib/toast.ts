@@ -4,11 +4,18 @@ import { useSyncExternalStore } from "react";
 
 export type ToastTone = "error" | "success";
 
+type ToastAction = {
+  label: string;
+  onAction: () => void;
+};
+
 export type ToastItem = {
   id: string;
   tone: ToastTone;
   message: string;
   createdAt: number;
+  actionLabel?: string;
+  action?: () => void;
 };
 
 type ToastListener = () => void;
@@ -42,12 +49,14 @@ function nextId() {
   return `toast-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function pushToast(tone: ToastTone, message: string) {
+export function pushToast(tone: ToastTone, message: string, action?: ToastAction) {
   const item: ToastItem = {
     id: nextId(),
     tone,
     message,
     createdAt: Date.now(),
+    actionLabel: action?.label,
+    action: action?.onAction,
   };
   toasts = [item, ...toasts].slice(0, MAX_VISIBLE_TOASTS);
   scheduleDismiss(item.id);
@@ -65,6 +74,16 @@ export function dismiss(id: string) {
   if (next.length === toasts.length) return;
   toasts = next;
   emit();
+}
+
+export function triggerToastAction(id: string) {
+  const item = toasts.find((toastItem) => toastItem.id === id);
+  if (!item?.action) {
+    dismiss(id);
+    return;
+  }
+  item.action();
+  dismiss(id);
 }
 
 export function clearToasts() {
@@ -98,11 +117,11 @@ export function useToasts() {
 }
 
 export const toast = {
-  error(message: string) {
-    return pushToast("error", message);
+  error(message: string, action?: ToastAction) {
+    return pushToast("error", message, action);
   },
-  success(message: string) {
-    return pushToast("success", message);
+  success(message: string, action?: ToastAction) {
+    return pushToast("success", message, action);
   },
   dismiss,
   clear: clearToasts,

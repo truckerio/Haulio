@@ -3,19 +3,26 @@ import fs from "node:fs";
 import path from "node:path";
 
 const shipmentPage = fs.readFileSync(path.resolve(process.cwd(), "app/shipments/[id]/page.tsx"), "utf8");
+const shell = fs.readFileSync(path.resolve(process.cwd(), "components/detail-workspace/detail-workspace-shell.tsx"), "utf8");
 
 assert.ok(
-  shipmentPage.includes('/dispatch/shipments/${shipmentId}/risk-score'),
-  "shipment detail must request dispatch shipment risk score"
+  shipmentPage.includes('fetchDetailWorkspaceModel("shipment", shipmentId)'),
+  "Shipment detail route must resolve model using shipment lens"
 );
 assert.ok(
-  shipmentPage.includes("Risk ${risk.risk.band}") && shipmentPage.includes("Score {risk.risk.score}/100"),
-  "shipment detail must surface risk band and numeric score"
+  shipmentPage.includes('<DetailWorkspaceShell') && shipmentPage.includes("onRefresh"),
+  "Shipment detail route must render shared shell with refresh callback"
 );
 assert.ok(
-  shipmentPage.includes("Top factor: {risk.risk.factors[0]?.detail}"),
-  "shipment detail must show top risk factor context"
+  shell.includes('data-testid="detail-context-strip"') &&
+    shell.includes('data-testid="detail-execution-lane"') &&
+    shell.includes('data-testid="detail-decision-rail"') &&
+    shell.includes('data-testid="detail-secondary-tabs"'),
+  "Shared shell must expose 4-zone command-first structure"
+);
+assert.ok(
+  shell.includes("Verify docs") && shell.includes("Reject docs") && shell.includes("Upload POD"),
+  "Context strip must include document operations"
 );
 
-console.log("shipment risk contract tests passed");
-
+console.log("shipment detail command-first contract passed");

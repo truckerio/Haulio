@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -37,8 +37,19 @@ export type DispatchGridColumnKey =
   | "status"
   | "customer"
   | "pickupAppt"
+  | "pickupDateFrom"
+  | "pickupDateTo"
+  | "pickupTimeFrom"
+  | "pickupTimeTo"
   | "deliveryAppt"
+  | "deliveryDateFrom"
+  | "deliveryDateTo"
+  | "deliveryTimeFrom"
+  | "deliveryTimeTo"
   | "assignment"
+  | "driverName"
+  | "truckUnit"
+  | "trailerUnit"
   | "miles"
   | "paidMiles"
   | "rate"
@@ -57,7 +68,7 @@ export type DispatchGridColumnKey =
   | "tripLoads"
   | "updatedAt";
 
-export type DispatchGridDensity = "compact" | "comfortable";
+export type DispatchGridDensity = "ultra" | "compact" | "comfortable";
 
 export type DispatchGridCommandType =
   | "copyFiltered"
@@ -228,8 +239,19 @@ export const DISPATCH_GRID_COLUMNS: DispatchGridColumn[] = [
   { key: "status", label: "Status", width: 132, frozen: true, required: true, editable: true, filterable: true, sortable: true },
   { key: "customer", label: "Customer", width: 180, required: true, editable: true, filterable: true, sortable: true },
   { key: "pickupAppt", label: "Pickup", width: 220, required: true, filterable: true, sortable: true },
+  { key: "pickupDateFrom", label: "PU Date F", width: 120, required: false, sortable: true },
+  { key: "pickupDateTo", label: "PU Date T", width: 120, required: false, sortable: true },
+  { key: "pickupTimeFrom", label: "PU Time F", width: 120, required: false, sortable: true },
+  { key: "pickupTimeTo", label: "PU Time T", width: 120, required: false, sortable: true },
   { key: "deliveryAppt", label: "Delivery", width: 220, required: true, filterable: true, sortable: true },
+  { key: "deliveryDateFrom", label: "Del Date F", width: 120, required: false, sortable: true },
+  { key: "deliveryDateTo", label: "Del Date T", width: 120, required: false, sortable: true },
+  { key: "deliveryTimeFrom", label: "Del Time F", width: 120, required: false, sortable: true },
+  { key: "deliveryTimeTo", label: "Del Time T", width: 120, required: false, sortable: true },
   { key: "assignment", label: "Assignment", width: 250, required: true, filterable: true, sortable: true },
+  { key: "driverName", label: "Driver", width: 160, required: false, sortable: true },
+  { key: "truckUnit", label: "Truck", width: 110, required: false, sortable: true },
+  { key: "trailerUnit", label: "Trailer", width: 110, required: false, sortable: true },
   { key: "miles", label: "Miles", width: 96, required: true, editable: true, align: "right", sortable: true },
   { key: "paidMiles", label: "Paid", width: 96, required: false, align: "right", sortable: true },
   { key: "rate", label: "Rate", width: 120, required: true, editable: true, align: "right", sortable: true },
@@ -378,6 +400,36 @@ function formatAppointmentWindowText(row: DispatchGridRow, column: "pickupAppt" 
     timeRange: `${formatTimePart(window.from)} → ${formatTimePart(window.to)}`,
     relative: formatRelativeAppointment(window.from ?? window.to),
   };
+}
+
+function formatAppointmentParts(row: DispatchGridRow, column: "pickupAppt" | "deliveryAppt") {
+  const window = resolveAppointmentWindow(row, column);
+  return {
+    dateFrom: formatDatePart(window.from),
+    dateTo: formatDatePart(window.to),
+    timeFrom: formatTimePart(window.from),
+    timeTo: formatTimePart(window.to),
+  };
+}
+
+function formatCompactAppointmentText(row: DispatchGridRow, column: "pickupAppt" | "deliveryAppt") {
+  const parts = formatAppointmentParts(row, column);
+  const dateLabel = parts.dateFrom === parts.dateTo ? parts.dateFrom : `${parts.dateFrom}→${parts.dateTo}`;
+  return `${dateLabel} ${parts.timeFrom}→${parts.timeTo}`;
+}
+
+function formatAppointmentDuration(row: DispatchGridRow, column: "pickupAppt" | "deliveryAppt") {
+  const window = resolveAppointmentWindow(row, column);
+  if (!window.from || !window.to) return "-";
+  const from = new Date(window.from);
+  const to = new Date(window.to);
+  const diffMs = to.getTime() - from.getTime();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) return "-";
+  const minutes = Math.round(diffMs / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`;
 }
 
 function isTerminalRowStatus(status?: string | null) {
@@ -581,12 +633,34 @@ function buildCellValue(row: DispatchGridRow, column: DispatchGridColumnKey, ide
       const windowText = formatAppointmentWindowText(row, "pickupAppt");
       return `${routeLabel(row.route?.shipperCity, row.route?.shipperState)} ${windowText.dateRange} ${windowText.timeRange}`.trim();
     }
+    case "pickupDateFrom":
+      return formatAppointmentParts(row, "pickupAppt").dateFrom;
+    case "pickupDateTo":
+      return formatAppointmentParts(row, "pickupAppt").dateTo;
+    case "pickupTimeFrom":
+      return formatAppointmentParts(row, "pickupAppt").timeFrom;
+    case "pickupTimeTo":
+      return formatAppointmentParts(row, "pickupAppt").timeTo;
     case "deliveryAppt": {
       const windowText = formatAppointmentWindowText(row, "deliveryAppt");
       return `${routeLabel(row.route?.consigneeCity, row.route?.consigneeState)} ${windowText.dateRange} ${windowText.timeRange}`.trim();
     }
+    case "deliveryDateFrom":
+      return formatAppointmentParts(row, "deliveryAppt").dateFrom;
+    case "deliveryDateTo":
+      return formatAppointmentParts(row, "deliveryAppt").dateTo;
+    case "deliveryTimeFrom":
+      return formatAppointmentParts(row, "deliveryAppt").timeFrom;
+    case "deliveryTimeTo":
+      return formatAppointmentParts(row, "deliveryAppt").timeTo;
     case "assignment":
       return `${row.assignment?.driver?.name ?? "Unassigned"} ${row.assignment?.truck?.unit ?? ""} ${row.assignment?.trailer?.unit ?? ""}`.trim();
+    case "driverName":
+      return row.assignment?.driver?.name ?? "Unassigned";
+    case "truckUnit":
+      return row.assignment?.truck?.unit ?? "No truck";
+    case "trailerUnit":
+      return row.assignment?.trailer?.unit ?? "No trailer";
     case "miles":
       return row.miles?.toString() ?? "";
     case "paidMiles":
@@ -632,12 +706,34 @@ function buildExportCellValue(row: DispatchGridRow, column: DispatchGridColumnKe
       const windowText = formatAppointmentWindowText(row, "pickupAppt");
       return `${routeLabel(row.route?.shipperCity, row.route?.shipperState)} | ${windowText.dateRange} | ${windowText.timeRange}`;
     }
+    case "pickupDateFrom":
+      return formatAppointmentParts(row, "pickupAppt").dateFrom;
+    case "pickupDateTo":
+      return formatAppointmentParts(row, "pickupAppt").dateTo;
+    case "pickupTimeFrom":
+      return formatAppointmentParts(row, "pickupAppt").timeFrom;
+    case "pickupTimeTo":
+      return formatAppointmentParts(row, "pickupAppt").timeTo;
     case "deliveryAppt": {
       const windowText = formatAppointmentWindowText(row, "deliveryAppt");
       return `${routeLabel(row.route?.consigneeCity, row.route?.consigneeState)} | ${windowText.dateRange} | ${windowText.timeRange}`;
     }
+    case "deliveryDateFrom":
+      return formatAppointmentParts(row, "deliveryAppt").dateFrom;
+    case "deliveryDateTo":
+      return formatAppointmentParts(row, "deliveryAppt").dateTo;
+    case "deliveryTimeFrom":
+      return formatAppointmentParts(row, "deliveryAppt").timeFrom;
+    case "deliveryTimeTo":
+      return formatAppointmentParts(row, "deliveryAppt").timeTo;
     case "assignment":
       return `${row.assignment?.driver?.name ?? "Unassigned"} | ${row.assignment?.truck?.unit ?? "No truck"} | ${row.assignment?.trailer?.unit ?? "No trailer"}`;
+    case "driverName":
+      return row.assignment?.driver?.name ?? "Unassigned";
+    case "truckUnit":
+      return row.assignment?.truck?.unit ?? "No truck";
+    case "trailerUnit":
+      return row.assignment?.trailer?.unit ?? "No trailer";
     case "miles":
       return row.miles == null ? "" : String(row.miles);
     case "paidMiles":
@@ -895,6 +991,19 @@ type SortRule = { column: DispatchGridColumnKey; direction: SortDirection };
 export type DispatchGridSortRule = SortRule;
 type DispatchWorkflowMacro = { id: string; label: string };
 type IdentityColumnMode = "load" | "shipment" | "trip";
+type HoverPreviewColumn = "assignment" | "pickupAppt" | "deliveryAppt";
+
+type HoverPreviewState = {
+  rowId: string;
+  loadNumber: string;
+  column: HoverPreviewColumn;
+  title: string;
+  line1: string;
+  line2: string;
+  line3: string;
+  x: number;
+  y: number;
+};
 
 type ExportScope = "filtered" | "selected" | "all";
 type ExportColumnMode = "visible" | "choose";
@@ -941,13 +1050,43 @@ function compareRowsForSort(
       return (left.customerName ?? "").localeCompare(right.customerName ?? "");
     case "pickupAppt":
       return sortDateNullable(left.nextStop?.appointmentStart, right.nextStop?.appointmentStart);
+    case "pickupDateFrom":
+      return sortDateNullable(resolveAppointmentWindow(left, "pickupAppt").from, resolveAppointmentWindow(right, "pickupAppt").from);
+    case "pickupDateTo":
+      return sortDateNullable(resolveAppointmentWindow(left, "pickupAppt").to, resolveAppointmentWindow(right, "pickupAppt").to);
+    case "pickupTimeFrom":
+      return formatTimePart(resolveAppointmentWindow(left, "pickupAppt").from).localeCompare(
+        formatTimePart(resolveAppointmentWindow(right, "pickupAppt").from)
+      );
+    case "pickupTimeTo":
+      return formatTimePart(resolveAppointmentWindow(left, "pickupAppt").to).localeCompare(
+        formatTimePart(resolveAppointmentWindow(right, "pickupAppt").to)
+      );
     case "deliveryAppt":
       return sortDateNullable(left.nextStop?.appointmentEnd, right.nextStop?.appointmentEnd);
+    case "deliveryDateFrom":
+      return sortDateNullable(resolveAppointmentWindow(left, "deliveryAppt").from, resolveAppointmentWindow(right, "deliveryAppt").from);
+    case "deliveryDateTo":
+      return sortDateNullable(resolveAppointmentWindow(left, "deliveryAppt").to, resolveAppointmentWindow(right, "deliveryAppt").to);
+    case "deliveryTimeFrom":
+      return formatTimePart(resolveAppointmentWindow(left, "deliveryAppt").from).localeCompare(
+        formatTimePart(resolveAppointmentWindow(right, "deliveryAppt").from)
+      );
+    case "deliveryTimeTo":
+      return formatTimePart(resolveAppointmentWindow(left, "deliveryAppt").to).localeCompare(
+        formatTimePart(resolveAppointmentWindow(right, "deliveryAppt").to)
+      );
     case "assignment": {
       const leftKey = `${left.assignment?.driver?.name ?? ""}|${left.assignment?.truck?.unit ?? ""}|${left.assignment?.trailer?.unit ?? ""}`;
       const rightKey = `${right.assignment?.driver?.name ?? ""}|${right.assignment?.truck?.unit ?? ""}|${right.assignment?.trailer?.unit ?? ""}`;
       return leftKey.localeCompare(rightKey);
     }
+    case "driverName":
+      return (left.assignment?.driver?.name ?? "").localeCompare(right.assignment?.driver?.name ?? "");
+    case "truckUnit":
+      return (left.assignment?.truck?.unit ?? "").localeCompare(right.assignment?.truck?.unit ?? "");
+    case "trailerUnit":
+      return (left.assignment?.trailer?.unit ?? "").localeCompare(right.assignment?.trailer?.unit ?? "");
     case "miles":
       return sortNumericNullable(left.miles ?? null, right.miles ?? null);
     case "paidMiles":
@@ -1175,6 +1314,7 @@ export function DispatchSpreadsheetGrid({
   hideCommandMenus,
   identityColumn,
   onColumnOrderChange,
+  onViewportScroll,
 }: {
   rows: DispatchGridRow[];
   filters: DispatchGridFilterState;
@@ -1205,6 +1345,11 @@ export function DispatchSpreadsheetGrid({
   hideCommandMenus?: boolean;
   identityColumn?: IdentityColumnMode;
   onColumnOrderChange?: (next: DispatchGridColumnKey[]) => void;
+  onViewportScroll?: (metrics: {
+    scrollTop: number;
+    clientHeight: number;
+    scrollHeight: number;
+  }) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const filterPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -1252,6 +1397,15 @@ export function DispatchSpreadsheetGrid({
   const [exportPreparing, setExportPreparing] = useState(false);
   const [copyPreparing, setCopyPreparing] = useState(false);
   const [draggingHeaderColumn, setDraggingHeaderColumn] = useState<DispatchGridColumnKey | null>(null);
+  const [hoverPreview, setHoverPreview] = useState<HoverPreviewState | null>(null);
+  const [quickActionTooltip, setQuickActionTooltip] = useState<{
+    label: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const hoverPreviewOpenTimerRef = useRef<number | null>(null);
+  const hoverPreviewCloseTimerRef = useRef<number | null>(null);
+  const quickActionTooltipOpenTimerRef = useRef<number | null>(null);
   const lastExternalCommandTokenRef = useRef<number | null>(null);
 
   const columnFilters = useMemo(() => normalizeColumnFilters(filters), [filters]);
@@ -1273,7 +1427,9 @@ export function DispatchSpreadsheetGrid({
     [onSortRulesChange, sortRules]
   );
 
-  const rowHeight = density === "compact" ? 72 : 84;
+  const isUltra = density === "ultra";
+  const isTightDensity = density === "ultra" || density === "compact";
+  const rowHeight = isUltra ? 44 : density === "compact" ? 56 : 84;
   const orderedColumnKeys = useMemo(() => normalizeColumnOrder(columnOrder), [columnOrder]);
   const columnByKey = useMemo(
     () => new Map<DispatchGridColumnKey, DispatchGridColumn>(DISPATCH_GRID_COLUMNS.map((column) => [column.key, column])),
@@ -2297,6 +2453,119 @@ export function DispatchSpreadsheetGrid({
 
   const clearAllFilters = () => setColumnFilters({});
 
+  const clearHoverPreviewTimers = useCallback(() => {
+    if (hoverPreviewOpenTimerRef.current) {
+      window.clearTimeout(hoverPreviewOpenTimerRef.current);
+      hoverPreviewOpenTimerRef.current = null;
+    }
+    if (hoverPreviewCloseTimerRef.current) {
+      window.clearTimeout(hoverPreviewCloseTimerRef.current);
+      hoverPreviewCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const dismissHoverPreview = useCallback(() => {
+    clearHoverPreviewTimers();
+    setHoverPreview(null);
+  }, [clearHoverPreviewTimers]);
+
+  const clearQuickActionTooltipTimer = useCallback(() => {
+    if (quickActionTooltipOpenTimerRef.current) {
+      window.clearTimeout(quickActionTooltipOpenTimerRef.current);
+      quickActionTooltipOpenTimerRef.current = null;
+    }
+  }, []);
+
+  const dismissQuickActionTooltip = useCallback(() => {
+    clearQuickActionTooltipTimer();
+    setQuickActionTooltip(null);
+  }, [clearQuickActionTooltipTimer]);
+
+  const scheduleQuickActionTooltip = useCallback(
+    (label: string, event: ReactMouseEvent<HTMLButtonElement>) => {
+      clearQuickActionTooltipTimer();
+      const rect = event.currentTarget.getBoundingClientRect();
+      quickActionTooltipOpenTimerRef.current = window.setTimeout(() => {
+        setQuickActionTooltip({
+          label,
+          x: rect.left + rect.width / 2,
+          y: rect.top - 8,
+        });
+        quickActionTooltipOpenTimerRef.current = null;
+      }, 2000);
+    },
+    [clearQuickActionTooltipTimer]
+  );
+
+  const scheduleHoverPreview = useCallback(
+    (row: DispatchGridRow, column: HoverPreviewColumn, event: ReactMouseEvent<HTMLDivElement>) => {
+      clearHoverPreviewTimers();
+      const x = event.clientX;
+      const y = event.clientY;
+      hoverPreviewOpenTimerRef.current = window.setTimeout(() => {
+        if (column === "assignment") {
+          const driver = row.assignment?.driver?.name ?? "Unassigned";
+          const truck = row.assignment?.truck?.unit ?? "No truck";
+          const trailer = row.assignment?.trailer?.unit ?? "No trailer";
+          const state =
+            row.assignment?.driver?.id && row.assignment?.truck?.id && row.assignment?.trailer?.id
+              ? "Complete"
+              : row.assignment?.driver?.id || row.assignment?.truck?.id || row.assignment?.trailer?.id
+                ? "Partial"
+                : "Unassigned";
+          setHoverPreview({
+            rowId: row.id,
+            loadNumber: row.loadNumber,
+            column,
+            title: "Assignment preview",
+            line1: `Driver: ${driver}`,
+            line2: `Truck: ${truck} · Trailer: ${trailer}`,
+            line3: `State: ${state}`,
+            x,
+            y,
+          });
+        } else {
+          const city =
+            column === "pickupAppt"
+              ? routeLabel(row.route?.shipperCity, row.route?.shipperState)
+              : routeLabel(row.route?.consigneeCity, row.route?.consigneeState);
+          const parts = formatAppointmentParts(row, column);
+          const relative = formatAppointmentWindowText(row, column).relative ?? "-";
+          const duration = formatAppointmentDuration(row, column);
+          setHoverPreview({
+            rowId: row.id,
+            loadNumber: row.loadNumber,
+            column,
+            title: column === "pickupAppt" ? "Pickup preview" : "Delivery preview",
+            line1: city,
+            line2: `${parts.dateFrom}→${parts.dateTo} · ${parts.timeFrom}→${parts.timeTo}`,
+            line3: `${relative} · window ${duration}`,
+            x,
+            y,
+          });
+        }
+        hoverPreviewCloseTimerRef.current = window.setTimeout(() => {
+          setHoverPreview((prev) => (prev && prev.rowId === row.id && prev.column === column ? null : prev));
+          hoverPreviewCloseTimerRef.current = null;
+        }, 5000);
+        hoverPreviewOpenTimerRef.current = null;
+      }, 1000);
+    },
+    [clearHoverPreviewTimers]
+  );
+
+  useEffect(() => {
+    dismissHoverPreview();
+  }, [scrollTop, dismissHoverPreview]);
+
+  useEffect(() => {
+    return () => clearHoverPreviewTimers();
+  }, [clearHoverPreviewTimers]);
+
+  useEffect(() => {
+    return () => clearQuickActionTooltipTimer();
+  }, [clearQuickActionTooltipTimer]);
+
   const contextValueForCell = useCallback(
     (row: DispatchGridRow, column: DispatchGridColumnKey) => {
       if (column === "loadNumber") {
@@ -2327,7 +2596,12 @@ export function DispatchSpreadsheetGrid({
 
   return (
     <div className="rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)]">
-      <div className="flex items-center justify-between gap-2 border-b border-[color:var(--color-divider)] px-3 py-2 text-xs text-[color:var(--color-text-muted)]">
+      <div
+        className={cn(
+          "flex items-center justify-between gap-2 border-b border-[color:var(--color-divider)] px-3 text-xs text-[color:var(--color-text-muted)]",
+          isTightDensity ? "py-0.5" : "py-2"
+        )}
+      >
         <div className="flex flex-wrap items-center gap-2">
           <span>Spreadsheet dispatch grid</span>
           <span className="inline-flex items-center rounded-full border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] px-2 py-0.5 text-[11px] font-medium text-ink">
@@ -2344,7 +2618,7 @@ export function DispatchSpreadsheetGrid({
         </div>
         {hideCommandMenus ? (
           <div className="text-[11px] text-[color:var(--color-text-subtle)]">
-            Use Dispatch ribbon for queues, clear-out, and export tools.
+            {isTightDensity ? null : "Use Dispatch ribbon for queues, clear-out, and export tools."}
           </div>
         ) : (
           <div className="flex items-center gap-2">
@@ -2478,7 +2752,12 @@ export function DispatchSpreadsheetGrid({
           </div>
         )}
       </div>
-      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2">
+      <div
+        className={cn(
+          "sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-2",
+          isTightDensity ? "py-0" : "py-2"
+        )}
+      >
         {activeFilterChips.length ? (
           activeFilterChips.map((chip) => (
             <button
@@ -2504,8 +2783,16 @@ export function DispatchSpreadsheetGrid({
       </div>
       <div
         ref={viewportRef}
-        className="relative h-[62vh] overflow-auto"
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        className={cn("relative overflow-auto", isUltra ? "h-[78vh]" : isTightDensity ? "h-[72vh]" : "h-[62vh]")}
+        onScroll={(event) => {
+          const node = event.currentTarget;
+          setScrollTop(node.scrollTop);
+          onViewportScroll?.({
+            scrollTop: node.scrollTop,
+            clientHeight: node.clientHeight,
+            scrollHeight: node.scrollHeight,
+          });
+        }}
         onKeyDown={handleGridKeyDown}
         tabIndex={0}
       >
@@ -2520,7 +2807,8 @@ export function DispatchSpreadsheetGrid({
                   <div
                     key={column.key}
                     className={cn(
-                      "group relative h-10 border-r border-[color:var(--color-divider)] px-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]",
+                      "group relative border-r border-[color:var(--color-divider)] px-2 font-semibold uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]",
+                      isUltra ? "h-6 text-[9px]" : isTightDensity ? "h-8 text-[10px]" : "h-10 text-[11px]",
                       column.align === "right" ? "flex items-center justify-end" : "flex items-center",
                       column.key === "select" ? "justify-center" : ""
                     )}
@@ -3070,7 +3358,8 @@ export function DispatchSpreadsheetGrid({
                       const isEditing = editingCell?.rowId === row.id && editingCell.column === column.key;
                       const editKey = `${row.id}:${column.key}`;
                       const cellClass = cn(
-                        "relative h-full border-r border-[color:var(--color-divider)] px-2 py-2.5 text-[13px] text-ink",
+                        "relative h-full border-r border-[color:var(--color-divider)] px-2 text-ink",
+                        isUltra ? "py-0 text-[11px]" : isTightDensity ? "py-1 text-[12px]" : "py-2.5 text-[13px]",
                         column.key === "select" ? "flex items-center" : "flex items-start",
                         column.align === "right" ? "justify-end text-right" : "justify-start",
                         column.align === "center" ? "justify-center text-center" : "",
@@ -3101,32 +3390,66 @@ export function DispatchSpreadsheetGrid({
                             return (
                               <div className="min-w-0">
                                 <div className="truncate">{city}</div>
-                                <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
-                                  {windowText.dateRange}
-                                </div>
-                                <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
-                                  {windowText.timeRange}
-                                  {windowText.relative ? ` · ${windowText.relative}` : ""}
-                                </div>
+                                {isTightDensity ? (
+                                  <div className="truncate text-[10px] text-[color:var(--color-text-muted)]">
+                                    {formatCompactAppointmentText(row, "pickupAppt")}
+                                    {windowText.relative ? ` · ${windowText.relative}` : ""}
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
+                                      {windowText.dateRange}
+                                    </div>
+                                    <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
+                                      {windowText.timeRange}
+                                      {windowText.relative ? ` · ${windowText.relative}` : ""}
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             );
                           }
+                          case "pickupDateFrom":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "pickupAppt").dateFrom}</div>;
+                          case "pickupDateTo":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "pickupAppt").dateTo}</div>;
+                          case "pickupTimeFrom":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "pickupAppt").timeFrom}</div>;
+                          case "pickupTimeTo":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "pickupAppt").timeTo}</div>;
                           case "deliveryAppt": {
                             const city = routeLabel(row.route?.consigneeCity, row.route?.consigneeState);
                             const windowText = formatAppointmentWindowText(row, "deliveryAppt");
                             return (
                               <div className="min-w-0">
                                 <div className="truncate">{city}</div>
-                                <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
-                                  {windowText.dateRange}
-                                </div>
-                                <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
-                                  {windowText.timeRange}
-                                  {windowText.relative ? ` · ${windowText.relative}` : ""}
-                                </div>
+                                {isTightDensity ? (
+                                  <div className="truncate text-[10px] text-[color:var(--color-text-muted)]">
+                                    {formatCompactAppointmentText(row, "deliveryAppt")}
+                                    {windowText.relative ? ` · ${windowText.relative}` : ""}
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
+                                      {windowText.dateRange}
+                                    </div>
+                                    <div className="truncate text-[10px] text-[color:var(--color-text-subtle)]">
+                                      {windowText.timeRange}
+                                      {windowText.relative ? ` · ${windowText.relative}` : ""}
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             );
                           }
+                          case "deliveryDateFrom":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "deliveryAppt").dateFrom}</div>;
+                          case "deliveryDateTo":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "deliveryAppt").dateTo}</div>;
+                          case "deliveryTimeFrom":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "deliveryAppt").timeFrom}</div>;
+                          case "deliveryTimeTo":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{formatAppointmentParts(row, "deliveryAppt").timeTo}</div>;
                           case "assignment": {
                             const hasDriver = Boolean(row.assignment?.driver?.id);
                             const hasTruck = Boolean(row.assignment?.truck?.id);
@@ -3135,24 +3458,38 @@ export function DispatchSpreadsheetGrid({
                             return (
                               <div className="min-w-0">
                                 <div className="truncate">{row.assignment?.driver?.name ?? "Unassigned"}</div>
-                                <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
-                                  {row.assignment?.truck?.unit ?? "No truck"} · {row.assignment?.trailer?.unit ?? "No trailer"}
-                                </div>
-                                <div
-                                  className={cn(
-                                    "truncate text-[10px] uppercase tracking-[0.12em]",
-                                    state === "complete"
-                                      ? "text-[color:var(--color-success)]"
-                                      : state === "partial"
-                                      ? "text-[color:var(--color-warning)]"
-                                      : "text-[color:var(--color-text-subtle)]"
-                                  )}
-                                >
-                                  {state}
-                                </div>
+                                {isTightDensity ? (
+                                  <div className="truncate text-[10px] text-[color:var(--color-text-muted)]">
+                                    {row.assignment?.truck?.unit ?? "No truck"} · {row.assignment?.trailer?.unit ?? "No trailer"} · {state}
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">
+                                      {row.assignment?.truck?.unit ?? "No truck"} · {row.assignment?.trailer?.unit ?? "No trailer"}
+                                    </div>
+                                    <div
+                                      className={cn(
+                                        "truncate text-[10px] uppercase tracking-[0.12em]",
+                                        state === "complete"
+                                          ? "text-[color:var(--color-success)]"
+                                          : state === "partial"
+                                          ? "text-[color:var(--color-warning)]"
+                                          : "text-[color:var(--color-text-subtle)]"
+                                      )}
+                                    >
+                                      {state}
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             );
                           }
+                          case "driverName":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{row.assignment?.driver?.name ?? "Unassigned"}</div>;
+                          case "truckUnit":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{row.assignment?.truck?.unit ?? "No truck"}</div>;
+                          case "trailerUnit":
+                            return <div className="truncate text-[color:var(--color-text-muted)]">{row.assignment?.trailer?.unit ?? "No trailer"}</div>;
                           case "miles":
                             return <div className="tabular-nums text-[color:var(--color-text-muted)]">{row.miles ?? "-"}</div>;
                           case "paidMiles":
@@ -3351,9 +3688,10 @@ export function DispatchSpreadsheetGrid({
                                   <div className="flex items-center gap-1">
                                     <button
                                       type="button"
-                                      title="Assign"
+                                      aria-label="Assign"
                                       onClick={(event) => {
                                         event.stopPropagation();
+                                        dismissQuickActionTooltip();
                                         if (onQuickAssign) {
                                           onQuickAssign(row.id);
                                         } else if (onQuickOpenInspector) {
@@ -3362,52 +3700,64 @@ export function DispatchSpreadsheetGrid({
                                           onSelectLoad(row.id);
                                         }
                                       }}
+                                      onMouseEnter={(event) => scheduleQuickActionTooltip("Assign", event)}
+                                      onMouseLeave={dismissQuickActionTooltip}
                                       className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
                                     >
                                       <QuickAssignIcon />
                                     </button>
                                     <button
                                       type="button"
-                                      title="Update status"
+                                      aria-label="Update status"
                                       onClick={(event) => {
                                         event.stopPropagation();
+                                        dismissQuickActionTooltip();
                                         beginEdit(row.id, "status");
                                       }}
+                                      onMouseEnter={(event) => scheduleQuickActionTooltip("Update status", event)}
+                                      onMouseLeave={dismissQuickActionTooltip}
                                       className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
                                     >
                                       <QuickStatusIcon />
                                     </button>
                                     <button
                                       type="button"
-                                      title="Upload POD"
+                                      aria-label="Upload POD"
                                       onClick={(event) => {
                                         event.stopPropagation();
+                                        dismissQuickActionTooltip();
                                         (onQuickUploadPod ?? onSelectLoad)(row.id);
                                       }}
+                                      onMouseEnter={(event) => scheduleQuickActionTooltip("Upload POD", event)}
+                                      onMouseLeave={dismissQuickActionTooltip}
                                       className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
                                     >
                                       <QuickPodIcon />
                                     </button>
                                     <button
                                       type="button"
-                                      title="Open inspector"
+                                      aria-label="Open inspector"
                                       onClick={(event) => {
                                         event.stopPropagation();
+                                        dismissQuickActionTooltip();
                                         if (onQuickOpenInspector) {
-                                          onQuickOpenInspector(row.id, "stops");
+                                          onQuickOpenInspector(row.id);
                                         } else {
                                           onSelectLoad(row.id);
                                         }
                                       }}
+                                      onMouseEnter={(event) => scheduleQuickActionTooltip("Open inspector", event)}
+                                      onMouseLeave={dismissQuickActionTooltip}
                                       className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
                                     >
                                       <QuickInspectorIcon />
                                     </button>
                                     <button
                                       type="button"
-                                      title="Message / add note"
+                                      aria-label="Message / add note"
                                       onClick={(event) => {
                                         event.stopPropagation();
+                                        dismissQuickActionTooltip();
                                         if (onQuickMessage) {
                                           onQuickMessage(row.id);
                                         } else if (onQuickOpenInspector) {
@@ -3416,17 +3766,24 @@ export function DispatchSpreadsheetGrid({
                                           onSelectLoad(row.id);
                                         }
                                       }}
+                                      onMouseEnter={(event) => scheduleQuickActionTooltip("Message / add note", event)}
+                                      onMouseLeave={dismissQuickActionTooltip}
                                       className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
                                     >
                                       <QuickMessageIcon />
                                     </button>
                                     <button
                                       type="button"
-                                      title={highlighted ? "Remove highlight" : "Highlight row"}
+                                      aria-label={highlighted ? "Remove highlight" : "Highlight row"}
                                       onClick={(event) => {
                                         event.stopPropagation();
+                                        dismissQuickActionTooltip();
                                         toggleRowHighlight(row.id);
                                       }}
+                                      onMouseEnter={(event) =>
+                                        scheduleQuickActionTooltip(highlighted ? "Remove highlight" : "Highlight row", event)
+                                      }
+                                      onMouseLeave={dismissQuickActionTooltip}
                                       className={cn(
                                         "inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border text-[10px] hover:bg-[color:var(--color-bg-muted)]",
                                         highlighted
@@ -3438,11 +3795,14 @@ export function DispatchSpreadsheetGrid({
                                     </button>
                                     <button
                                       type="button"
-                                      title="Copy shipment link"
+                                      aria-label="Copy shipment link"
                                       onClick={(event) => {
                                         event.stopPropagation();
+                                        dismissQuickActionTooltip();
                                         onQuickShare?.(row.id);
                                       }}
+                                      onMouseEnter={(event) => scheduleQuickActionTooltip("Copy shipment link", event)}
+                                      onMouseLeave={dismissQuickActionTooltip}
                                       className="inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-control)] border border-[color:var(--color-divider)] text-[10px] text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-bg-muted)]"
                                     >
                                       <QuickShareIcon />
@@ -3453,6 +3813,11 @@ export function DispatchSpreadsheetGrid({
                             );
                         }
                       })();
+
+                      const previewableColumn =
+                        column.key === "assignment" ||
+                        column.key === "pickupAppt" ||
+                        column.key === "deliveryAppt";
 
                       return (
                         <div
@@ -3493,6 +3858,14 @@ export function DispatchSpreadsheetGrid({
                           onDoubleClick={(event) => {
                             event.stopPropagation();
                             beginEdit(row.id, column.key);
+                          }}
+                          onMouseEnter={(event) => {
+                            if (!previewableColumn) return;
+                            scheduleHoverPreview(row, column.key as HoverPreviewColumn, event);
+                          }}
+                          onMouseLeave={() => {
+                            if (!previewableColumn) return;
+                            dismissHoverPreview();
                           }}
                         >
                           {isEditing ? (
@@ -3640,6 +4013,29 @@ export function DispatchSpreadsheetGrid({
           >
             {highlightedRowIds.has(genericContextMenu.rowId) ? "Remove row highlight" : "Highlight this row"}
           </button>
+        </div>
+      ) : null}
+      {hoverPreview ? (
+        <div
+          className="pointer-events-none fixed z-[92] w-[260px] rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] px-2.5 py-2 shadow-[var(--shadow-card)]"
+          style={{
+            left: Math.min(hoverPreview.x + 12, window.innerWidth - 272),
+            top: Math.min(hoverPreview.y + 12, window.innerHeight - 120),
+          }}
+        >
+          <div className="text-[10px] uppercase tracking-[0.14em] text-[color:var(--color-text-muted)]">{hoverPreview.title}</div>
+          <div className="mt-1 truncate text-[11px] font-semibold text-ink">{hoverPreview.loadNumber}</div>
+          <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">{hoverPreview.line1}</div>
+          <div className="truncate text-[11px] text-[color:var(--color-text-muted)]">{hoverPreview.line2}</div>
+          <div className="truncate text-[11px] text-[color:var(--color-text-subtle)]">{hoverPreview.line3}</div>
+        </div>
+      ) : null}
+      {quickActionTooltip ? (
+        <div
+          className="pointer-events-none fixed z-[93] -translate-x-1/2 -translate-y-full rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface-elevated)] px-2 py-1 text-[10px] font-medium text-[color:var(--color-text-muted)] shadow-[var(--shadow-subtle)]"
+          style={{ left: quickActionTooltip.x, top: quickActionTooltip.y }}
+        >
+          {quickActionTooltip.label}
         </div>
       ) : null}
       {exportOpen ? (

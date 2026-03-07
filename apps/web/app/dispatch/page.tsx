@@ -46,7 +46,8 @@ import { formatDateTime as formatDateTime24, formatTime as formatTime24 } from "
 import { buildYardOsPlanningUrl } from "@/lib/yardos";
 import { LegsPanel } from "./legs-panel";
 
-const PAGE_SIZE = 25;
+const PAGE_SIZE = 60;
+const GRID_SCROLL_LOAD_THRESHOLD_PX = 280;
 const STORAGE_KEY = "dispatch:operatingEntityId";
 
 type DriverRecord = {
@@ -479,7 +480,7 @@ const SYSTEM_VIEW: DispatchViewConfig = {
   id: "dispatch-core",
   name: "Dispatch Core",
   filters: defaultFilters,
-  density: "comfortable",
+  density: "ultra",
   columns: DEFAULT_COLUMNS,
   panels: DEFAULT_PANELS,
   grid: DEFAULT_GRID_STATE,
@@ -784,6 +785,11 @@ function shouldBackfillTripsWorkspaceLayout(preferences?: {
   return !hasColumnVisibility || hasLegacyColumns || tripBeforeIdentity;
 }
 
+function normalizeDispatchGridDensity(density?: DispatchGridDensity | null): DispatchGridDensity {
+  void density;
+  return "ultra";
+}
+
 function sanitizeView(view: DispatchViewConfig): DispatchViewConfig {
   return {
     ...view,
@@ -795,7 +801,7 @@ function sanitizeView(view: DispatchViewConfig): DispatchViewConfig {
       exceptions: view.panels?.exceptions ?? DEFAULT_PANELS.exceptions,
       exceptionsDock: view.panels?.exceptionsDock === "right" ? "right" : "left",
     },
-    density: "comfortable",
+    density: normalizeDispatchGridDensity(view.density),
     grid: {
       filters: view.grid?.filters ?? DEFAULT_GRID_STATE.filters,
       sortRules: Array.isArray(view.grid?.sortRules) && view.grid!.sortRules.length ? view.grid!.sortRules : DEFAULT_GRID_STATE.sortRules,
@@ -813,7 +819,7 @@ function hydrateDispatchViewFromApi(view: any): DispatchViewConfig {
     isRoleDefault: Boolean(view.isRoleDefault),
     userId: view.userId ?? null,
     filters: view.config?.filters ?? view.filters ?? defaultFilters,
-    density: "comfortable",
+    density: normalizeDispatchGridDensity(view.config?.density ?? view.density),
     columns: view.config?.columns ?? view.columns ?? DEFAULT_COLUMNS,
     panels: view.config?.panels ?? view.panels ?? DEFAULT_PANELS,
     grid: view.config?.grid ?? view.grid ?? DEFAULT_GRID_STATE,
@@ -874,7 +880,7 @@ function DispatchPageContent({
   );
   const [teams, setTeams] = useState<Array<{ id: string; name: string; active?: boolean }>>([]);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
-  const [gridDensity, setGridDensity] = useState<DispatchGridDensity>("comfortable");
+  const [gridDensity, setGridDensity] = useState<DispatchGridDensity>("ultra");
   const [columnVisibility, setColumnVisibility] =
     useState<Partial<Record<DispatchGridColumnKey, boolean>>>(normalizeViewColumns(DEFAULT_COLUMNS));
   const [gridFilters, setGridFilters] = useState<DispatchGridFilterState>(DEFAULT_GRID_STATE.filters);
@@ -901,6 +907,8 @@ function DispatchPageContent({
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
+  const [loadedPageCount, setLoadedPageCount] = useState(0);
+  const [hasMoreRows, setHasMoreRows] = useState(false);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [bulkStatus, setBulkStatus] = useState<BulkStatus>("ASSIGNED");
   const [bulkMovementMode, setBulkMovementMode] = useState<"FTL" | "LTL" | "POOL_DISTRIBUTION">("FTL");
@@ -966,7 +974,6 @@ function DispatchPageContent({
   const appliedIssuePresetRef = useRef<string | null>(null);
   const dispatchHeaderRef = useRef<HTMLDivElement | null>(null);
   const gridCommandTokenRef = useRef(0);
-  const [dispatchHeaderOffset, setDispatchHeaderOffset] = useState(0);
   const [layerFocus, setLayerFocus] = useState<DispatchLayerFocus>("base");
   const [activityDrawerOpen, setActivityDrawerOpen] = useState(false);
   const [draggingGridColumn, setDraggingGridColumn] = useState<DispatchGridColumnKey | null>(null);
@@ -1000,13 +1007,16 @@ function DispatchPageContent({
     []
   );
 
-  const toggleRibbonMenu = useCallback((menu: DispatchRibbonMenu) => {
-    setActiveRibbonMenu((prev) => {
-      const next = prev === menu ? null : menu;
-      setLayerFocus(next ? "ribbon" : "base");
-      return next;
-    });
-  }, []);
+  const toggleRibbonMenu = useCallback(
+    (menu: DispatchRibbonMenu) => {
+      setActiveRibbonMenu((prev) => {
+        const next = prev === menu ? null : menu;
+        setLayerFocus(next ? "ribbon" : "base");
+        return next;
+      });
+    },
+    []
+  );
 
   const toggleSplitPeekPanel = useCallback(() => {
     setSplitSecondaryOpen((prev) => {
@@ -1145,11 +1155,15 @@ function DispatchPageContent({
   const openInspectorForLoad = useCallback(
     (loadId: string, focusSection?: DispatchInspectorFocusSection) => {
       setPanelLayout((prev) => ({ ...prev, inspector: true }));
+      if (canvasMode === "split") {
+        setSplitSecondaryPane("inspector");
+        setSplitSecondaryOpen(true);
+      }
       setInspectorFocusSection(focusSection ?? null);
       setInspectorFocusNonce((value) => value + 1);
       selectLoad(loadId, { preserveFocus: true });
     },
-    [selectLoad]
+    [canvasMode, selectLoad]
   );
 
   const openUploadPodForLoad = useCallback(
@@ -1171,6 +1185,19 @@ function DispatchPageContent({
       openInspectorForLoad(loadId, "assignment");
     },
     [openInspectorForLoad, selectLoad, workspace]
+  );
+
+  const handleGridSelectLoad = useCallback(
+    (loadId: string) => {
+      selectLoad(loadId);
+      if (workspace === "trips") return;
+      setPanelLayout((prev) => (prev.inspector ? prev : { ...prev, inspector: true }));
+      if (canvasMode === "split") {
+        setSplitSecondaryPane("inspector");
+        setSplitSecondaryOpen(true);
+      }
+    },
+    [canvasMode, selectLoad, workspace]
   );
 
 
@@ -1226,7 +1253,7 @@ function DispatchPageContent({
         const shouldApplyTripsPreset =
           workspace === "trips" &&
           (!hasSavedLayout || shouldBackfillTripsWorkspaceLayout(preferences));
-        const nextDensity = preferences.density === "compact" ? "compact" : "comfortable";
+        const nextDensity = normalizeDispatchGridDensity(preferences.density);
         const nextVisibility = shouldApplyTripsPreset
           ? buildDispatchColumnVisibility(DISPATCH_TRIPS_FIRST_OPEN_COLUMNS)
           : normalizeViewColumns(preferences.columnVisibility ?? DEFAULT_COLUMNS);
@@ -1695,7 +1722,7 @@ function DispatchPageContent({
     };
   }, [canDispatch, loadDispatchSyncHealth]);
 
-  const buildParams = useCallback((nextFilters = filters, page = pageIndex) => {
+  const buildParams = useCallback((nextFilters = filters, page = 0) => {
     const params = new URLSearchParams();
     params.set("view", "dispatch");
     if (movementView !== "all") params.set("movementMode", movementView);
@@ -1719,19 +1746,24 @@ function DispatchPageContent({
     if (nextFilters.operatingEntityId) params.set("operatingEntityId", nextFilters.operatingEntityId);
     if (canSeeAllTeams && nextFilters.teamId) params.set("teamId", nextFilters.teamId);
     return params.toString();
-  }, [filters, pageIndex, canSeeAllTeams, queueView, ownershipView, movementView]);
+  }, [filters, canSeeAllTeams, queueView, ownershipView, movementView]);
 
-  const loadDispatchLoads = useCallback(async (nextFilters = filters, page = pageIndex) => {
+  const loadDispatchLoads = useCallback(async (
+    nextFilters = filters,
+    page = 0,
+    options?: { append?: boolean }
+  ) => {
     if (!canDispatch) return;
     setQueueLoading(true);
     try {
+      const append = options?.append === true;
       const query = buildParams(nextFilters, page);
       const queryParams = new URLSearchParams(query);
       queryParams.set("fieldMode", "base");
       const url = queryParams.toString() ? `/dispatch/shipments?${queryParams.toString()}` : "/dispatch/shipments";
       const data = await apiFetch<{ items: DispatchItem[]; total: number; totalPages: number }>(url);
       enrichmentSignatureRef.current = "";
-      setLoads(
+      const normalizedItems =
         (data.items ?? []).map((item) =>
           isTerminalExecutionStatus(item.status)
             ? {
@@ -1747,10 +1779,21 @@ function DispatchPageContent({
                   : item.riskFlags,
               }
             : item
-        )
-      );
+        );
+      if (append) {
+        setLoads((previous) => {
+          const byId = new Map(previous.map((entry) => [entry.id, entry] as const));
+          for (const nextItem of normalizedItems) byId.set(nextItem.id, nextItem);
+          return Array.from(byId.values());
+        });
+      } else {
+        setLoads(normalizedItems);
+        setPageIndex(0);
+      }
       setTotalPages(data.totalPages ?? 1);
       setTotalCount(data.total ?? 0);
+      setLoadedPageCount(page + 1);
+      setHasMoreRows((data.totalPages ?? 1) > page + 1);
       setDispatchError(null);
       setLastRefreshedAt(new Date().toISOString());
     } catch (error) {
@@ -1759,12 +1802,14 @@ function DispatchPageContent({
       setQueueLoading(false);
       setQueueLoadedOnce(true);
     }
-  }, [canDispatch, buildParams, filters, pageIndex]);
+  }, [canDispatch, buildParams, filters]);
 
   useEffect(() => {
     if (!canDispatch) return;
-    loadDispatchLoads(filters, pageIndex);
-  }, [canDispatch, pageIndex, filters, loadDispatchLoads]);
+    setLoadedPageCount(0);
+    setHasMoreRows(false);
+    void loadDispatchLoads(filters, 0);
+  }, [canDispatch, filters, loadDispatchLoads]);
 
   useEffect(() => {
     if (!canDispatch || !isDispatchGridWorkspace) return;
@@ -3241,7 +3286,7 @@ function DispatchPageContent({
 
   const selectedTripId =
     selectedLoadSummary?.trip?.id ?? selectedLoad?.tripLoads?.[0]?.trip?.id ?? null;
-  const inspectorStickyTop = Math.max(dispatchHeaderOffset + 12, 96);
+  const inspectorStickyTop = 56;
 
   useEffect(() => {
     if (!panelLayout.tripInspector || !selectedTripId || !canDispatch) {
@@ -3270,22 +3315,6 @@ function DispatchPageContent({
       active = false;
     };
   }, [canDispatch, panelLayout.tripInspector, selectedTripId]);
-
-  useEffect(() => {
-    const headerEl = dispatchHeaderRef.current;
-    if (!headerEl) return;
-    const updateOffset = () => {
-      setDispatchHeaderOffset(headerEl.getBoundingClientRect().height);
-    };
-    updateOffset();
-    if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(() => updateOffset());
-      observer.observe(headerEl);
-      return () => observer.disconnect();
-    }
-    window.addEventListener("resize", updateOffset);
-    return () => window.removeEventListener("resize", updateOffset);
-  }, []);
 
   const workbenchAssignment = {
     form: assignForm,
@@ -3498,6 +3527,20 @@ function DispatchPageContent({
   const showInitialQueueLoadingState = queueLoading && !queueLoadedOnce;
   const showQueueEmptyState = !queueLoading && queueLoadedOnce && !dispatchError && gridRows.length === 0;
   const showQueueCanvas = !showInitialQueueLoadingState && !showQueueEmptyState;
+  const loadMoreDispatchRows = useCallback(() => {
+    if (!canDispatch || queueLoading || !hasMoreRows) return;
+    void loadDispatchLoads(filters, loadedPageCount, { append: true });
+  }, [canDispatch, filters, hasMoreRows, loadedPageCount, loadDispatchLoads, queueLoading]);
+  const handleGridViewportScroll = useCallback(
+    (metrics: { scrollTop: number; clientHeight: number; scrollHeight: number }) => {
+      if (!hasMoreRows || queueLoading) return;
+      const remaining = metrics.scrollHeight - (metrics.scrollTop + metrics.clientHeight);
+      if (remaining <= GRID_SCROLL_LOAD_THRESHOLD_PX) {
+        loadMoreDispatchRows();
+      }
+    },
+    [hasMoreRows, loadMoreDispatchRows, queueLoading]
+  );
   const dispatchGridTemplateColumns = [
     ...(showGridExceptionsRail && panelLayout.exceptionsDock === "left" ? ["minmax(220px, 280px)"] : []),
     "minmax(0, 1fr)",
@@ -3779,7 +3822,7 @@ function DispatchPageContent({
       <DispatchLayerActivityBridge onDrawerStateChange={setActivityDrawerOpen} />
       <div
         ref={dispatchHeaderRef}
-        className={`relative isolate sticky top-0 ${dispatchRibbonZClass} -mx-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-2 py-1 backdrop-blur`}
+        className={`relative isolate sticky top-0 ${dispatchRibbonZClass} -mx-3 -mt-2 rounded-[var(--radius-card)] border-b border-[color:var(--color-divider)] bg-[color:var(--color-bg)]/95 px-1.5 py-0.5 backdrop-blur sm:-mx-4 lg:-mx-8`}
       >
         <div className="flex items-center gap-1.5">
           <div className="mr-1 hidden text-sm font-semibold text-ink md:block">Dispatch</div>
@@ -4013,6 +4056,15 @@ function DispatchPageContent({
                 >
                   {queueLoading ? "Refreshing..." : "Refresh"}
                 </Button>
+                <div className="mt-1 space-y-1 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-1.5 text-[11px] text-[color:var(--color-text-muted)]">
+                  <div>{formatDispatchRefreshTime(lastRefreshedAt)}</div>
+                  {activeFilterCount > 0 ? <div>Active filters: {activeFilterCount}</div> : null}
+                  {queueView === "active" && deliveredHandoffPendingCount > 0 ? (
+                    <div className="text-[color:var(--color-warning)]">
+                      Delivered pending: {deliveredHandoffPendingCount}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ) : null}
             {activeRibbonMenu === "modes" ? (
@@ -4094,6 +4146,35 @@ function DispatchPageContent({
                     Clear
                   </Button>
                 ) : null}
+                <div className="mt-1 rounded-[var(--radius-control)] border border-[color:var(--color-divider)] bg-[color:var(--color-bg-muted)] px-2 py-1.5 text-[11px] text-[color:var(--color-text-muted)]">
+                  Shortcuts: <span className="font-medium">A</span> assign · <span className="font-medium">M</span> message ·{" "}
+                  <span className="font-medium">S</span> share
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                    In transit {dispatchSignals.inTransitCount}
+                  </Badge>
+                  <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                    At risk {dispatchSignals.atRiskCount}
+                  </Badge>
+                  <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                    Tracking {dispatchSignals.trackingContinuity}%
+                  </Badge>
+                  <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
+                    ETA {dispatchSignals.etaConfidence}
+                  </Badge>
+                  {syncHealth ? (
+                    <Badge
+                      className={
+                        syncSignals.status === "CONNECTED"
+                          ? "bg-[color:var(--color-success-soft)] text-[color:var(--color-success)]"
+                          : "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
+                      }
+                    >
+                      Samsara {syncSignals.status === "CONNECTED" ? "connected" : "disconnected"}
+                    </Badge>
+                  ) : null}
+                </div>
               </div>
             ) : null}
             {activeRibbonMenu === "loads" && isDispatchGridWorkspace ? (
@@ -4637,141 +4718,9 @@ function DispatchPageContent({
           </div>
         ) : null}
 
-        <div className="mt-0.5 flex items-center gap-1.5 overflow-x-auto whitespace-nowrap pb-0.5 text-[11px] text-[color:var(--color-text-muted)]">
-          <span>{formatDispatchRefreshTime(lastRefreshedAt)}</span>
-          {activeFilterCount > 0 ? (
-            <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
-              Filters {activeFilterCount}
-            </Badge>
-          ) : null}
-          <span className="hidden text-[color:var(--color-text-subtle)] xl:inline">
-            · Shortcuts: <span className="font-medium text-[color:var(--color-text-muted)]">A</span> assign ·{" "}
-            <span className="font-medium text-[color:var(--color-text-muted)]">M</span> message ·{" "}
-            <span className="font-medium text-[color:var(--color-text-muted)]">S</span> share
-          </span>
-          {isDispatchGridWorkspace ? (
-            <>
-              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
-                In transit {dispatchSignals.inTransitCount}
-              </Badge>
-              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
-                At risk {dispatchSignals.atRiskCount}
-              </Badge>
-              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
-                Tracking {dispatchSignals.trackingContinuity}%
-              </Badge>
-              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
-                ETA {dispatchSignals.etaConfidence}
-              </Badge>
-            </>
-          ) : null}
-          {syncHealth ? (
-            <>
-              <Badge
-                className={
-                  syncSignals.status === "CONNECTED"
-                    ? "bg-[color:var(--color-success-soft)] text-[color:var(--color-success)]"
-                    : "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
-                }
-              >
-                Samsara {syncSignals.status === "CONNECTED" ? "connected" : "disconnected"}
-              </Badge>
-              <Badge
-                className={
-                  syncSignals.telemetryState === "fresh"
-                    ? "bg-[color:var(--color-success-soft)] text-[color:var(--color-success)]"
-                    : syncSignals.telemetryState === "stale"
-                      ? "bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]"
-                      : "bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]"
-                }
-              >
-                Telematics {syncSignals.telemetryState}
-                {syncSignals.telemetryState === "stale" ? ` · ${syncSignals.staleInTransitLoads} stale` : ""}
-              </Badge>
-              <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">
-                Mappings {syncSignals.mappedTrucks}/{syncSignals.totalActiveTrucks} ({syncSignals.coveragePct}%)
-              </Badge>
-              {syncSignals.webhookRejected > 0 ? (
-                <Badge className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">
-                  Webhook rejected {syncSignals.webhookRejected}
-                </Badge>
-              ) : null}
-              {syncSignals.lastPingAt ? (
-                <span className="text-[10px] text-[color:var(--color-text-subtle)]">
-                  Last ping {formatDateTime24(new Date(syncSignals.lastPingAt), "-")}
-                </span>
-              ) : null}
-            </>
-          ) : null}
-          {queueView === "active" && deliveredHandoffPendingCount > 0 ? (
-            <Badge className="bg-[color:var(--color-warning-soft)] text-[color:var(--color-warning)]">
-              Delivered pending {deliveredHandoffPendingCount}
-            </Badge>
-          ) : null}
-        </div>
-        {isDispatchGridWorkspace && splitFocusMode ? (
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 border-t border-[color:var(--color-divider)] pt-1">
-            <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">Split focus</Badge>
-            <Button
-              size="sm"
-              variant={splitPrimaryPane === "grid" ? "secondary" : "ghost"}
-              className="h-7 px-2"
-              onClick={() => setSplitPrimaryPane("grid")}
-            >
-              Grid
-            </Button>
-            <Button
-              size="sm"
-              variant={splitPrimaryPane === "map" ? "secondary" : "ghost"}
-              className="h-7 px-2"
-              onClick={() => setSplitPrimaryPane("map")}
-            >
-              Map
-            </Button>
-            <Button
-              size="sm"
-              variant={splitPrimaryPane === "inspector" ? "secondary" : "ghost"}
-              className="h-7 px-2"
-              onClick={() => setSplitPrimaryPane("inspector")}
-            >
-              Inspector
-            </Button>
-            <Button
-              size="sm"
-              variant={splitSecondaryOpen ? "secondary" : "ghost"}
-              className="h-7 px-2"
-              onClick={toggleSplitPeekPanel}
-            >
-              {splitSecondaryOpen ? "Hide peek" : "Show peek"}
-            </Button>
-            {splitSecondaryOpen ? (
-              <>
-                <Button
-                  size="sm"
-                  variant={splitSecondaryPane === "inspector" ? "secondary" : "ghost"}
-                  className="h-7 px-2"
-                  onClick={() => setSplitSecondaryPane("inspector")}
-                  disabled={splitPrimaryPane === "inspector"}
-                >
-                  Peek inspector
-                </Button>
-                <Button
-                  size="sm"
-                  variant={splitSecondaryPane === "map" ? "secondary" : "ghost"}
-                  className="h-7 px-2"
-                  onClick={() => setSplitSecondaryPane("map")}
-                  disabled={splitPrimaryPane === "map"}
-                >
-                  Peek map
-                </Button>
-              </>
-            ) : null}
-          </div>
-        ) : null}
-
       </div>
       {selectedCount > 0 ? (
-        <div className="mt-2 flex flex-wrap items-end gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-3">
+        <div className="mt-1 flex flex-wrap items-end gap-3 rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] px-3 py-2.5">
           <div className="text-sm font-medium text-ink">{selectedCount} selected</div>
           <FormField label="Bulk status" htmlFor="bulkStatus">
             <Select id="bulkStatus" value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value as BulkStatus)}>
@@ -5084,10 +5033,10 @@ function DispatchPageContent({
         </div>
       ) : null}
       {showQueueCanvas ? (
-        <div className="mt-2 space-y-3">
+        <div className="-mx-1 mt-1 space-y-2 sm:-mx-2 lg:-mx-4">
           {showMapPrimary ? mapPreviewPanel : null}
           {showGridPrimary ? (
-            <div className="mt-1" style={{ display: "grid", gap: "12px", gridTemplateColumns: dispatchGridTemplateColumns }}>
+            <div className="mt-0.5" style={{ display: "grid", gap: "8px", gridTemplateColumns: dispatchGridTemplateColumns }}>
         {showGridExceptionsRail && panelLayout.exceptionsDock === "left" ? (
           <RefinePanel className="max-h-[62vh] overflow-auto">
             <SectionHeader
@@ -5184,7 +5133,7 @@ function DispatchPageContent({
             density={gridDensity}
             loadingCellKey={cellSavingKey}
             readOnly={isQueueReadOnly}
-            onSelectLoad={selectLoad}
+            onSelectLoad={handleGridSelectLoad}
             onToggleRowSelection={toggleRowSelection}
             onToggleAllRows={toggleAllRows}
             onFiltersChange={(nextFilters) => {
@@ -5201,6 +5150,7 @@ function DispatchPageContent({
             onQuickUploadPod={openUploadPodForLoad}
             externalCommand={gridCommand}
             hideCommandMenus
+            onViewportScroll={handleGridViewportScroll}
           />
         </div>
 
@@ -5324,8 +5274,8 @@ function DispatchPageContent({
       ) : null}
       {showQueueCanvas && splitFocusMode && splitSecondaryOpen && splitSecondaryContent ? (
         <div
-          className={`fixed right-3 ${splitPeekZClass} w-[min(540px,calc(100vw-1.5rem))]`}
-          style={{ top: `${Math.max(dispatchHeaderOffset + 8, 80)}px`, maxHeight: "calc(100dvh - 96px)" }}
+          className={`fixed inset-y-0 right-3 !mt-0 ${splitPeekZClass} w-[min(540px,calc(100vw-1.5rem))]`}
+          style={{ top: 0, bottom: 0, maxHeight: "100dvh" }}
         >
           <div className="h-full overflow-hidden rounded-[var(--radius-card)] border border-[color:var(--color-divider)] bg-[color:var(--color-surface)] shadow-[0_18px_45px_rgba(0,0,0,0.22)]">
             <div className="flex items-center justify-between border-b border-[color:var(--color-divider)] px-3 py-2">
@@ -5342,7 +5292,7 @@ function DispatchPageContent({
                 Close peek
               </Button>
             </div>
-            <div className="max-h-[calc(100dvh-140px)] overflow-auto p-3">{splitSecondaryContent}</div>
+            <div className="max-h-[calc(100dvh-42px)] overflow-auto p-3">{splitSecondaryContent}</div>
           </div>
         </div>
       ) : null}
@@ -5350,21 +5300,10 @@ function DispatchPageContent({
       {showQueueCanvas && showGridPrimary ? (
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs text-[color:var(--color-text-muted)]">
-          Page {pageIndex + 1} of {totalPages} · {queueScopedLoads.length} shown ({totalCount} total)
+          {queueScopedLoads.length} shown ({totalCount} total)
+          {hasMoreRows ? " · Scroll down to load more" : " · End of results"}
         </div>
-        <div className="flex gap-2">
-          <Button size="sm" variant="secondary" onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))} disabled={pageIndex === 0}>
-            Prev
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setPageIndex((prev) => Math.min(totalPages - 1, prev + 1))}
-            disabled={pageIndex >= totalPages - 1}
-          >
-            Next
-          </Button>
-        </div>
+        {queueLoading ? <Badge className="bg-[color:var(--color-surface)] text-[color:var(--color-text-muted)]">Loading rows…</Badge> : null}
       </div>
       ) : null}
 
