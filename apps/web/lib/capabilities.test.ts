@@ -60,6 +60,8 @@ assert.equal(canRoleResumeWorkspace("BILLING", "/dispatch?workspace=loads"), fal
 assert.equal(canRoleResumeWorkspace("BILLING", "/finance?tab=receivables"), true);
 assert.equal(canRoleResumeWorkspace("SAFETY", "/safety"), true);
 assert.equal(canRoleResumeWorkspace("SUPPORT", "/support"), true);
+assert.equal(canRoleResumeWorkspace("DISPATCHER", "/chatbot"), true);
+assert.equal(canRoleResumeWorkspace("DISPATCHER", "/chatbot", { chatbotEnabled: false }), false);
 
 assert.equal(getDefaultDispatchWorkspace({ role: "DISPATCHER", operatingMode: "CARRIER" }), "trips");
 assert.equal(getDefaultDispatchWorkspace({ role: "HEAD_DISPATCHER", operatingMode: "BOTH" }), "trips");

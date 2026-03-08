@@ -11,6 +11,7 @@ import { StatusChip } from "@/components/ui/status-chip";
 import { ToastViewport } from "@/components/ui/toast-viewport";
 import { useUser } from "@/components/auth/user-context";
 import { apiFetch } from "@/lib/api";
+import { isChatbotEnabledForOrgClient } from "@/lib/chatbot-access";
 import { canRoleResumeWorkspace, getRoleCapabilities, getRoleLastWorkspaceStorageKey } from "@/lib/capabilities";
 import { getVisibleSections } from "@/lib/navigation";
 import type { NavSection } from "@/lib/navigation";
@@ -75,6 +76,7 @@ const WORKSPACE_TRACKABLE_PREFIXES = [
   "/dispatch",
   "/loads",
   "/trips",
+  "/chatbot",
   "/teams",
   "/finance",
   "/safety",
@@ -180,6 +182,15 @@ function NavIcon({ href, active }: { href: string; active: boolean }) {
     return (
       <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
         <path d="M4 17.5h16M6.5 17.5v-7m5 7v-11m5 11v-5" />
+      </svg>
+    );
+  }
+  if (href === "/chatbot") {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className={iconClass} fill="none" stroke="currentColor" strokeWidth="1.8">
+        <rect x="4.5" y="5.5" width="15" height="12" rx="3" />
+        <path d="M9 10.5h6M9 13.5h4" />
+        <path d="M10 17.5v2l2-1.4 2 1.4v-2" />
       </svg>
     );
   }
@@ -442,7 +453,7 @@ function AppShellInner({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const hoverOpenTimerRef = useRef<number | null>(null);
   const hoverCloseTimerRef = useRef<number | null>(null);
-  const { user, org } = useUser();
+  const { user, org, workflow } = useUser();
   const [sidebarPinned, setSidebarPinned] = useState(() => {
     if (sidebarPinnedCache !== null) return sidebarPinnedCache;
     if (typeof window === "undefined") return false;
@@ -473,10 +484,11 @@ function AppShellInner({
   );
   const canUseGlobalSearch = capabilities.canUseGlobalSearch;
   const canUseActivity = capabilities.canUseActivity;
+  const chatbotEnabled = isChatbotEnabledForOrgClient(org?.id, workflow.chatbotEnabled);
   const desktopSidebarExpanded = sidebarPinned || sidebarPeekOpen;
   const sections = useMemo(
-    () => getVisibleSections(user?.role, { showTeamsOps }),
-    [user?.role, showTeamsOps]
+    () => getVisibleSections(user?.role, { showTeamsOps, chatbotEnabled }),
+    [user?.role, showTeamsOps, chatbotEnabled]
   );
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const groupedSearchResults = useMemo(() => {
@@ -599,9 +611,9 @@ function AppShellInner({
       (prefix) => fullPath === prefix || fullPath.startsWith(`${prefix}/`) || fullPath.startsWith(`${prefix}?`)
     );
     if (!isTrackable) return;
-    if (!canRoleResumeWorkspace(user?.role, fullPath)) return;
+    if (!canRoleResumeWorkspace(user?.role, fullPath, { chatbotEnabled })) return;
     window.localStorage.setItem(storageKey, fullPath);
-  }, [pathname, searchParams, user?.role]);
+  }, [pathname, searchParams, user?.role, chatbotEnabled]);
 
   useEffect(() => {
     if (!user) {

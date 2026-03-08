@@ -9,6 +9,7 @@ const NAV_ITEMS = {
   today: { href: "/today", label: "Activity" },
   dashboard: { href: "/dashboard", label: "Task Inbox" },
   profile: { href: "/profile", label: "Profile" },
+  chatbot: { href: "/chatbot", label: "Chatbot" },
   dispatch: { href: "/dispatch", label: "Dispatch" },
   teams: { href: "/teams", label: "Teams (Ops)" },
   finance: { href: "/finance", label: "Finance" },
@@ -25,27 +26,27 @@ type RoleNavPlan = { primary: NavItemKey[]; more: NavItemKey[] };
 const ROLE_NAV_PLANS: Record<CanonicalRole, RoleNavPlan> = {
   ADMIN: {
     primary: ["today", "dispatch", "finance"],
-    more: ["safety", "support", "teams", "audit", "admin", "dashboard", "profile"],
+    more: ["chatbot", "safety", "support", "teams", "audit", "admin", "dashboard", "profile"],
   },
   HEAD_DISPATCHER: {
     primary: ["dispatch"],
-    more: ["finance", "teams", "today", "dashboard", "profile"],
+    more: ["chatbot", "finance", "teams", "today", "dashboard", "profile"],
   },
   DISPATCHER: {
     primary: ["dispatch"],
-    more: ["finance", "today", "dashboard", "profile"],
+    more: ["chatbot", "finance", "today", "dashboard", "profile"],
   },
   BILLING: {
     primary: ["finance"],
-    more: ["today", "dashboard", "profile"],
+    more: ["chatbot", "today", "dashboard", "profile"],
   },
   SAFETY: {
     primary: ["safety"],
-    more: ["today", "dashboard", "profile"],
+    more: ["chatbot", "today", "dashboard", "profile"],
   },
   SUPPORT: {
     primary: ["support"],
-    more: ["today", "dashboard", "profile"],
+    more: ["chatbot", "today", "dashboard", "profile"],
   },
   DRIVER: {
     primary: ["driver"],
@@ -58,7 +59,14 @@ const DEFAULT_PLAN: RoleNavPlan = {
   more: ["profile"],
 };
 
-function isHrefAllowedByCapability(href: string, capabilities: ReturnType<typeof getRoleCapabilities>) {
+function isHrefAllowedByCapability(
+  href: string,
+  capabilities: ReturnType<typeof getRoleCapabilities>,
+  options?: { chatbotEnabled?: boolean }
+) {
+  if (href.startsWith("/chatbot")) {
+    return Boolean(capabilities.canonicalRole) && (options?.chatbotEnabled ?? true);
+  }
   if (href.startsWith("/dispatch") || href.startsWith("/loads") || href.startsWith("/trips") || href.startsWith("/teams")) {
     return capabilities.canAccessDispatch;
   }
@@ -75,7 +83,7 @@ function isHrefAllowedByCapability(href: string, capabilities: ReturnType<typeof
 function buildRoleItems(
   keys: NavItemKey[],
   capabilities: ReturnType<typeof getRoleCapabilities>,
-  options?: { showTeamsOps?: boolean }
+  options?: { showTeamsOps?: boolean; chatbotEnabled?: boolean }
 ) {
   const seen = new Set<string>();
   const items = keys
@@ -83,7 +91,7 @@ function buildRoleItems(
     .filter((item) => {
       if (!item) return false;
       if (item.href === "/teams" && !options?.showTeamsOps) return false;
-      if (!isHrefAllowedByCapability(item.href, capabilities)) return false;
+      if (!isHrefAllowedByCapability(item.href, capabilities, options)) return false;
       if (seen.has(item.href)) return false;
       seen.add(item.href);
       return true;
@@ -93,7 +101,7 @@ function buildRoleItems(
 
 export const driverSections: NavSection[] = [{ title: "Driver", items: [NAV_ITEMS.driver] }];
 
-export function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean }) {
+export function getVisibleSections(role?: string, options?: { showTeamsOps?: boolean; chatbotEnabled?: boolean }) {
   const capabilities = getRoleCapabilities(role);
   const canonicalRole = capabilities.canonicalRole;
   if (canonicalRole === "DRIVER") return driverSections;

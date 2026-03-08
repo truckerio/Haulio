@@ -295,7 +295,11 @@ export function getRoleLastWorkspaceStorageKey(role?: string | null) {
   return `${LAST_WORKSPACE_STORAGE_KEY_PREFIX}${canonicalRole}`;
 }
 
-export function canRoleResumeWorkspace(role: string | null | undefined, href: string) {
+export function canRoleResumeWorkspace(
+  role: string | null | undefined,
+  href: string,
+  options?: { chatbotEnabled?: boolean }
+) {
   const capabilities = getRoleCapabilities(role);
   if (capabilities.canonicalRole === "DRIVER") return false;
   if (!href || !href.startsWith("/")) return false;
@@ -310,6 +314,7 @@ export function canRoleResumeWorkspace(role: string | null | undefined, href: st
   if (pathname.startsWith("/safety")) return capabilities.canAccessSafety;
   if (pathname.startsWith("/support")) return capabilities.canAccessSupport;
   if (pathname.startsWith("/driver")) return capabilities.canAccessDriver;
+  if (pathname.startsWith("/chatbot")) return Boolean(capabilities.canonicalRole) && (options?.chatbotEnabled ?? true);
   if (pathname.startsWith("/today") || pathname.startsWith("/dashboard") || pathname.startsWith("/profile") || pathname.startsWith("/admin")) {
     return true;
   }

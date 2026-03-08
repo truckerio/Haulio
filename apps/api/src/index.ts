@@ -358,6 +358,19 @@ const SHIPMENT_WORKFLOW_ROLES = new Set(
     .map((value) => value.trim().toUpperCase())
     .filter(Boolean)
 );
+const CHATBOT_MODULE_ENABLED = String(process.env.CHATBOT_MODULE_ENABLED ?? "false") !== "false";
+const CHATBOT_ALLOWED_ORGS = new Set(
+  String(process.env.CHATBOT_ALLOWED_ORGS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
+const CHATBOT_ALLOWED_ROLES = new Set(
+  String(process.env.CHATBOT_ALLOWED_ROLES ?? "ADMIN,HEAD_DISPATCHER,DISPATCHER,BILLING,SAFETY,SUPPORT")
+    .split(",")
+    .map((value) => value.trim().toUpperCase())
+    .filter(Boolean)
+);
 
 const APPEARANCE_DEFAULTS = {
   theme: AppearanceTheme.SYSTEM,
@@ -733,6 +746,13 @@ function isShipmentWorkflowEnabledForUser(params: { orgId: string; role?: string
   if (SHIPMENT_WORKFLOW_ORGS.size > 0 && !SHIPMENT_WORKFLOW_ORGS.has(params.orgId)) return false;
   if (SHIPMENT_WORKFLOW_ROLES.size === 0) return true;
   return SHIPMENT_WORKFLOW_ROLES.has(String(params.role ?? "").toUpperCase());
+}
+
+function isChatbotEnabledForUser(params: { orgId: string; role?: string | null }) {
+  if (!CHATBOT_MODULE_ENABLED) return false;
+  if (CHATBOT_ALLOWED_ORGS.size > 0 && !CHATBOT_ALLOWED_ORGS.has(params.orgId)) return false;
+  if (CHATBOT_ALLOWED_ROLES.size === 0) return true;
+  return CHATBOT_ALLOWED_ROLES.has(String(params.role ?? "").toUpperCase());
 }
 
 async function maybeLogLoadKernelShadow(params: {
@@ -5435,6 +5455,10 @@ app.get("/auth/me", requireAuth, requireRole("ADMIN", "HEAD_DISPATCHER", "DISPAT
       workflow: {
         shipmentFacadeEnabled: true,
         shipmentRolloutEnabled: isShipmentWorkflowEnabledForUser({
+          orgId: req.user!.orgId,
+          role: req.user!.role,
+        }),
+        chatbotEnabled: isChatbotEnabledForUser({
           orgId: req.user!.orgId,
           role: req.user!.role,
         }),

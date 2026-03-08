@@ -16,9 +16,16 @@ export type CurrentUser = {
   mfaEnforced?: boolean;
 };
 
+export type UserWorkflow = {
+  shipmentFacadeEnabled?: boolean;
+  shipmentRolloutEnabled?: boolean;
+  chatbotEnabled?: boolean;
+};
+
 type UserContextValue = {
   user: CurrentUser | null;
   org: { id: string; name: string; companyDisplayName?: string | null; operatingMode?: string | null } | null;
+  workflow: UserWorkflow;
   loading: boolean;
   error: string | null;
   capabilities: ReturnType<typeof getRoleCapabilities>;
@@ -31,6 +38,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [org, setOrg] = useState<{ id: string; name: string; companyDisplayName?: string | null; operatingMode?: string | null } | null>(null);
+  const [workflow, setWorkflow] = useState<UserWorkflow>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,13 +50,16 @@ export function UserProvider({ children }: { children: ReactNode }) {
       const data = await apiFetch<{
         user: CurrentUser;
         org?: { id: string; name: string; companyDisplayName?: string | null; operatingMode?: string | null } | null;
+        workflow?: UserWorkflow;
       }>("/auth/me", { skipAuthRedirect: true });
       setUser(data.user ?? null);
       setOrg(data.org ?? null);
+      setWorkflow(data.workflow ?? {});
       setError(null);
     } catch (err) {
       setUser(null);
       setOrg(null);
+      setWorkflow({});
       setError((err as Error).message || null);
     } finally {
       setLoading(false);
@@ -78,8 +89,8 @@ export function UserProvider({ children }: { children: ReactNode }) {
 
   const capabilities = useMemo(() => getRoleCapabilities(user?.role), [user?.role]);
   const value = useMemo(
-    () => ({ user, org, loading, error, capabilities, refresh }),
-    [user, org, loading, error, capabilities, refresh]
+    () => ({ user, org, workflow, loading, error, capabilities, refresh }),
+    [user, org, workflow, loading, error, capabilities, refresh]
   );
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
@@ -90,6 +101,7 @@ export function useUser() {
     useContext(UserContext) ?? {
       user: null,
       org: null,
+      workflow: {},
       loading: true,
       error: null,
       capabilities: getRoleCapabilities(null),
